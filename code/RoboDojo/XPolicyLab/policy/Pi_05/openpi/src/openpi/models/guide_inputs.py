@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+from flax import struct
+import jax
+import jax.numpy as jnp
+
+from openpi.models import model as _model
+
+
+@struct.dataclass
+class GuideInput:
+    """Model-facing Behavior Document tensors for one grouped Guide bank."""
+
+    images: jax.Array
+    image_mask: jax.Array
+
+    text_tokens: jax.Array
+    text_mask: jax.Array
+    unit_mask: jax.Array
+
+    before_slot: jax.Array
+    after_slot: jax.Array
+
+
+@struct.dataclass
+class GuideConditionedBatch:
+    """Grouped Guide Batch before flattening into the stock Pi0 path."""
+
+    observation: _model.Observation
+    actions: _model.Actions
+    guide: GuideInput
+
+
+def _format_tree_path(path) -> str:
+    """Format a JAX pytree path for validation errors."""
+
+    parts = []
+
+    for entry in path:
+        if hasattr(entry, "name"):
+            parts.append(f".{entry.name}")
+        elif hasattr(entry, "key"):
+            parts.append(f"[{entry.key!r}]")
+        elif hasattr(entry, "idx"):
+            parts.append(f"[{entry.idx}]")
+
+    return "".join(parts) or "<root>"
+
+
+def _validate_tree_leading_dims(
+    tree,
+    expected_leading_dims: tuple[int, ...],
+    *,
+    name: str,
+) -> None:
+    """Validate leading dimensions for every non-None pytree leaf."""
+
+    leaves_with_paths, _ = jax.tree_util.tree_flatten_with_path(tree)
+
+    for path, leaf in leaves_with_paths:
+        if leaf is None:
+            continue
+
+        if not hasattr(leaf, "shape"):
+            raise ValueError(f"{name}{_format_tree_path(path)} must be an array leaf")
+
+        shape = tuple(leaf.shape)
+        expected_rank = len(expected_leading_dims)
+
+        if len(shape) < expected_rank or shape[:expected_rank] != expected_leading_dims:
+            raise ValueError(
+                f"{name}{_format_tree_path(path)} must have leading dimensions {expected_leading_dims}, got {shape}"
+            )
+
+
+def validate_guide_conditioned_batch(
+    batch: GuideConditionedBatch,
+) -> tuple[int, int]:
+    """Validate grouped Guide/control shapes and return G and Q."""
+
+    if batch.actions.ndim != 4:
+        raise ValueError(f"actions must have shape [G, Q, AH, AD], got {batch.actions.shape}")
+
+    groups, queries = batch.actions.shape[:2]
+
+    if groups <= 0:
+        raise ValueError(f"group dimension G must be positive, got {groups}")
+
+    if queries <= 0:
+        raise ValueError(f"query dimension Q must be positive, got {queries}")
+
+    _validate_tree_leading_dims(
+        batch.observation,
+        (groups, queries),
+        name="observation",
+    )
+
+    _validate_tree_leading_dims(
+        batch.guide,
+        (groups,),
+        name="guide",
+    )
+
+    return groups, queries
+
+
+def validate_guide_conditioned_observation(
+    observation: _model.Observation,
+    guide: GuideInput,
+) -> tuple[int, int]:
+    """Validate grouped Guide/inference inputs and return G and Q."""
+
+    if observation.state.ndim < 3:
+        raise ValueError(f"observation.state must have shape [G, Q, S], got {observation.state.shape}")
+
+    groups, queries = observation.state.shape[:2]
+
+    if groups <= 0:
+        raise ValueError(f"group dimension G must be positive, got {groups}")
+
+    if queries <= 0:
+        raise ValueError(f"query dimension Q must be positive, got {queries}")
+
+    _validate_tree_leading_dims(
+        observation,
+        (groups, queries),
+        name="observation",
+    )
+
+    _validate_tree_leading_dims(
+        guide,
+        (groups,),
+        name="guide",
+    )
+
+    return groups, queries
+
+
+def _flatten_group_query(value: jax.Array) -> jax.Array:
+    """Flatten [G, Q, ...] into [G * Q, ...] in group-major order."""
+    return value.reshape((value.shape[0] * value.shape[1], *value.shape[2:]))
+
+
+def flatten_grouped_observation(
+    observation: _model.Observation,
+) -> _model.Observation:
+    """Flatten [G, Q, ...] observation leaves into [G * Q, ...]."""
+
+    return jax.tree_util.tree_map(_flatten_group_query, observation)
+
+
+def flatten_grouped_control(
+    observation: _model.Observation,
+    actions: _model.Actions,
+) -> tuple[_model.Observation, _model.Actions]:
+    """Flatten grouped control inputs before calling the stock Pi0 path."""
+
+    flat_observation = flatten_grouped_observation(observation)
+    flat_actions = _flatten_group_query(actions)
+    return flat_observation, flat_actions
+
+
+def broadcast_guide_memory(
+    guide_memory: jax.Array,
+    *,
+    queries_per_guide: int,
+) -> jax.Array:
+    """Broadcast Guide tokens [G, S, D] or masks [G, S] along Q."""
+
+    if guide_memory.ndim not in (2, 3):
+        raise ValueError(f"guide_memory must have rank 2 [G, S] or rank 3 [G, S, D], got shape {guide_memory.shape}")
+
+    if queries_per_guide <= 0:
+        raise ValueError(f"queries_per_guide must be positive, got {queries_per_guide}")
+
+    return jnp.repeat(guide_memory, queries_per_guide, axis=0)

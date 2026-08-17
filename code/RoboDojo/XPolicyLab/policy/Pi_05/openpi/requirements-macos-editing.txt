@@ -1,0 +1,54 @@
+# macOS Apple Silicon editing environment for OpenPI.
+#
+# This file intentionally uses CPU JAX. It is separate from pyproject.toml so
+# the Linux CUDA training environment and uv.lock remain unchanged.
+
+augmax>=0.3.4
+beartype==0.19.0
+chex==0.1.89
+dm-tree>=0.1.8
+einops>=0.8.0
+equinox>=0.11.8
+filelock>=3.16.1
+flatbuffers>=24.3.25
+flax==0.10.2
+fsspec[gcs]==2025.3.0
+gcsfs==2025.3.0
+imageio>=2.36.1
+jax==0.5.3
+jaxlib==0.5.3
+jaxtyping==0.2.36
+ml_collections==1.0.0
+numpy>=1.22.4,<2.0.0
+numpydantic==1.6.9
+opencv-python==4.11.0.86
+orbax-checkpoint==0.11.13
+pillow>=11.0.0
+polars>=1.30.0
+rich>=14.0.0
+safetensors
+sentencepiece>=0.2.0
+tree==0.2.4
+torch==2.10.0
+torchcodec==0.10.0
+torchvision==0.25.0
+tqdm-loggable>=0.2
+transformers==4.53.2
+treescope>=0.1.7
+tyro>=0.9.5
+typing-extensions>=4.12.2
+wandb>=0.19.1
+websockets==15.0.1
+
+# The editor only needs the LeRobot module namespace for stock imports. Install
+# this package separately with --no-deps because lerobot 0.4.4 pulls a
+# rerun-sdk release that declares numpy>=2, while OpenPI intentionally pins
+# numpy<2 for its CPU-JAX environment:
+# uv pip install --python .venv/bin/python --no-deps lerobot==0.4.4
+
+# Editing and local validation tools.
+ipykernel>=6.29.5
+pre-commit>=4.0.1
+pytest>=8.3.4
+pynvml>=12.0.0
+ruff>=0.8.6
