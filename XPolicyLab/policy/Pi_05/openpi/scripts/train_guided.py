@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import importlib
+import logging
+from pathlib import Path
+from typing import Any
+
+import flax.nnx as nnx
+import jax
+import numpy as np
+
+from openpi.models.guide_inputs import GuideConditionedBatch
+from openpi.models.guide_inputs import validate_guide_conditioned_batch
+from openpi.models.guide_pi0 import GuidePi0
+from openpi.models.guide_pi0_config import GuidePi0Config
+from openpi.training.guide_train_config import GuidedTrainRunConfig
+from openpi.training.guide_train_config import resolve_guided_train_config
+from openpi.training.guide_train_sharding import make_guided_batch_sharding
+from openpi.training.guide_train_sharding import put_guided_batch
+from openpi.training.guide_train_step import guided_train_step
+from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _load_native_config(name: str) -> Any:
+    return importlib.import_module("openpi.training.config").get_config(name)
+
+
+def _load_checkpoints() -> Any:
+    return importlib.import_module("openpi.training.checkpoints")
+
+
+def _validate_runtime_config(run_config: GuidedTrainRunConfig, resolved_config: Any) -> None:
+    if jax.process_count() != 1:
+        raise ValueError("M5 guided training currently requires jax.process_count() == 1")
+    if not isinstance(resolved_config.model, GuidePi0Config):
+        raise ValueError("resolved guided training config must use GuidePi0Config")
+    if not resolved_config.model.pi05:
+        raise ValueError("resolved guided training config must use GuidePi0 Pi05")
+    if resolved_config.batch_size != run_config.guided_data.batch_size:
+        raise ValueError(
+            "resolved TrainConfig.batch_size does not match guided_data.batch_size: "
+            f"{resolved_config.batch_size} != {run_config.guided_data.batch_size}"
+        )
+    if resolved_config.num_workers != 0:
+        raise ValueError("guided training requires num_workers=0")
+    if not isinstance(resolved_config.freeze_filter, nnx.Nothing):
+        raise ValueError("M5 guided training requires full dense fine-tuning with freeze_filter=nnx.Nothing()")
+    if run_config.base_params_path.resolve() == run_config.checkpoint_dir.resolve():
+        raise ValueError("base_params_path and guided resume checkpoint_dir must be different")
+
+
+def _require_checkpoint_data_config(data_loader: Any) -> Any:
+    data_config = getattr(data_loader, "data_config", None)
+    if not callable(data_config):
+        raise ValueError(
+            "GuidedDataLoader must provide data_config() before checkpoint save/restore"
+        )
+    try:
+        return data_config()
+    except Exception as exc:
+        raise ValueError("guided checkpoint operation requires a native data_config") from exc
+
+
+def save_guided_state(checkpoint_manager: Any, state: Any, data_loader: Any, step: int) -> Any:
+    """Delegate to stock checkpoint format after validating native assets are available."""
+
+    _require_checkpoint_data_config(data_loader)
+    return _load_checkpoints().save_state(checkpoint_manager, state, data_loader, step)
+
+
+def restore_guided_state(
+    checkpoint_manager: Any,
+    state: Any,
+    data_loader: Any,
+    step: int | None = None,
+) -> Any:
+    """Restore a guided resume checkpoint using the stock checkpoint format."""
+
+    _require_checkpoint_data_config(data_loader)
+    return _load_checkpoints().restore_state(checkpoint_manager, state, data_loader, step)
+
+
+def _binding_log(data_loader: Any) -> list[dict[str, Any]]:
+    binding_index = getattr(data_loader, "binding_index", None)
+    if binding_index is None:
+        return []
+    return [
+        {
+            "query_episode_index": record.query_episode_index,
+            "support_episode_index": record.support_episode_index,
+            "support_document_id": record.support_document_id,
+            "task_index": record.task_index,
+        }
+        for record in binding_index.records
+    ]
+
+
+def _parameter_count(state: Any) -> int:
+    if not hasattr(state, "flat_state"):
+        return 0
+    return sum(int(np.prod(variable.value.shape)) for variable in state.flat_state().values())
+
+
+def _detach_ema_buffers(state: Any) -> Any:
+    """Give donated train state and EMA state distinct device buffers."""
+
+    if state.ema_params is None:
+        return state
+
+    def _copy_leaf(value):
+        return value.copy()
+
+    return dataclasses.replace(
+        state,
+        ema_params=jax.tree.map(_copy_leaf, state.ema_params),
+    )
+
+
+def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
+    """Run the guided loop; real model/data execution belongs on the server."""
+
+    resolved_config = resolve_guided_train_config(run_config)
+    _validate_runtime_config(run_config, resolved_config)
+    native_config = _load_native_config(run_config.native_config_name)
+
+    if resolved_config.fsdp_devices <= 0:
+        raise ValueError("fsdp_devices must be positive")
+
+    checkpoints = _load_checkpoints()
+    checkpoint_manager, resuming = checkpoints.initialize_checkpoint_dir(
+        resolved_config.checkpoint_dir,
+        keep_period=resolved_config.keep_period,
+        overwrite=resolved_config.overwrite,
+        resume=resolved_config.resume,
+    )
+
+    train_script = importlib.import_module("scripts.train")
+    train_script.init_wandb(
+        resolved_config,
+        resuming=resuming,
+        enabled=resolved_config.wandb_enabled,
+    )
+
+    data_module = importlib.import_module("openpi.training.robodojo_guide_data")
+    data_loader = data_module.create_robodojo_guided_data_loader(
+        native_config,
+        run_config.guided_data,
+        num_batches=None,
+    )
+    data_iter = iter(data_loader)
+    first_batch = next(data_iter)
+    if not isinstance(first_batch, GuideConditionedBatch):
+        raise ValueError("guided data loader did not return GuideConditionedBatch")
+    groups, queries = validate_guide_conditioned_batch(first_batch)
+
+    mesh_module = importlib.import_module("openpi.training.sharding")
+    mesh = mesh_module.make_mesh(resolved_config.fsdp_devices)
+    batch_sharding = make_guided_batch_sharding(first_batch, mesh)
+    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+
+    rng = jax.random.key(resolved_config.seed)
+    train_rng, init_rng = jax.random.split(rng)
+    train_state, train_state_sharding = train_script.init_train_state(
+        resolved_config,
+        init_rng,
+        mesh,
+        resume=resuming,
+    )
+    jax.block_until_ready(train_state)
+
+    model = nnx.merge(train_state.model_def, train_state.params)
+    if not isinstance(model, GuidePi0):
+        raise ValueError(f"initialized guided state uses {type(model).__name__}, expected GuidePi0")
+
+    if resuming:
+        train_state = restore_guided_state(checkpoint_manager, train_state, data_loader)
+
+    train_state = _detach_ema_buffers(train_state)
+
+    logger.info(
+        "Initialized GuidePi0: G=%d Q=%d devices=%d parameters=%d base_params_path=%s "
+        "resume_checkpoint_dir=%s bindings=%s metadata=%s",
+        groups,
+        queries,
+        jax.device_count(),
+        _parameter_count(train_state.params),
+        run_config.base_params_path,
+        run_config.checkpoint_dir,
+        _binding_log(data_loader),
+        getattr(data_loader, "host_metadata", {}),
+    )
+
+    ptrain_step = jax.jit(
+        lambda step_rng, state, batch: guided_train_step(resolved_config, step_rng, state, batch),
+        in_shardings=(replicated_sharding, train_state_sharding, batch_sharding),
+        out_shardings=(train_state_sharding, replicated_sharding),
+        donate_argnums=(1,),
+    )
+
+    batch = put_guided_batch(first_batch, batch_sharding)
+    start_step = int(train_state.step)
+
+    for step in range(start_step, resolved_config.num_train_steps):
+        with mesh_module.set_mesh(mesh):
+            train_state, info = ptrain_step(train_rng, train_state, batch)
+
+        if step % resolved_config.log_interval == 0:
+            host_info = {key: float(value) for key, value in jax.device_get(info).items() if key not in {"G", "Q"}}
+            logger.info(
+                "step=%d loss=%.6f grad_norm=%.6f guide_grad_norm=%.6f native_grad_norm=%.6f G=%s Q=%s",
+                step,
+                host_info["loss"],
+                host_info["grad_norm"],
+                host_info["guide_encoder_grad_norm"],
+                host_info["native_backbone_grad_norm"],
+                int(info["G"]),
+                int(info["Q"]),
+            )
+
+        if (step % resolved_config.save_interval == 0 and step > start_step) or step == resolved_config.num_train_steps - 1:
+            save_guided_state(checkpoint_manager, train_state, data_loader, step)
+
+        if step < resolved_config.num_train_steps - 1:
+            batch = put_guided_batch(next(data_iter), batch_sharding)
+
+    checkpoint_manager.wait_until_finished()
+    return train_state
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Train Guide-conditioned Pi05 with the RoboDojo data path.")
+    parser.add_argument("--native-config-name", required=True)
+    parser.add_argument("--base-params-path", type=Path, required=True)
+    parser.add_argument("--repo-id", required=True)
+    parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--dataset-artifact", type=Path, required=True)
+    parser.add_argument("--documents-artifact", type=Path, required=True)
+    parser.add_argument("--pairs-artifact", type=Path, required=True)
+    parser.add_argument("--query-episode-index", type=int, required=True)
+    parser.add_argument("--batch-size", type=int, required=True)
+    parser.add_argument("--max-frames", type=int, required=True)
+    parser.add_argument("--max-units", type=int, required=True)
+    parser.add_argument("--max-text-tokens", type=int, required=True)
+    parser.add_argument("--experiment-name", required=True)
+    parser.add_argument("--checkpoint-dir", type=Path, required=True)
+    parser.add_argument("--num-train-steps", type=int, required=True)
+    parser.add_argument("--log-interval", type=int, default=100)
+    parser.add_argument("--save-interval", type=int, default=1000)
+    parser.add_argument("--fsdp-devices", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--profile", default="actuator-v0")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--wandb-enabled", action="store_true")
+    return parser
+
+
+def _run_from_args(args: argparse.Namespace) -> Any:
+    guided_data = RoboDojoGuidedDataConfig(
+        repo_id=args.repo_id,
+        dataset_root=args.dataset_root,
+        dataset_artifact_path=args.dataset_artifact,
+        documents_artifact_path=args.documents_artifact,
+        pairs_artifact_path=args.pairs_artifact,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        profile=args.profile,
+        max_frames=args.max_frames,
+        max_units=args.max_units,
+        max_text_tokens=args.max_text_tokens,
+        query_episode_indices=(args.query_episode_index,),
+    )
+    run_config = GuidedTrainRunConfig(
+        native_config_name=args.native_config_name,
+        base_params_path=args.base_params_path,
+        guided_data=guided_data,
+        experiment_name=args.experiment_name,
+        checkpoint_dir=args.checkpoint_dir,
+        num_train_steps=args.num_train_steps,
+        log_interval=args.log_interval,
+        save_interval=args.save_interval,
+        fsdp_devices=args.fsdp_devices,
+        overwrite=args.overwrite,
+        resume=args.resume,
+        wandb_enabled=args.wandb_enabled,
+    )
+    return run_guided_training(run_config)
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO)
+    args = _parser().parse_args(argv)
+    _run_from_args(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
