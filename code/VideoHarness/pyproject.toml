@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-harness"
+version = "0.2.0"
+description = "Evidence-grounded behavior-document compiler for the Video Harness project"
+requires-python = ">=3.11"
+dependencies = [
+  "huggingface-hub>=1,<2",
+  "pyarrow>=15",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+providers = [
+  "anthropic>=0.60,<1",
+  "openai>=1.99,<3",
+]
+
+[project.scripts]
+video-harness = "video_harness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
