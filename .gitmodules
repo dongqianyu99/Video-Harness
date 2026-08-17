@@ -1,0 +1,8 @@
+[submodule "code/RoboDojo/third_party/IsaacLab"]
+	path = code/RoboDojo/third_party/IsaacLab
+	url = https://github.com/yuechen0614/IsaacLab.git
+	branch = main
+[submodule "code/RoboDojo/third_party/curobo"]
+	path = code/RoboDojo/third_party/curobo
+	url = https://github.com/yuechen0614/curobo.git
+	branch = isaacsim-warp18
