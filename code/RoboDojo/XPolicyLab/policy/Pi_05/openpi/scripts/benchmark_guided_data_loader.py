@@ -87,6 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-artifact", type=Path, required=True)
     parser.add_argument("--documents-artifact", type=Path, required=True)
     parser.add_argument("--pairs-artifact", type=Path, required=True)
+    parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, required=True)
     parser.add_argument("--guides-per-batch", type=int, required=True)
     parser.add_argument("--num-workers", type=int, default=8)
@@ -128,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
         worker_torch_threads=args.worker_torch_threads,
         guide_cache_entries=args.guide_cache_entries,
         guide_cache_max_bytes=args.guide_cache_max_bytes,
+        split_manifest_path=args.split_manifest,
+        require_all_tasks=True,
     )
     loader = create_robodojo_guided_data_loader(native_config, config)
     report = benchmark_loader(

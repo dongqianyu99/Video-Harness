@@ -91,6 +91,21 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
     assert captured["run_config"].guided_data.query_episode_indices == (37,)
     assert captured["run_config"].base_params_path == tmp_path / "base"
 
+    args.query_episode_index = None
+    args.split_manifest = tmp_path / "training-split.json"
+    _train._run_from_args(args)  # noqa: SLF001
+    formal_data = captured["run_config"].guided_data
+    assert formal_data.query_episode_indices is None
+    assert formal_data.split_manifest_path == args.split_manifest
+    assert formal_data.require_all_tasks
+
+
+def test_argument_entry_rejects_unscoped_training():
+    with pytest.raises(ValueError, match="split-manifest"):
+        _train._run_from_args(  # noqa: SLF001
+            Namespace(query_episode_index=None, split_manifest=None)
+        )
+
 
 def test_runtime_validation_requires_full_dense_guided_config(tmp_path: Path) -> None:
     run_config = _run_config(tmp_path)

@@ -208,6 +208,41 @@ uv run video-harness report \
   --documents "$VH_OUTPUT/documents.mock.jsonl"
 ```
 
+### 7. Create the formal training split
+
+After annotation and quality review, create a separate split directory. The
+support and held-out counts are required decisions rather than hidden defaults.
+Set the two counts only after inspecting annotation coverage; all remaining
+source episodes become train queries:
+
+```bash
+export VH_SPLIT=/path/to/output/video-harness-split-seed0
+export TRAIN_SUPPORTS_PER_TASK=<decide-this-count>
+export HELDOUT_DOCUMENTS_PER_TASK=<decide-this-count>
+
+uv run video-harness make-training-split \
+  --dataset-artifact "$VH_OUTPUT/dataset.json" \
+  --episodes "$VH_OUTPUT/episodes.jsonl" \
+  --documents "$VH_OUTPUT/documents.openai.jsonl" \
+  --output-root "$VH_SPLIT" \
+  --support-documents-per-task "$TRAIN_SUPPORTS_PER_TASK" \
+  --heldout-documents-per-task "$HELDOUT_DOCUMENTS_PER_TASK" \
+  --min-trainable-units 1 \
+  --seed 0
+```
+
+This produces `training-split.json` and `train-pairs.jsonl`. For every task,
+source episodes have exactly one role: train support, train query, held-out
+document, or unused. Held-out document source episodes are excluded from both
+the supervised query frames and the training Guide pool. Every query episode
+is assigned one same-task support document for its entire lifetime. Assignment
+first balances query-episode counts across support documents and then balances
+their frame load; the resulting gap in query counts is at most one.
+
+`pairs.jsonl` from the original build remains a legacy/smoke artifact. Formal
+training must use `training-split.json` together with its derived
+`train-pairs.jsonl`.
+
 ## Generated artifacts
 
 ```text
@@ -217,6 +252,10 @@ uv run video-harness report \
 ├── documents.jsonl
 ├── documents.<provider>.jsonl
 └── pairs.jsonl
+
+<split-output>/
+├── training-split.json
+└── train-pairs.jsonl
 ```
 
 | Artifact | Purpose |
@@ -226,6 +265,8 @@ uv run video-harness report \
 | `documents.jsonl` | Immutable frame references with pending annotation slots |
 | `documents.<provider>.jsonl` | Structured VLM evidence and per-unit provenance |
 | `pairs.jsonl` | Same-task, different-episode support/query binding |
+| `training-split.json` | Role-disjoint train/support/held-out manifest and assignment statistics |
+| `train-pairs.jsonl` | Balanced, episode-static bindings derived from the training split |
 
 All artifacts from one build carry the same `build_id`. Training code must reject
 mismatched build IDs or schema versions.
@@ -257,7 +298,8 @@ export HF_LEROBOT_HOME=/parent/of/RoboDojo_lerobot_v30_video
 export OPENPI_LEROBOT_REPO_ID=RoboDojo_lerobot_v30_video
 ```
 
-Training uses `pairs.jsonl`. Evaluation deliberately uses a separate rule:
+Formal training uses `training-split.json` and `train-pairs.jsonl`. Evaluation
+deliberately uses a separate rule:
 `eval_guidance.load_eval_guidance_catalog()` validates `episodes.jsonl` and
 binds every task to the annotated document whose `source.episode_index` is the
 smallest dataset episode for that task. All layouts and repeats of that task

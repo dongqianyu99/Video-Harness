@@ -88,19 +88,26 @@ def restore_guided_state(
     return _load_checkpoints().restore_state(checkpoint_manager, state, data_loader, step)
 
 
-def _binding_log(data_loader: Any) -> list[dict[str, Any]]:
+def _binding_log(data_loader: Any) -> dict[str, Any]:
     binding_index = getattr(data_loader, "binding_index", None)
     if binding_index is None:
-        return []
-    return [
+        return {"count": 0, "tasks": 0, "support_documents": 0, "examples": []}
+    records = tuple(binding_index.records)
+    examples = [
         {
             "query_episode_index": record.query_episode_index,
             "support_episode_index": record.support_episode_index,
             "support_document_id": record.support_document_id,
             "task_index": record.task_index,
         }
-        for record in binding_index.records
+        for record in records[:10]
     ]
+    return {
+        "count": len(records),
+        "tasks": len({record.task_index for record in records}),
+        "support_documents": len({record.support_document_id for record in records}),
+        "examples": examples,
+    }
 
 
 def _parameter_count(state: Any) -> int:
@@ -249,7 +256,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-artifact", type=Path, required=True)
     parser.add_argument("--documents-artifact", type=Path, required=True)
     parser.add_argument("--pairs-artifact", type=Path, required=True)
-    parser.add_argument("--query-episode-index", type=int, action="append")
+    parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument(
+        "--debug-query-episode-index",
+        "--query-episode-index",
+        dest="query_episode_index",
+        type=int,
+        action="append",
+        help="optional subset of a formal split, or legacy single-query smoke scope",
+    )
     parser.add_argument("--batch-size", type=int, required=True)
     parser.add_argument("--guides-per-batch", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=8)
@@ -286,6 +301,13 @@ def _run_from_args(args: argparse.Namespace) -> Any:
     else:
         query_episode_indices = tuple(raw_query_indices)
 
+    split_manifest = getattr(args, "split_manifest", None)
+    if split_manifest is None and query_episode_indices is None:
+        raise ValueError(
+            "formal training requires --split-manifest; use "
+            "--debug-query-episode-index only for an explicit smoke run"
+        )
+
     guided_data = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
@@ -308,6 +330,8 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         guide_cache_entries=getattr(args, "guide_cache_entries", 2),
         guide_cache_max_bytes=getattr(args, "guide_cache_max_bytes", 256 * 1024 * 1024),
         device_prefetch_size=getattr(args, "device_prefetch_size", 2),
+        split_manifest_path=split_manifest,
+        require_all_tasks=split_manifest is not None,
     )
     run_config = GuidedTrainRunConfig(
         native_config_name=args.native_config_name,

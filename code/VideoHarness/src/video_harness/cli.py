@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import copy
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from .annotations import EvidenceRequest, make_backend
-from .evidence import EVIDENCE_SCHEMA_VERSION, evidence_is_trainable, validate_evidence_record
+from .evidence import (
+    EVIDENCE_SCHEMA_VERSION,
+    evidence_is_trainable,
+    validate_evidence_record,
+)
 from .media import FFmpegFrameLoader
 from .pairing import build_pairs
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
 from .sampling import plan_document, validate_document
+from .training_split import build_training_split, episode_record_from_dict
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -28,9 +33,8 @@ def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
 
 
 def _require_new_or_empty_directory(path: Path) -> None:
-    if path.exists():
-        if not path.is_dir() or any(path.iterdir()):
-            raise FileExistsError(f"Output directory must be new or empty: {path}")
+    if path.exists() and (not path.is_dir() or any(path.iterdir())):
+        raise FileExistsError(f"Output directory must be new or empty: {path}")
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -227,6 +231,45 @@ def _annotate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _make_training_split(args: argparse.Namespace) -> int:
+    _require_new_or_empty_directory(args.output_root)
+    dataset = json.loads(args.dataset_artifact.read_text(encoding="utf-8"))
+    if not isinstance(dataset, dict):
+        raise TypeError("--dataset-artifact must contain one JSON object")
+    build_id = dataset.get("build_id")
+    if not isinstance(build_id, str) or not build_id.strip():
+        raise ValueError("dataset artifact has no valid build_id")
+
+    records = [
+        episode_record_from_dict(value)
+        for value in _read_jsonl(args.episodes)
+    ]
+    documents = _read_jsonl(args.documents)
+    manifest, pairs = build_training_split(
+        records,
+        documents,
+        build_id=build_id,
+        support_documents_per_task=args.support_documents_per_task,
+        heldout_documents_per_task=args.heldout_documents_per_task,
+        query_episodes_per_task=args.query_episodes_per_task,
+        min_trainable_units=args.min_trainable_units,
+        seed=args.seed,
+    )
+    _write_json(args.output_root / "training-split.json", manifest)
+    _write_jsonl(args.output_root / "train-pairs.jsonl", pairs)
+    print(
+        json.dumps(
+            {
+                "split_id": manifest["split_id"],
+                **manifest["totals"],
+                "output_root": str(args.output_root),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _report(args: argparse.Namespace) -> int:
     documents = _read_jsonl(args.documents)
     annotation_status: Counter[str] = Counter()
@@ -395,6 +438,21 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--limit-documents", type=int)
     annotate.add_argument("--limit-units-per-document", type=int)
     annotate.set_defaults(handler=_annotate)
+
+    split = subparsers.add_parser(
+        "make-training-split",
+        help="build a role-disjoint training split and balanced static Guide bindings",
+    )
+    split.add_argument("--dataset-artifact", type=Path, required=True)
+    split.add_argument("--episodes", type=Path, required=True)
+    split.add_argument("--documents", type=Path, required=True)
+    split.add_argument("--output-root", type=Path, required=True)
+    split.add_argument("--support-documents-per-task", type=int, required=True)
+    split.add_argument("--heldout-documents-per-task", type=int, required=True)
+    split.add_argument("--query-episodes-per-task", type=int)
+    split.add_argument("--min-trainable-units", type=int, default=1)
+    split.add_argument("--seed", type=int, default=0)
+    split.set_defaults(handler=_make_training_split)
 
     report = subparsers.add_parser(
         "report", help="validate evidence records and summarize annotation usability"

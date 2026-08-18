@@ -20,6 +20,7 @@ from openpi.training.guide_native_dataset import transform_dataset_preserving_id
 from openpi.training.guide_sampler import GroupedBindingBatchSampler
 from openpi.training.guide_sampler import QueryEpisodeRange
 from openpi.training.guide_sampler import build_binding_to_sample_indices
+from openpi.training.guide_split import load_and_validate_training_split
 from openpi.training.robodojo_guide_resolver import RoboDojoGuideResolverFactory
 from openpi.training.robodojo_guide_resolver import VideoHarnessGuideResolver
 
@@ -49,6 +50,8 @@ class RoboDojoGuidedDataConfig:
     guide_cache_entries: int = 2
     guide_cache_max_bytes: int = 256 * 1024 * 1024
     device_prefetch_size: int = 2
+    split_manifest_path: Path | None = None
+    require_all_tasks: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.repo_id, str) or not self.repo_id.strip():
@@ -61,6 +64,10 @@ class RoboDojoGuidedDataConfig:
         ):
             if not isinstance(getattr(self, name), Path):
                 raise ValueError(f"{name} must be an explicit pathlib.Path")
+        if self.split_manifest_path is not None and not isinstance(
+            self.split_manifest_path, Path
+        ):
+            raise ValueError("split_manifest_path must be pathlib.Path or None")
 
         for name in (
             "batch_size",
@@ -88,6 +95,8 @@ class RoboDojoGuidedDataConfig:
             )
         if not isinstance(self.persistent_workers, bool):
             raise ValueError("persistent_workers must be bool")
+        if not isinstance(self.require_all_tasks, bool):
+            raise ValueError("require_all_tasks must be bool")
         if isinstance(self.worker_timeout_s, bool) or not isinstance(self.worker_timeout_s, (int, float)) or self.worker_timeout_s < 0:
             raise ValueError("worker_timeout_s must be non-negative")
         for name in ("guide_cache_entries", "guide_cache_max_bytes"):
@@ -312,6 +321,12 @@ def create_robodojo_guided_data_loader(
     _require_path(guided_data_config.dataset_artifact_path, name="dataset_artifact_path", directory=False)
     _require_path(guided_data_config.documents_artifact_path, name="documents_artifact_path", directory=False)
     _require_path(guided_data_config.pairs_artifact_path, name="pairs_artifact_path", directory=False)
+    if guided_data_config.split_manifest_path is not None:
+        _require_path(
+            guided_data_config.split_manifest_path,
+            name="split_manifest_path",
+            directory=False,
+        )
 
     native_data_config = native_train_config.data.create(
         native_train_config.assets_dirs,
@@ -348,9 +363,31 @@ def create_robodojo_guided_data_loader(
     episode_records = _read_episode_records(guided_data_config.dataset_root, episode_reader)
     _validate_artifact_dataset_contract(bundle, episode_records)
 
+    validated_split = None
+    if guided_data_config.split_manifest_path is not None:
+        validated_split = load_and_validate_training_split(
+            guided_data_config.split_manifest_path,
+            bundle=bundle,
+            episode_records=episode_records,
+            require_all_tasks=guided_data_config.require_all_tasks,
+        )
+        manifest_queries = set(validated_split.query_episode_indices)
+        if guided_data_config.query_episode_indices is None:
+            query_episode_indices = validated_split.query_episode_indices
+        else:
+            requested = set(guided_data_config.query_episode_indices)
+            missing = sorted(requested - manifest_queries)
+            if missing:
+                raise ValueError(
+                    f"debug query episodes are absent from the training split: {missing}"
+                )
+            query_episode_indices = guided_data_config.query_episode_indices
+    else:
+        query_episode_indices = guided_data_config.query_episode_indices
+
     selected_bindings = _select_bindings(
         bundle,
-        guided_data_config.query_episode_indices,
+        query_episode_indices,
     )
     binding_index = GuideBindingIndex.from_bindings(selected_bindings)
     binding_to_samples = build_binding_to_sample_indices(
@@ -430,6 +467,14 @@ def create_robodojo_guided_data_loader(
         binding_index=binding_index,
         host_metadata={
             "artifact_build_id": getattr(bundle, "build_id", None),
+            "training_split_id": (
+                None if validated_split is None else validated_split.split_id
+            ),
+            "training_split_path": (
+                None
+                if guided_data_config.split_manifest_path is None
+                else str(guided_data_config.split_manifest_path)
+            ),
             "repo_id": guided_data_config.repo_id,
             "guides_per_batch": guided_data_config.guides_per_batch,
             "queries_per_guide": guided_data_config.queries_per_guide,

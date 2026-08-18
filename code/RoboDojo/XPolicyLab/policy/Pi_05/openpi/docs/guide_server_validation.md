@@ -27,6 +27,9 @@ export HF_LEROBOT_HOME=/path/to/lerobot-datasets
 export ROBODOJO_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
 export GUIDE_ARTIFACT_ROOT=/path/to/Guidance-Documents/RoboDojo
 export GUIDE_DOCUMENTS=/path/to/annotated-documents.jsonl
+export GUIDE_SPLIT_ROOT=/path/to/video-harness-split-seed0
+export GUIDE_TRAIN_SPLIT="$GUIDE_SPLIT_ROOT/training-split.json"
+export GUIDE_TRAIN_PAIRS="$GUIDE_SPLIT_ROOT/train-pairs.jsonl"
 export PI05_BASE_PARAMS=/path/to/pi05_base/params
 export ROBODOJO_NORM_ASSET=/path/to/arx_x5_sim
 export OPENPI_DATA_HOME=/path/to/openpi-cache
@@ -34,6 +37,7 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export GUIDE_QUERY_EPISODE=0
 export GUIDE_BATCH_SIZE=1
+export GUIDE_GROUPS_PER_BATCH=1
 export GUIDE_MAX_FRAMES=64
 export GUIDE_MAX_UNITS=32
 export GUIDE_MAX_TEXT_TOKENS=128
@@ -54,6 +58,31 @@ The native RoboDojo config expects the normalization asset at
 `ROBODOJO_NORM_ASSET` there before running, and record its source. On an offline
 server, pre-populate `OPENPI_DATA_HOME` before requesting GPU resources; the
 smoke scripts must not rely on a runtime download.
+
+## Production data path
+
+The real training loader uses a fixed `G guides x Q queries` batch, where
+`batch_size = G * Q`. Query samples remain group-major and every query group
+is bound to one immutable support document for the whole query episode. The
+grouped sampler prefers different tasks and requires distinct support
+documents inside a batch; it does not duplicate query frames to fill an
+incomplete batch.
+
+Each persistent data worker loads its VideoHarness bundle and tokenizer once,
+decodes all unique frames of one Guide with one FFmpeg process, and keeps a
+bounded in-memory LRU of fully materialized Guide tensors. PyTorch worker
+prefetch overlaps native LeRobot/video work with training, while a separate
+JAX queue asynchronously places upcoming grouped batches on device. These are
+performance mechanisms only: they do not cache SigLIP features, change Guide
+bindings, or modify the native Pi0.5 loss.
+
+Start with `G=1`, one worker, and one manifest query episode for correctness. For the
+first throughput run, use `G=2` or `G=4`, at least four workers, and omit
+`--debug-query-episode-index` so that the loader can mix the full task set. Monitor
+host RAM, `/dev/shm`, disk read rate, GPU utilization, and batch wait time.
+The defaults cap each worker's Guide LRU at two entries and 256 MiB; multiply
+that bound by the worker count when planning host memory. Fixed Guide budgets
+remain fail-closed—there is no silent truncation.
 
 ## Gates
 
@@ -137,9 +166,14 @@ uv run python scripts/train_guided.py \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
   --documents-artifact "$GUIDE_DOCUMENTS" \
-  --pairs-artifact "$GUIDE_ARTIFACT_ROOT/pairs.jsonl" \
-  --query-episode-index "$GUIDE_QUERY_EPISODE" \
+  --pairs-artifact "$GUIDE_TRAIN_PAIRS" \
+  --split-manifest "$GUIDE_TRAIN_SPLIT" \
+  --debug-query-episode-index "$GUIDE_QUERY_EPISODE" \
   --batch-size "$GUIDE_BATCH_SIZE" \
+  --guides-per-batch "$GUIDE_GROUPS_PER_BATCH" \
+  --num-workers 1 \
+  --prefetch-factor 2 \
+  --device-prefetch-size 2 \
   --max-frames "$GUIDE_MAX_FRAMES" \
   --max-units "$GUIDE_MAX_UNITS" \
   --max-text-tokens "$GUIDE_MAX_TEXT_TOKENS" \
@@ -150,6 +184,69 @@ uv run python scripts/train_guided.py \
   --save-interval 5 \
   --fsdp-devices 1
 ```
+
+After the single-episode debug passes, the corresponding full-corpus data
+command removes `--debug-query-episode-index` and enables grouped workers, for
+example:
+
+```sh
+uv run python scripts/train_guided.py \
+  --native-config-name pi05_base_aloha_full_sim_arx-x5_seed_0 \
+  --base-params-path "$PI05_BASE_PARAMS" \
+  --repo-id RoboDojo_lerobot_v30_video \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
+  --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
+  --documents-artifact "$GUIDE_DOCUMENTS" \
+  --pairs-artifact "$GUIDE_TRAIN_PAIRS" \
+  --split-manifest "$GUIDE_TRAIN_SPLIT" \
+  --batch-size 16 \
+  --guides-per-batch 4 \
+  --num-workers 8 \
+  --prefetch-factor 2 \
+  --device-prefetch-size 2 \
+  --guide-cache-entries 2 \
+  --guide-cache-max-bytes 268435456 \
+  --max-frames "$GUIDE_MAX_FRAMES" \
+  --max-units "$GUIDE_MAX_UNITS" \
+  --max-text-tokens "$GUIDE_MAX_TEXT_TOKENS" \
+  --experiment-name guided-full-data \
+  --checkpoint-dir /path/to/guided-full-data-checkpoint \
+  --num-train-steps 60000 \
+  --log-interval 100 \
+  --save-interval 10000 \
+  --fsdp-devices 2
+```
+
+The numeric batch/worker values above are a bring-up profile, not a published
+training recommendation. Tune them only after recording batches/s, data-wait
+time, peak host RAM, `/dev/shm` use, GPU memory, and GPU utilization.
+
+Measure the loader independently before spending GPU time:
+
+```sh
+uv run python scripts/benchmark_guided_data_loader.py \
+  --native-config-name pi05_base_aloha_full_sim_arx-x5_seed_0 \
+  --repo-id RoboDojo_lerobot_v30_video \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
+  --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
+  --documents-artifact "$GUIDE_DOCUMENTS" \
+  --pairs-artifact "$GUIDE_TRAIN_PAIRS" \
+  --split-manifest "$GUIDE_TRAIN_SPLIT" \
+  --batch-size 16 \
+  --guides-per-batch 4 \
+  --num-workers 8 \
+  --prefetch-factor 2 \
+  --max-frames "$GUIDE_MAX_FRAMES" \
+  --max-units "$GUIDE_MAX_UNITS" \
+  --max-text-tokens "$GUIDE_MAX_TEXT_TOKENS" \
+  --warmup-batches 8 \
+  --measured-batches 50 \
+  --output /path/to/logs/guided-data-benchmark.json
+```
+
+Repeat with worker counts `1, 2, 4, 8` while holding all other settings fixed.
+Choose the smallest worker count that saturates throughput without excessive
+RAM, `/dev/shm`, or disk contention; more workers are not automatically better.
 
 ## Failure handling
 

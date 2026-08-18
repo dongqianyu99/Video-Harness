@@ -392,6 +392,49 @@ def test_factory_mixes_two_tasks_and_two_guides_in_one_grouped_batch(tmp_path):
     assert loader.queries_per_guide == 2
 
 
+def test_factory_uses_split_manifest_query_scope_before_optional_debug_subset(
+    tmp_path, monkeypatch
+):
+    setup = _make_setup(tmp_path)
+    config, train_config, _, bundle, episodes, plans, tokenizer, frame_loader, _ = setup
+    split_path = tmp_path / "training-split.json"
+    split_path.write_text("{}", encoding="utf-8")
+    config = dataclasses.replace(
+        config,
+        split_manifest_path=split_path,
+        require_all_tasks=False,
+    )
+    calls = []
+
+    def fake_validate(path, *, bundle, episode_records, require_all_tasks):
+        calls.append((path, bundle, tuple(episode_records), require_all_tasks))
+        return SimpleNamespace(
+            split_id="split-test",
+            query_episode_indices=(200,),
+        )
+
+    monkeypatch.setattr(_guide_data, "load_and_validate_training_split", fake_validate)
+    loader = create_robodojo_guided_data_loader(
+        train_config,
+        config,
+        num_batches=1,
+        skip_norm_stats=True,
+        dataset_factory=lambda *_args: setup[2],
+        artifact_loader=lambda **_paths: bundle,
+        episode_reader=lambda _root: episodes,
+        tokenizer=tokenizer,
+        frame_loader=frame_loader,
+        plan_builder=lambda _bundle, *, query_episode_index, profile: plans[query_episode_index],
+        transforms_module=_TRANSFORMS,
+    )
+
+    batch = next(iter(loader))
+
+    assert np.all(np.asarray(batch.observation.state[0, :, 0]) >= 4)
+    assert loader.host_metadata["training_split_id"] == "split-test"
+    assert calls == [(split_path, bundle, episodes, False)]
+
+
 def test_factory_rejects_unknown_query_episode_and_bad_ranges(tmp_path):
     setup = _make_setup(tmp_path)
     config, train_config, _, bundle, episodes, plans, tokenizer, frame_loader, _ = setup
