@@ -3,12 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import importlib
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 from openpi.models.guide_inputs import GuideInput
 from openpi.models.guide_materializer import GuideMaterializerConfig
@@ -72,31 +70,38 @@ def _find_support_source(bundle: Any, document_id: str) -> Any:
     return matches[0]
 
 
-def _decode_jpeg_rgb(payload: Any, *, context: str) -> np.ndarray:
-    if not isinstance(payload, (bytes, bytearray, memoryview)):
+def _validate_rgb_frame(payload: Any, *, context: str) -> np.ndarray:
+    if not isinstance(payload, np.ndarray):
         raise ValueError(
-            f"{context}: frame loader must return JPEG bytes, got {type(payload).__name__}"
+            f"{context}: frame loader must return a numpy RGB array, "
+            f"got {type(payload).__name__}"
         )
-
-    try:
-        with Image.open(BytesIO(bytes(payload))) as image:
-            rgb_image = image.convert("RGB")
-            frame = np.asarray(rgb_image, dtype=np.uint8).copy()
-    except Exception as exc:
-        raise ValueError(f"{context}: failed to decode JPEG frame") from exc
-
-    if frame.ndim != 3 or frame.shape[-1] != 3:
-        raise ValueError(f"{context}: decoded frame is not RGB [H, W, 3], got {frame.shape}")
-    return frame
+    if payload.ndim != 3 or payload.shape[-1] != 3:
+        raise ValueError(
+            f"{context}: decoded frame is not RGB [H, W, 3], got {payload.shape}"
+        )
+    if payload.shape[0] <= 0 or payload.shape[1] <= 0:
+        raise ValueError(f"{context}: decoded RGB frame has an empty spatial dimension")
+    if payload.dtype != np.uint8:
+        raise ValueError(
+            f"{context}: decoded RGB frame must have dtype uint8, got {payload.dtype}"
+        )
+    return np.array(payload, copy=True)
 
 
 def _load_frame_payload(frame_loader: Any, document: Any, frame_ref: dict[str, Any]) -> Any:
+    load_rgb = getattr(frame_loader, "load_rgb", None)
+    if callable(load_rgb):
+        return load_rgb(document, frame_ref)
     load = getattr(frame_loader, "load", None)
     if callable(load):
         return load(document, frame_ref)
     if callable(frame_loader):
         return frame_loader(document, frame_ref)
-    raise ValueError("frame_loader must provide load(document, frame_ref)")
+    raise ValueError(
+        "frame_loader must provide load_rgb(document, frame_ref), "
+        "load(document, frame_ref), or be callable"
+    )
 
 
 class VideoHarnessGuideResolver:
@@ -191,7 +196,7 @@ class VideoHarnessGuideResolver:
                     document,
                     frame_dict,
                 )
-                return _decode_jpeg_rgb(payload, context=frame_context)
+                return _validate_rgb_frame(payload, context=frame_context)
 
             guide = materialize_guide(
                 plan,

@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import jax
 import numpy as np
-from PIL import Image
 import pytest
 
 from openpi.models import model as _model
@@ -150,10 +148,8 @@ class _Plan:
     units: tuple[_Unit, ...]
 
 
-def _jpeg(value: int) -> bytes:
-    output = BytesIO()
-    Image.new("RGB", (3, 2), color=value).save(output, format="JPEG")
-    return output.getvalue()
+def _rgb(value: int) -> np.ndarray:
+    return np.full((2, 3, 3), value, dtype=np.uint8)
 
 
 def _sample(index: int, *, episode_index: int, task_index: int) -> dict[str, Any]:
@@ -264,9 +260,9 @@ def _make_setup(tmp_path: Path):
         def __init__(self):
             self.calls: list[tuple[Any, dict[str, Any]]] = []
 
-        def load(self, document, frame_ref):
+        def load_rgb(self, document, frame_ref):
             self.calls.append((document, frame_ref))
-            return _jpeg(80 + frame_ref["episode_frame_index"])
+            return _rgb(80 + frame_ref["episode_frame_index"])
 
     tokenizer = _Tokenizer()
     frame_loader = _FrameLoader()

@@ -3,5 +3,6 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .venv/
+uv.lock
 *.egg-info/
 *.py[cod]

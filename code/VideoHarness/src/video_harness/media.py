@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 class FrameDecodeError(RuntimeError):
@@ -11,13 +13,33 @@ class FrameDecodeError(RuntimeError):
 
 
 class FFmpegFrameLoader:
-    """Decode a referenced frame to JPEG bytes without materializing it on disk."""
+    """Decode a referenced RoboDojo frame without materializing it on disk."""
 
-    def __init__(self, dataset_root: Path, ffmpeg: str = "ffmpeg") -> None:
+    def __init__(
+        self,
+        dataset_root: Path,
+        ffmpeg: str = "ffmpeg",
+        *,
+        rgb_shape: tuple[int, int, int] = (480, 640, 3),
+    ) -> None:
+        if (
+            len(rgb_shape) != 3
+            or rgb_shape[0] <= 0
+            or rgb_shape[1] <= 0
+            or rgb_shape[2] != 3
+        ):
+            raise ValueError(
+                "rgb_shape must be a positive (height, width, 3) tuple"
+            )
         self.dataset_root = dataset_root
         self.ffmpeg = ffmpeg
+        self.rgb_shape = rgb_shape
 
-    def load(self, document: dict[str, Any], frame_ref: dict[str, Any]) -> bytes:
+    def _resolve_request(
+        self,
+        document: dict[str, Any],
+        frame_ref: dict[str, Any],
+    ) -> tuple[Path, float]:
         source = document["source"]
         try:
             frame_index = int(frame_ref["episode_frame_index"])
@@ -45,6 +67,12 @@ class FFmpegFrameLoader:
         if not video_path.is_file():
             raise FrameDecodeError(f"Video shard does not exist: {video_path}")
         timestamp = float(source["video_from_timestamp"]) + expected_timestamp
+        return video_path, timestamp
+
+    def load(self, document: dict[str, Any], frame_ref: dict[str, Any]) -> bytes:
+        """Return one JPEG frame for VLM provider requests."""
+
+        video_path, timestamp = self._resolve_request(document, frame_ref)
         command = [
             self.ffmpeg,
             "-hide_banner",
@@ -69,3 +97,39 @@ class FFmpegFrameLoader:
                 f"ffmpeg failed for {video_path} at {timestamp:.6f}s: {stderr or 'no JPEG output'}"
             )
         return process.stdout
+
+    def load_rgb(
+        self,
+        document: dict[str, Any],
+        frame_ref: dict[str, Any],
+    ) -> np.ndarray:
+        """Return one decoded uint8 RGB frame for an Actuator data path."""
+
+        video_path, timestamp = self._resolve_request(document, frame_ref)
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{timestamp:.6f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ]
+        process = subprocess.run(command, check=False, capture_output=True)
+        expected_size = int(np.prod(self.rgb_shape))
+        if process.returncode != 0 or len(process.stdout) != expected_size:
+            stderr = process.stderr.decode("utf-8", errors="replace").strip()
+            raise FrameDecodeError(
+                f"ffmpeg failed to decode RGB frame for {video_path} at "
+                f"{timestamp:.6f}s: expected {expected_size} bytes, got "
+                f"{len(process.stdout)}; {stderr or 'no ffmpeg error output'}"
+            )
+        return np.frombuffer(process.stdout, dtype=np.uint8).reshape(self.rgb_shape).copy()

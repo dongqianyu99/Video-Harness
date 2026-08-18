@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 import jax
 import numpy as np
-from PIL import Image
 import pytest
 
 from openpi.models.guide_inputs import GuideInput
@@ -64,11 +62,8 @@ class _Plan:
     units: tuple[_Unit, ...]
 
 
-def _jpeg(value: int, *, mode: str = "RGB") -> bytes:
-    image = Image.new(mode, (4, 2), color=value)
-    output = BytesIO()
-    image.save(output, format="JPEG")
-    return output.getvalue()
+def _rgb(value: int) -> np.ndarray:
+    return np.full((2, 4, 3), value, dtype=np.uint8)
 
 
 def _make_setup() -> tuple[GuideBindingIndex, _Bundle, _Plan]:
@@ -108,9 +103,9 @@ class _FrameLoader:
     def __init__(self):
         self.calls: list[tuple[Any, dict[str, Any]]] = []
 
-    def load(self, document: Any, frame_ref: dict[str, Any]) -> bytes:
+    def load_rgb(self, document: Any, frame_ref: dict[str, Any]) -> np.ndarray:
         self.calls.append((document, frame_ref))
-        return _jpeg(80 + frame_ref["episode_frame_index"])
+        return _rgb(80 + frame_ref["episode_frame_index"])
 
 
 class _Tokenizer:
@@ -163,12 +158,12 @@ def test_resolver_builds_guide_input_from_support_frames_only():
     assert all(not isinstance(leaf, str) for leaf in jax.tree_util.tree_leaves(guide))
 
 
-def test_resolver_converts_grayscale_jpeg_to_explicit_rgb():
+def test_resolver_rejects_non_rgb_frame_from_video_harness_boundary():
     binding_index, bundle, plan = _make_setup()
 
     class _GrayscaleLoader:
-        def load(self, _document, _frame_ref):
-            return _jpeg(100, mode="L")
+        def load_rgb(self, _document, _frame_ref):
+            return np.full((2, 4), 100, dtype=np.uint8)
 
     resolver = VideoHarnessGuideResolver(
         artifact_bundle=bundle,
@@ -180,9 +175,8 @@ def test_resolver_converts_grayscale_jpeg_to_explicit_rgb():
         plan_builder=lambda *_args, **_kwargs: plan,
     )
 
-    guide = resolver(binding_index.by_binding_index(0))
-
-    assert guide.images.shape[-1] == 3
+    with pytest.raises(ValueError, match=r"RGB"):
+        resolver(binding_index.by_binding_index(0))
 
 
 @pytest.mark.parametrize(
@@ -212,12 +206,12 @@ def test_resolver_rejects_plan_identity_or_empty_units(mutate):
         resolver(binding_index.by_binding_index(0))
 
 
-def test_resolver_rejects_non_jpeg_frame_payload():
+def test_resolver_rejects_encoded_frame_payload_inside_xpolicylab():
     binding_index, bundle, plan = _make_setup()
 
     class _BadLoader:
         def load(self, _document, _frame_ref):
-            return np.zeros((2, 2, 3), dtype=np.uint8)
+            return b"encoded-image-payload"
 
     resolver = VideoHarnessGuideResolver(
         artifact_bundle=bundle,
@@ -229,7 +223,7 @@ def test_resolver_rejects_non_jpeg_frame_payload():
         plan_builder=lambda *_args, **_kwargs: plan,
     )
 
-    with pytest.raises(ValueError, match=r"JPEG|frame"):
+    with pytest.raises(ValueError, match=r"RGB|frame"):
         resolver(binding_index.by_binding_index(0))
 
 

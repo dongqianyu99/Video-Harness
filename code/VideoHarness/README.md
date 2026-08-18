@@ -19,7 +19,7 @@ It performs the complete workflow in this order:
 
 1. checks or installs `uv`;
 2. checks or installs `ffmpeg` on an apt-based Linux system;
-3. creates the locked Python environment and runs the test suite;
+3. resolves a Python environment from `pyproject.toml` and runs the test suite;
 4. downloads `RoboDojo_lerobot_v30_video` with the official `hf` CLI;
 5. verifies the public Pi_05-compatible source contract and excludes DLC from
    guidance generation;
@@ -67,13 +67,14 @@ export PATH="$HOME/.local/bin:$PATH"
 sudo apt-get update
 sudo apt-get install -y ffmpeg
 
-uv sync --locked --extra dev --extra providers
+uv sync --extra dev --extra providers
 uv run pytest -q
 uv run hf version
 ```
 
 Do not copy `.venv` between machines. Recreate it from `pyproject.toml` and
-`uv.lock`.
+let `uv` resolve the environment on each machine. A locally generated
+`uv.lock` is intentionally ignored and must not be committed or uploaded.
 
 ### 2. Download RoboDojo with `hf`
 

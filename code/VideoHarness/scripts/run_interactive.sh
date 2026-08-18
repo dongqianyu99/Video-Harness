@@ -125,7 +125,7 @@ echo "== Video Harness: environment =="
 install_uv_if_needed
 install_ffmpeg_if_needed
 cd "${project_dir}"
-uv sync --locked --extra dev --extra providers
+uv sync --extra dev --extra providers
 uv run pytest -q
 uv run hf version
 ffmpeg -version | head -n 1
