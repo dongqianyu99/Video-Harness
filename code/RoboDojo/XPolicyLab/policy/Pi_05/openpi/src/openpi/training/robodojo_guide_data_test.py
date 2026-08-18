@@ -362,6 +362,36 @@ def test_factory_query_subset_uses_explicit_episode_and_not_dataset_order(tmp_pa
     assert tokenizer.calls == ["guide-1"]
 
 
+def test_factory_mixes_two_tasks_and_two_guides_in_one_grouped_batch(tmp_path):
+    setup = _make_setup(tmp_path)
+    config, train_config, _, bundle, episodes, plans, tokenizer, frame_loader, _ = setup
+    config = dataclasses.replace(config, batch_size=4, guides_per_batch=2)
+
+    loader = create_robodojo_guided_data_loader(
+        train_config,
+        config,
+        num_batches=1,
+        skip_norm_stats=True,
+        dataset_factory=lambda *_args: setup[2],
+        artifact_loader=lambda **_paths: bundle,
+        episode_reader=lambda _root: episodes,
+        tokenizer=tokenizer,
+        frame_loader=frame_loader,
+        plan_builder=lambda _bundle, *, query_episode_index, profile: plans[query_episode_index],
+        transforms_module=_TRANSFORMS,
+    )
+
+    batch = next(iter(loader))
+
+    assert batch.actions.shape == (2, 2, 50, 32)
+    assert batch.observation.state.shape == (2, 2, 4)
+    assert batch.guide.images.shape[0] == 2
+    assert set(tokenizer.calls) == {"guide-0", "guide-1"}
+    assert len(frame_loader.calls) == 4
+    assert loader.groups_per_batch == 2
+    assert loader.queries_per_guide == 2
+
+
 def test_factory_rejects_unknown_query_episode_and_bad_ranges(tmp_path):
     setup = _make_setup(tmp_path)
     config, train_config, _, bundle, episodes, plans, tokenizer, frame_loader, _ = setup
@@ -417,8 +447,15 @@ def test_factory_rejects_process_count_workers_paths_and_missing_norm_stats(tmp_
         )
 
     monkeypatch.setattr(_guide_data.jax, "process_count", lambda: 1)
-    with pytest.raises(ValueError, match="num_workers"):
-        dataclasses.replace(config, num_workers=1)
+    worker_config = dataclasses.replace(config, num_workers=1)
+    assert worker_config.num_workers == 1
+    with pytest.raises(ValueError, match=r"custom.*num_workers|worker processes"):
+        create_robodojo_guided_data_loader(
+            train_config,
+            worker_config,
+            skip_norm_stats=True,
+            **common,
+        )
 
     missing_stats_train = dataclasses.replace(
         train_config,
@@ -440,12 +477,15 @@ def test_factory_rejects_process_count_workers_paths_and_missing_norm_stats(tmp_
         create_robodojo_guided_data_loader(train_config, missing_path, **common)
 
 
-def test_config_rejects_nonzero_workers_and_duplicate_query_indices(tmp_path):
+def test_config_accepts_workers_and_rejects_invalid_parallelism_or_duplicate_query_indices(tmp_path):
     setup = _make_setup(tmp_path)
     config = setup[0]
 
+    assert dataclasses.replace(config, num_workers=8).num_workers == 8
     with pytest.raises(ValueError, match="num_workers"):
-        dataclasses.replace(config, num_workers=1)
+        dataclasses.replace(config, num_workers=-1)
+    with pytest.raises(ValueError, match="divisible"):
+        dataclasses.replace(config, batch_size=3, guides_per_batch=2)
     with pytest.raises(ValueError, match="unique"):
         dataclasses.replace(config, query_episode_indices=(100, 100))
 

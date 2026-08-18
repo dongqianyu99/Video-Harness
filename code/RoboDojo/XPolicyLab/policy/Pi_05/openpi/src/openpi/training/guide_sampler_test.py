@@ -5,6 +5,7 @@ import pytest
 
 from openpi.training.guide_dataset import GuideBindingIndex
 from openpi.training.guide_sampler import BindingBatchStats
+from openpi.training.guide_sampler import GroupedBindingBatchSampler
 from openpi.training.guide_sampler import HomogeneousBindingBatchSampler
 from openpi.training.guide_sampler import QueryEpisodeRange
 from openpi.training.guide_sampler import build_binding_to_sample_indices
@@ -275,3 +276,80 @@ def test_sampler_rejects_invalid_batch_size_seed_and_epoch():
     )
     with pytest.raises(ValueError, match="epoch"):
         sampler.set_epoch(-1)
+
+
+def test_grouped_sampler_mixes_distinct_guides_and_tasks_without_changing_sample_marginal():
+    index = GuideBindingIndex.from_bindings(
+        [
+            _SupportBinding(10, 11, 0, "doc-a"),
+            _SupportBinding(20, 21, 1, "doc-b"),
+            _SupportBinding(30, 31, 0, "doc-c"),
+            _SupportBinding(40, 41, 2, "doc-d"),
+        ]
+    )
+    mapping = {
+        0: tuple(range(8)),
+        1: tuple(range(8, 16)),
+        2: tuple(range(16, 24)),
+        3: tuple(range(24, 32)),
+    }
+    sampler = GroupedBindingBatchSampler(
+        mapping,
+        binding_index=index,
+        guides_per_batch=2,
+        queries_per_guide=2,
+        seed=19,
+    )
+
+    batches = list(sampler)
+
+    assert len(batches) == len(sampler) == 8
+    assert all(len(batch) == 4 for batch in batches)
+    assert {sample for batch in batches for sample in batch} == set(range(32))
+    for batch in batches:
+        first_group = batch[:2]
+        second_group = batch[2:]
+        first_binding = next(binding for binding, samples in mapping.items() if first_group[0] in samples)
+        second_binding = next(binding for binding, samples in mapping.items() if second_group[0] in samples)
+        assert first_binding != second_binding
+        assert set(first_group) <= set(mapping[first_binding])
+        assert set(second_group) <= set(mapping[second_binding])
+        assert (
+            index.by_binding_index(first_binding).support_document_id
+            != index.by_binding_index(second_binding).support_document_id
+        )
+
+    assert sampler.stats.used_query_groups == 16
+    assert sampler.stats.dropped_query_groups == 0
+    assert sampler.stats.mixed_task_batches > 0
+
+
+def test_grouped_sampler_is_reproducible_and_changes_order_by_epoch():
+    index = GuideBindingIndex.from_bindings(
+        [
+            _SupportBinding(10, 11, 0, "doc-a"),
+            _SupportBinding(20, 21, 1, "doc-b"),
+        ]
+    )
+    mapping = {0: tuple(range(8)), 1: tuple(range(8, 16))}
+    first = GroupedBindingBatchSampler(
+        mapping,
+        binding_index=index,
+        guides_per_batch=2,
+        queries_per_guide=2,
+        seed=3,
+    )
+    second = GroupedBindingBatchSampler(
+        dict(reversed(tuple(mapping.items()))),
+        binding_index=index,
+        guides_per_batch=2,
+        queries_per_guide=2,
+        seed=3,
+    )
+
+    epoch_zero = list(first)
+    assert epoch_zero == list(second)
+    first.set_epoch(1)
+    second.set_epoch(1)
+    assert list(first) == list(second)
+    assert list(first) != epoch_zero

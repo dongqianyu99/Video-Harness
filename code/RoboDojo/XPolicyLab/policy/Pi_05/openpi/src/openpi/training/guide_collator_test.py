@@ -258,6 +258,68 @@ def test_single_guide_collator_resolves_guide_exactly_once():
     assert resolver.calls[0].support_document_id == "document-0"
 
 
+def test_multi_guide_collator_builds_group_major_batch_and_resolves_each_guide_once():
+    bindings = (
+        _make_binding(
+            query_episode_index=10,
+            support_episode_index=11,
+            task_index=4,
+            support_document_id="document-0",
+        ),
+        _make_binding(
+            query_episode_index=20,
+            support_episode_index=21,
+            task_index=5,
+            support_document_id="document-1",
+        ),
+    )
+    resolver = _RecordingResolver()
+    collator = _guide_collator.MultiGuideBatchCollator(
+        binding_index=_make_index(*bindings),
+        guide_input_resolver=resolver,
+        guides_per_batch=2,
+        queries_per_guide=2,
+    )
+    items = [
+        _make_bound_item(episode_index=10, task_index=4, binding_index=0, value=1.0),
+        _make_bound_item(episode_index=10, task_index=4, binding_index=0, value=2.0),
+        _make_bound_item(episode_index=20, task_index=5, binding_index=1, value=3.0),
+        _make_bound_item(episode_index=20, task_index=5, binding_index=1, value=4.0),
+    ]
+
+    batch = collator(items)
+
+    assert validate_guide_conditioned_batch(batch) == (2, 2)
+    assert batch.actions.shape == (2, 2, 50, 32)
+    np.testing.assert_array_equal(batch.observation.state[:, :, 0], [[1.0, 2.0], [3.0, 4.0]])
+    assert batch.guide.images.shape[0] == 2
+    assert [record.binding_index for record in resolver.calls] == [0, 1]
+
+
+def test_multi_guide_collator_rejects_duplicate_support_document():
+    bindings = (
+        _make_binding(query_episode_index=10, support_episode_index=11),
+        _make_binding(
+            query_episode_index=20,
+            support_episode_index=21,
+            support_document_id="document-0",
+        ),
+    )
+    collator = _guide_collator.MultiGuideBatchCollator(
+        binding_index=_make_index(*bindings),
+        guide_input_resolver=_RecordingResolver(),
+        guides_per_batch=2,
+        queries_per_guide=1,
+    )
+    items = [
+        _make_bound_item(episode_index=10, binding_index=0),
+        _make_bound_item(episode_index=20, binding_index=1),
+    ]
+
+    with pytest.raises(ValueError, match="distinct support document"):
+        collator(items)
+
+
 def test_single_guide_collator_rejects_empty_batch_before_resolver():
     resolver = _RecordingResolver()
 

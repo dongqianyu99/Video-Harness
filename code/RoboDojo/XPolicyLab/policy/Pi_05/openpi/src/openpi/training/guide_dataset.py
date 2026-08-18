@@ -135,6 +135,11 @@ class GuideBindingIndex:
     def records(self) -> tuple[GuideBindingRecord, ...]:
         return self._records
 
+    def __reduce__(self):
+        """Rebuild immutable lookup tables inside PyTorch spawn workers."""
+
+        return (type(self).from_bindings, (self._records,))
+
     def by_query_episode(
         self,
         query_episode_index: int,

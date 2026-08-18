@@ -131,7 +131,7 @@ def resolve_guided_train_config(run_config: GuidedTrainRunConfig) -> Any:
         freeze_filter=nnx.Nothing(),
         checkpoint_dir_override=str(run_config.checkpoint_dir),
         batch_size=run_config.guided_data.batch_size,
-        num_workers=0,
+        num_workers=run_config.guided_data.num_workers,
         num_train_steps=run_config.num_train_steps,
         log_interval=run_config.log_interval,
         save_interval=run_config.save_interval,

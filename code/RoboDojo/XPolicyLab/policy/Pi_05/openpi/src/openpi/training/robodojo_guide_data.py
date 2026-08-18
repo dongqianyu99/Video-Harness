@@ -10,14 +10,17 @@ from typing import Any
 import jax
 
 from openpi.models.guide_materializer import GuideMaterializerConfig
-from openpi.training.guide_collator import SingleGuideBatchCollator
+from openpi.training.guide_cache import ConstantResolverFactory
+from openpi.training.guide_cache import ProcessLocalGuideResolver
+from openpi.training.guide_collator import MultiGuideBatchCollator
 from openpi.training.guide_data_loader import GuidedDataLoader
 from openpi.training.guide_dataset import GuideBindingIndex
 from openpi.training.guide_dataset import GuideBoundDataset
 from openpi.training.guide_native_dataset import transform_dataset_preserving_identity
-from openpi.training.guide_sampler import HomogeneousBindingBatchSampler
+from openpi.training.guide_sampler import GroupedBindingBatchSampler
 from openpi.training.guide_sampler import QueryEpisodeRange
 from openpi.training.guide_sampler import build_binding_to_sample_indices
+from openpi.training.robodojo_guide_resolver import RoboDojoGuideResolverFactory
 from openpi.training.robodojo_guide_resolver import VideoHarnessGuideResolver
 
 
@@ -38,6 +41,14 @@ class RoboDojoGuidedDataConfig:
     max_text_tokens: int
     query_episode_indices: tuple[int, ...] | None = None
     num_workers: int = 0
+    guides_per_batch: int = 1
+    prefetch_factor: int = 2
+    persistent_workers: bool = True
+    worker_timeout_s: float = 0.0
+    worker_torch_threads: int = 1
+    guide_cache_entries: int = 2
+    guide_cache_max_bytes: int = 256 * 1024 * 1024
+    device_prefetch_size: int = 2
 
     def __post_init__(self) -> None:
         if not isinstance(self.repo_id, str) or not self.repo_id.strip():
@@ -51,7 +62,16 @@ class RoboDojoGuidedDataConfig:
             if not isinstance(getattr(self, name), Path):
                 raise ValueError(f"{name} must be an explicit pathlib.Path")
 
-        for name in ("batch_size", "max_frames", "max_units", "max_text_tokens"):
+        for name in (
+            "batch_size",
+            "max_frames",
+            "max_units",
+            "max_text_tokens",
+            "guides_per_batch",
+            "prefetch_factor",
+            "device_prefetch_size",
+            "worker_torch_threads",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}")
@@ -59,8 +79,21 @@ class RoboDojoGuidedDataConfig:
             raise ValueError(f"seed must be a non-negative integer, got {self.seed!r}")
         if not isinstance(self.profile, str) or not self.profile.strip():
             raise ValueError("profile must be a non-empty string")
-        if isinstance(self.num_workers, bool) or not isinstance(self.num_workers, int) or self.num_workers != 0:
-            raise ValueError("RoboDojo guided data only supports num_workers=0")
+        if isinstance(self.num_workers, bool) or not isinstance(self.num_workers, int) or self.num_workers < 0:
+            raise ValueError("num_workers must be a non-negative integer")
+        if self.batch_size % self.guides_per_batch != 0:
+            raise ValueError(
+                "batch_size must be divisible by guides_per_batch: "
+                f"{self.batch_size} % {self.guides_per_batch} != 0"
+            )
+        if not isinstance(self.persistent_workers, bool):
+            raise ValueError("persistent_workers must be bool")
+        if isinstance(self.worker_timeout_s, bool) or not isinstance(self.worker_timeout_s, (int, float)) or self.worker_timeout_s < 0:
+            raise ValueError("worker_timeout_s must be non-negative")
+        for name in ("guide_cache_entries", "guide_cache_max_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
 
         if self.query_episode_indices is not None:
             indices = tuple(self.query_episode_indices)
@@ -74,6 +107,10 @@ class RoboDojoGuidedDataConfig:
             if len(set(indices)) != len(indices):
                 raise ValueError("query_episode_indices must be unique")
             object.__setattr__(self, "query_episode_indices", indices)
+
+    @property
+    def queries_per_guide(self) -> int:
+        return self.batch_size // self.guides_per_batch
 
 
 def _require_path(path: Path, *, name: str, directory: bool) -> None:
@@ -321,30 +358,63 @@ def create_robodojo_guided_data_loader(
         binding_index=binding_index,
     )
     bound_dataset = GuideBoundDataset(transformed_dataset, binding_index)
-    sampler = HomogeneousBindingBatchSampler(
+    sampler = GroupedBindingBatchSampler(
         binding_to_samples,
         binding_index=binding_index,
-        batch_size=guided_data_config.batch_size,
+        guides_per_batch=guided_data_config.guides_per_batch,
+        queries_per_guide=guided_data_config.queries_per_guide,
         seed=guided_data_config.seed,
     )
 
-    resolver = VideoHarnessGuideResolver(
-        artifact_bundle=bundle,
-        binding_index=binding_index,
-        dataset_root=guided_data_config.dataset_root,
-        tokenizer=_make_tokenizer(tokenizer, guided_data_config.max_text_tokens),
-        materializer_config=GuideMaterializerConfig(
-            max_frames=guided_data_config.max_frames,
-            max_units=guided_data_config.max_units,
-            max_text_tokens=guided_data_config.max_text_tokens,
-        ),
-        profile=guided_data_config.profile,
-        frame_loader=frame_loader,
-        plan_builder=plan_builder,
+    materializer_config = GuideMaterializerConfig(
+        max_frames=guided_data_config.max_frames,
+        max_units=guided_data_config.max_units,
+        max_text_tokens=guided_data_config.max_text_tokens,
     )
-    collator = SingleGuideBatchCollator(
+
+    custom_worker_dependencies = any(
+        dependency is not None
+        for dependency in (artifact_loader, tokenizer, frame_loader, plan_builder)
+    )
+    if guided_data_config.num_workers > 0 and custom_worker_dependencies:
+        raise ValueError(
+            "custom artifact/tokenizer/frame/plan dependencies are only supported "
+            "with num_workers=0; worker processes require the standard path factory"
+        )
+
+    if guided_data_config.num_workers > 0:
+        resolver_factory = RoboDojoGuideResolverFactory(
+            dataset_artifact_path=guided_data_config.dataset_artifact_path,
+            documents_artifact_path=guided_data_config.documents_artifact_path,
+            pairs_artifact_path=guided_data_config.pairs_artifact_path,
+            dataset_root=guided_data_config.dataset_root,
+            binding_records=binding_index.records,
+            materializer_config=materializer_config,
+            profile=guided_data_config.profile,
+        )
+    else:
+        resolver = VideoHarnessGuideResolver(
+            artifact_bundle=bundle,
+            binding_index=binding_index,
+            dataset_root=guided_data_config.dataset_root,
+            tokenizer=_make_tokenizer(tokenizer, guided_data_config.max_text_tokens),
+            materializer_config=materializer_config,
+            profile=guided_data_config.profile,
+            frame_loader=frame_loader,
+            plan_builder=plan_builder,
+        )
+        resolver_factory = ConstantResolverFactory(resolver)
+
+    cached_resolver = ProcessLocalGuideResolver(
+        resolver_factory=resolver_factory,
+        max_entries=guided_data_config.guide_cache_entries,
+        max_bytes=guided_data_config.guide_cache_max_bytes,
+    )
+    collator = MultiGuideBatchCollator(
         binding_index=binding_index,
-        guide_input_resolver=resolver,
+        guide_input_resolver=cached_resolver,
+        guides_per_batch=guided_data_config.guides_per_batch,
+        queries_per_guide=guided_data_config.queries_per_guide,
     )
     return GuidedDataLoader(
         bound_dataset,
@@ -352,10 +422,22 @@ def create_robodojo_guided_data_loader(
         collator=collator,
         num_batches=num_batches,
         num_workers=guided_data_config.num_workers,
+        prefetch_factor=guided_data_config.prefetch_factor,
+        persistent_workers=guided_data_config.persistent_workers,
+        worker_timeout_s=guided_data_config.worker_timeout_s,
+        worker_torch_threads=guided_data_config.worker_torch_threads,
         data_config=guided_native_config,
         binding_index=binding_index,
         host_metadata={
             "artifact_build_id": getattr(bundle, "build_id", None),
             "repo_id": guided_data_config.repo_id,
+            "guides_per_batch": guided_data_config.guides_per_batch,
+            "queries_per_guide": guided_data_config.queries_per_guide,
+            "num_workers": guided_data_config.num_workers,
+            "worker_torch_threads": guided_data_config.worker_torch_threads,
+            "prefetch_factor": guided_data_config.prefetch_factor,
+            "guide_cache_entries": guided_data_config.guide_cache_entries,
+            "guide_cache_max_bytes": guided_data_config.guide_cache_max_bytes,
+            "sampler_stats": dataclasses.asdict(sampler.stats),
         },
     )

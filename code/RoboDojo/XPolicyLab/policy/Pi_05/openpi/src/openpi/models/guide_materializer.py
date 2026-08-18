@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import jax.numpy as jnp
 import numpy as np
+import torch
 
 from openpi.models.guide_inputs import GuideInput
 from openpi.shared import image_tools
@@ -20,12 +20,14 @@ class GuideMaterializerConfig:
 
 
 FrameDecoder = Callable[[Any], np.ndarray]
+FramesDecoder = Callable[[Sequence[Any]], Sequence[np.ndarray]]
 
 
 def materialize_guide(
     plan: Any,
     *,
     frame_decoder: FrameDecoder,
+    frames_decoder: FramesDecoder | None = None,
     tokenizer: Any,
     config: GuideMaterializerConfig,
 ) -> GuideInput:
@@ -35,6 +37,7 @@ def materialize_guide(
     images, image_mask = _materialize_frames(
         plan,
         frame_decoder=frame_decoder,
+        frames_decoder=frames_decoder,
         config=config,
     )
 
@@ -96,14 +99,7 @@ def _validate_plan_sizes(
         )
 
 
-def _decode_and_preprocess_frame(
-    frame_ref: Any,
-    *,
-    frame_decoder: FrameDecoder,
-    config: GuideMaterializerConfig,
-) -> np.ndarray:
-    frame = frame_decoder(frame_ref)
-
+def _validate_decoded_frame(frame: Any) -> np.ndarray:
     if not isinstance(frame, np.ndarray):
         raise ValueError(
             f"decoded frame must be a numpy.ndarray, got {type(frame).__name__}"
@@ -120,29 +116,45 @@ def _decode_and_preprocess_frame(
     if frame.dtype != np.uint8:
         raise ValueError(f"decoded frame must have dtype uint8, got {frame.dtype}")
 
-    normalized_frame = frame.astype(np.float32) / 127.5 - 1.0
+    return frame
 
-    resized_frame = image_tools.resize_with_pad(
-        jnp.asarray(normalized_frame),
+
+def _preprocess_frame_batch(
+    frames: Sequence[np.ndarray],
+    *,
+    config: GuideMaterializerConfig,
+) -> np.ndarray:
+    if not frames:
+        return np.empty((0, *config.image_size, 3), dtype=np.float32)
+    validated = tuple(_validate_decoded_frame(frame) for frame in frames)
+    shapes = {frame.shape for frame in validated}
+    if len(shapes) != 1:
+        raise ValueError(
+            f"all decoded Guide frames must share one RGB shape, got {sorted(shapes)}"
+        )
+
+    normalized = np.stack(validated, axis=0).astype(np.float32) / 127.5 - 1.0
+    resized = image_tools.resize_with_pad_torch(
+        torch.from_numpy(normalized),
         config.image_size[0],
         config.image_size[1],
     )
-
-    resized_frame = np.asarray(resized_frame, dtype=np.float32)
-    expected_shape = (*config.image_size, 3)
-
-    if resized_frame.shape != expected_shape:
+    resized_array = np.asarray(resized.cpu().numpy(), dtype=np.float32)
+    if resized_array.ndim == 3:
+        resized_array = resized_array[None, ...]
+    expected_shape = (len(validated), *config.image_size, 3)
+    if resized_array.shape != expected_shape:
         raise ValueError(
-            f"resized frame must have shape {expected_shape}, got {resized_frame.shape}"
+            f"resized frame batch must have shape {expected_shape}, got {resized_array.shape}"
         )
-
-    return resized_frame
+    return resized_array
 
 
 def _materialize_frames(
     plan: Any,
     *,
     frame_decoder: FrameDecoder,
+    frames_decoder: FramesDecoder | None,
     config: GuideMaterializerConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
     height, width = config.image_size
@@ -153,12 +165,18 @@ def _materialize_frames(
     )
     image_mask = np.zeros(config.max_frames, dtype=np.bool_)
 
-    for frame_index, frame_ref in enumerate(plan.frames):
-        images[frame_index] = _decode_and_preprocess_frame(
-            frame_ref,
-            frame_decoder=frame_decoder,
-            config=config,
-        )
+    if frames_decoder is None:
+        decoded_frames = tuple(frame_decoder(frame_ref) for frame_ref in plan.frames)
+    else:
+        decoded_frames = tuple(frames_decoder(plan.frames))
+        if len(decoded_frames) != len(plan.frames):
+            raise ValueError(
+                "frames_decoder must return exactly one frame per GuidePlan frame: "
+                f"expected {len(plan.frames)}, got {len(decoded_frames)}"
+            )
+
+    preprocessed = _preprocess_frame_batch(decoded_frames, config=config)
+    images[: len(decoded_frames)] = preprocessed
 
     image_mask[: len(plan.frames)] = True
     return images, image_mask

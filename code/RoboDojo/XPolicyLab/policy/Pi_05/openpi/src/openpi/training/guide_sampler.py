@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
@@ -30,6 +31,19 @@ class BindingBatchStats:
     used_samples: int
     dropped_samples: int
     num_batches: int
+
+
+@dataclass(frozen=True, slots=True)
+class GroupedBatchStats:
+    """Accounting for grouped ``G guides x Q queries`` batches."""
+
+    guides_per_batch: int
+    queries_per_guide: int
+    total_query_groups: int
+    used_query_groups: int
+    dropped_query_groups: int
+    num_batches: int
+    mixed_task_batches: int
 
 
 def _require_nonnegative_integer(value: Any, *, name: str) -> int:
@@ -276,3 +290,260 @@ class HomogeneousBindingBatchSampler:
         global_rng.shuffle(complete_batches)
 
         yield from complete_batches
+
+
+class GroupedBindingBatchSampler:
+    """Build fixed ``[G, Q]`` batches with distinct Guide documents.
+
+    Each contiguous block of ``Q`` sample indices belongs to one static query
+    episode/Guide binding.  A batch contains ``G`` such blocks in group-major
+    order.  Candidate selection prefers task diversity while preserving every
+    binding's frame-level samples except incomplete ``Q`` tails and the final
+    groups that cannot form a complete ``G`` batch.
+    """
+
+    def __init__(
+        self,
+        binding_to_sample_indices: Mapping[int, Sequence[int]],
+        *,
+        binding_index: GuideBindingIndex,
+        guides_per_batch: int,
+        queries_per_guide: int,
+        seed: int = 0,
+    ):
+        if not isinstance(binding_to_sample_indices, Mapping) or not binding_to_sample_indices:
+            raise ValueError("binding_to_sample_indices must be a non-empty mapping")
+
+        self._guides_per_batch = _require_nonnegative_integer(
+            guides_per_batch, name="guides_per_batch"
+        )
+        self._queries_per_guide = _require_nonnegative_integer(
+            queries_per_guide, name="queries_per_guide"
+        )
+        if self._guides_per_batch <= 0:
+            raise ValueError("guides_per_batch must be positive")
+        if self._queries_per_guide <= 0:
+            raise ValueError("queries_per_guide must be positive")
+
+        self._seed = _require_nonnegative_integer(seed, name="seed")
+        self._epoch = 0
+        self._binding_index = binding_index
+
+        normalized_groups: list[tuple[int, tuple[int, ...]]] = []
+        seen_samples: set[int] = set()
+        documents: set[str] = set()
+        binding_stats: list[BindingBatchStats] = []
+
+        for raw_binding_index, raw_sample_indices in binding_to_sample_indices.items():
+            current_binding_index = _require_nonnegative_integer(
+                raw_binding_index, name="binding_index"
+            )
+            record = binding_index.by_binding_index(current_binding_index)
+            documents.add(record.support_document_id)
+            try:
+                sample_indices = tuple(raw_sample_indices)
+            except TypeError as exc:
+                raise ValueError(
+                    f"sample indices for binding_index={current_binding_index} must be a sequence"
+                ) from exc
+
+            if len(sample_indices) < self._queries_per_guide:
+                raise ValueError(
+                    f"binding_index={current_binding_index} has {len(sample_indices)} samples, "
+                    f"fewer than queries_per_guide={self._queries_per_guide}"
+                )
+
+            normalized_samples: list[int] = []
+            local_samples: set[int] = set()
+            for raw_sample_index in sample_indices:
+                sample_index = _require_nonnegative_integer(
+                    raw_sample_index, name="sample_index"
+                )
+                if sample_index in local_samples:
+                    raise ValueError(
+                        f"duplicate sample_index={sample_index} within "
+                        f"binding_index={current_binding_index}"
+                    )
+                if sample_index in seen_samples:
+                    raise ValueError(
+                        f"sample_index={sample_index} appears in multiple bindings"
+                    )
+                local_samples.add(sample_index)
+                seen_samples.add(sample_index)
+                normalized_samples.append(sample_index)
+
+            num_groups = len(normalized_samples) // self._queries_per_guide
+            used_samples = num_groups * self._queries_per_guide
+            binding_stats.append(
+                BindingBatchStats(
+                    binding_index=current_binding_index,
+                    total_samples=len(normalized_samples),
+                    used_samples=used_samples,
+                    dropped_samples=len(normalized_samples) - used_samples,
+                    num_batches=num_groups,
+                )
+            )
+            normalized_groups.append(
+                (current_binding_index, tuple(normalized_samples))
+            )
+
+        if len(documents) < self._guides_per_batch:
+            raise ValueError(
+                f"need at least {self._guides_per_batch} distinct support documents, "
+                f"found {len(documents)}"
+            )
+
+        normalized_groups.sort(key=lambda item: item[0])
+        self._groups = tuple(normalized_groups)
+        self._binding_stats = tuple(sorted(binding_stats, key=lambda item: item.binding_index))
+        preview_batches = self._build_batches(epoch=0)
+        mixed_task_batches = sum(
+            len(
+                {
+                    binding_index.by_query_episode(
+                        self._sample_episode_index(batch[group * self._queries_per_guide])
+                    ).task_index
+                    for group in range(self._guides_per_batch)
+                }
+            )
+            > 1
+            for batch in preview_batches
+        )
+        total_query_groups = sum(item.num_batches for item in self._binding_stats)
+        used_query_groups = len(preview_batches) * self._guides_per_batch
+        self._stats = GroupedBatchStats(
+            guides_per_batch=self._guides_per_batch,
+            queries_per_guide=self._queries_per_guide,
+            total_query_groups=total_query_groups,
+            used_query_groups=used_query_groups,
+            dropped_query_groups=total_query_groups - used_query_groups,
+            num_batches=len(preview_batches),
+            mixed_task_batches=mixed_task_batches,
+        )
+        if not preview_batches:
+            raise ValueError("grouped sampler cannot form one complete batch")
+
+    def _sample_episode_index(self, sample_index: int) -> int:
+        for binding_index, sample_indices in self._groups:
+            if sample_index in sample_indices:
+                return self._binding_index.by_binding_index(binding_index).query_episode_index
+        raise AssertionError(f"unknown normalized sample_index={sample_index}")
+
+    @property
+    def guides_per_batch(self) -> int:
+        return self._guides_per_batch
+
+    @property
+    def queries_per_guide(self) -> int:
+        return self._queries_per_guide
+
+    @property
+    def batch_size(self) -> int:
+        return self._guides_per_batch * self._queries_per_guide
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch
+
+    @property
+    def stats(self) -> GroupedBatchStats:
+        return self._stats
+
+    @property
+    def binding_stats(self) -> tuple[BindingBatchStats, ...]:
+        return self._binding_stats
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = _require_nonnegative_integer(epoch, name="epoch")
+
+    def __len__(self) -> int:
+        return self._stats.num_batches
+
+    def _make_query_groups(self, epoch: int) -> dict[int, deque[tuple[int, ...]]]:
+        groups: dict[int, deque[tuple[int, ...]]] = {}
+        for binding_index, sample_indices in self._groups:
+            rng = np.random.default_rng(
+                np.random.SeedSequence([self._seed, epoch, binding_index])
+            )
+            shuffled = np.asarray(sample_indices, dtype=np.int64).copy()
+            rng.shuffle(shuffled)
+            count = len(shuffled) // self._queries_per_guide
+            chunks = [
+                tuple(int(value) for value in shuffled[
+                    index * self._queries_per_guide : (index + 1) * self._queries_per_guide
+                ])
+                for index in range(count)
+            ]
+            groups[binding_index] = deque(chunks)
+        return groups
+
+    def _build_batches(self, epoch: int) -> list[list[int]]:
+        queues = self._make_query_groups(epoch)
+        rng = np.random.default_rng(
+            np.random.SeedSequence([self._seed, epoch, 0xA7C0_2000])
+        )
+        tie_break = {
+            binding_index: float(rng.random())
+            for binding_index in queues
+        }
+        batches: list[list[int]] = []
+
+        while True:
+            active = [binding for binding, queue in queues.items() if queue]
+            selected: list[int] = []
+            selected_documents: set[str] = set()
+            selected_tasks: set[int] = set()
+
+            while len(selected) < self._guides_per_batch:
+                candidates = [
+                    binding
+                    for binding in active
+                    if binding not in selected
+                    and self._binding_index.by_binding_index(binding).support_document_id
+                    not in selected_documents
+                ]
+                if not candidates:
+                    break
+
+                unseen_task = [
+                    binding
+                    for binding in candidates
+                    if self._binding_index.by_binding_index(binding).task_index
+                    not in selected_tasks
+                ]
+                pool = unseen_task or candidates
+                chosen = max(
+                    pool,
+                    key=lambda binding: (
+                        len(queues[binding]),
+                        tie_break[binding],
+                        -binding,
+                    ),
+                )
+                record = self._binding_index.by_binding_index(chosen)
+                selected.append(chosen)
+                selected_documents.add(record.support_document_id)
+                selected_tasks.add(record.task_index)
+
+            if len(selected) < self._guides_per_batch:
+                break
+
+            batch: list[int] = []
+            for binding in selected:
+                batch.extend(queues[binding].popleft())
+            batches.append(batch)
+
+            for binding in selected:
+                tie_break[binding] = float(rng.random())
+
+        rng.shuffle(batches)
+        return batches
+
+    def __iter__(self) -> Iterator[list[int]]:
+        batches = self._build_batches(self._epoch)
+        if len(batches) != len(self):
+            raise RuntimeError(
+                "grouped sampler batch count changed across epochs: "
+                f"expected {len(self)}, got {len(batches)}"
+            )
+        yield from batches

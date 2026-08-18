@@ -108,6 +108,17 @@ class _FrameLoader:
         return _rgb(80 + frame_ref["episode_frame_index"])
 
 
+class _BatchFrameLoader(_FrameLoader):
+    def __init__(self):
+        super().__init__()
+        self.batch_calls: list[tuple[Any, tuple[dict[str, Any], ...]]] = []
+
+    def load_rgb_many(self, document: Any, frame_refs):
+        refs = tuple(frame_refs)
+        self.batch_calls.append((document, refs))
+        return tuple(_rgb(80 + ref["episode_frame_index"]) for ref in refs)
+
+
 class _Tokenizer:
     def __init__(self):
         self.calls: list[str] = []
@@ -156,6 +167,29 @@ def test_resolver_builds_guide_input_from_support_frames_only():
     assert all(call[0] is bundle.documents[0].document for call in frame_loader.calls)
     assert np.asarray(guide.images).shape[-1] == 3
     assert all(not isinstance(leaf, str) for leaf in jax.tree_util.tree_leaves(guide))
+
+
+def test_resolver_prefers_one_batch_decode_for_all_unique_guide_frames():
+    binding_index, bundle, plan = _make_setup()
+    frame_loader = _BatchFrameLoader()
+    resolver = VideoHarnessGuideResolver(
+        artifact_bundle=bundle,
+        binding_index=binding_index,
+        dataset_root=Path("/explicit/dataset"),
+        tokenizer=_Tokenizer(),
+        materializer_config=GuideMaterializerConfig(2, 1, 4),
+        frame_loader=frame_loader,
+        plan_builder=lambda *_args, **_kwargs: plan,
+    )
+
+    resolver(binding_index.by_binding_index(0))
+
+    assert frame_loader.calls == []
+    assert len(frame_loader.batch_calls) == 1
+    assert frame_loader.batch_calls[0][1] == (
+        {"episode_frame_index": 0, "timestamp_s": 0.0},
+        {"episode_frame_index": 2, "timestamp_s": 0.08},
+    )
 
 
 def test_resolver_rejects_non_rgb_frame_from_video_harness_boundary():

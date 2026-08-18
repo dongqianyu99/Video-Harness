@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
@@ -40,6 +40,40 @@ class RoboDojoGuideMaterializationConfig:
             max_frames=self.max_frames,
             max_units=self.max_units,
             max_text_tokens=self.max_text_tokens,
+        )
+
+
+@dataclass(frozen=True)
+class RoboDojoGuideResolverFactory:
+    """Pickle-safe factory for one worker-local VideoHarness resolver."""
+
+    dataset_artifact_path: Path
+    documents_artifact_path: Path
+    pairs_artifact_path: Path
+    dataset_root: Path
+    binding_records: tuple[GuideBindingRecord, ...]
+    materializer_config: GuideMaterializerConfig
+    profile: str = "actuator-v0"
+
+    def __call__(self) -> VideoHarnessGuideResolver:
+        reader = importlib.import_module("video_harness.reader")
+        bundle = reader.load_guide_artifact_bundle(
+            dataset_path=self.dataset_artifact_path,
+            documents_path=self.documents_artifact_path,
+            pairs_path=self.pairs_artifact_path,
+        )
+        tokenizer_module = importlib.import_module("openpi.models.tokenizer")
+        tokenizer = tokenizer_module.PaligemmaTokenizer(
+            self.materializer_config.max_text_tokens
+        )
+        binding_index = GuideBindingIndex.from_bindings(self.binding_records)
+        return VideoHarnessGuideResolver(
+            artifact_bundle=bundle,
+            binding_index=binding_index,
+            dataset_root=self.dataset_root,
+            tokenizer=tokenizer,
+            materializer_config=self.materializer_config,
+            profile=self.profile,
         )
 
 
@@ -165,7 +199,7 @@ class VideoHarnessGuideResolver:
 
             document = source.document
 
-            def frame_decoder(frame_ref: Any) -> np.ndarray:
+            def checked_frame_dict(frame_ref: Any) -> tuple[dict[str, Any], str]:
                 frame_context = f"{context}, unit/frame={frame_ref!r}"
                 if frame_ref.document_id != record.support_document_id:
                     raise ValueError(
@@ -191,6 +225,10 @@ class VideoHarnessGuideResolver:
                     "episode_frame_index": int(episode_frame_index),
                     "timestamp_s": float(timestamp_s),
                 }
+                return frame_dict, frame_context
+
+            def frame_decoder(frame_ref: Any) -> np.ndarray:
+                frame_dict, frame_context = checked_frame_dict(frame_ref)
                 payload = _load_frame_payload(
                     self._frame_loader,
                     document,
@@ -198,9 +236,35 @@ class VideoHarnessGuideResolver:
                 )
                 return _validate_rgb_frame(payload, context=frame_context)
 
+            frames_decoder = None
+            load_rgb_many = getattr(self._frame_loader, "load_rgb_many", None)
+            if callable(load_rgb_many):
+                def decode_many(frame_refs: Sequence[Any]) -> tuple[np.ndarray, ...]:
+                    checked = [checked_frame_dict(frame_ref) for frame_ref in frame_refs]
+                    payloads = tuple(
+                        load_rgb_many(
+                            document,
+                            [frame_dict for frame_dict, _ in checked],
+                        )
+                    )
+                    if len(payloads) != len(checked):
+                        raise ValueError(
+                            "load_rgb_many returned an unexpected number of frames: "
+                            f"expected {len(checked)}, got {len(payloads)}"
+                        )
+                    return tuple(
+                        _validate_rgb_frame(payload, context=frame_context)
+                        for payload, (_, frame_context) in zip(
+                            payloads, checked, strict=True
+                        )
+                    )
+
+                frames_decoder = decode_many
+
             guide = materialize_guide(
                 plan,
                 frame_decoder=frame_decoder,
+                frames_decoder=frames_decoder,
                 tokenizer=self._tokenizer,
                 config=self._materializer_config,
             )

@@ -13,6 +13,9 @@ from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_inputs import validate_guide_conditioned_batch
 from openpi.models.guide_materializer import GuideMaterializerConfig
 from openpi.models.guide_materializer import materialize_guide
+from openpi.training import guide_data_loader as _guide_data_loader
+from openpi.training.guide_cache import ConstantResolverFactory
+from openpi.training.guide_cache import ProcessLocalGuideResolver
 from openpi.training.guide_collator import SingleGuideBatchCollator
 from openpi.training.guide_data_loader import GuidedDataLoader
 from openpi.training.guide_dataset import GuideBindingIndex
@@ -331,15 +334,25 @@ def test_guided_loader_num_batches_stops_exactly():
     assert len(resolver.calls) == 3
 
 
-def test_guided_loader_rejects_workers_and_empty_sampler():
+def test_guided_loader_configures_workers_and_rejects_negative_workers_or_empty_sampler():
     loader, _, _, _ = _make_loader(num_batches=1)
+
+    worker_loader = GuidedDataLoader(
+        loader._data_loader.dataset,  # noqa: SLF001
+        batch_sampler=loader._data_loader.batch_sampler,  # noqa: SLF001
+        collator=loader._data_loader.collate_fn,  # noqa: SLF001
+        num_workers=1,
+        prefetch_factor=3,
+    )
+    assert worker_loader.torch_loader.num_workers == 1
+    assert worker_loader.torch_loader.prefetch_factor == 3
 
     with pytest.raises(ValueError, match="num_workers"):
         GuidedDataLoader(
             loader._data_loader.dataset,  # noqa: SLF001
             batch_sampler=loader._data_loader.batch_sampler,  # noqa: SLF001
             collator=loader._data_loader.collate_fn,  # noqa: SLF001
-            num_workers=1,
+            num_workers=-1,
         )
 
     class _EmptySampler:
@@ -360,6 +373,31 @@ def test_guided_loader_rejects_workers_and_empty_sampler():
             batch_sampler=_EmptySampler(),
             collator=loader._data_loader.collate_fn,  # noqa: SLF001
         )
+
+
+def test_guided_loader_spawn_worker_returns_a_complete_batch():
+    loader, _, _, _ = _make_loader(num_batches=1)
+    process_local_resolver = ProcessLocalGuideResolver(
+        resolver_factory=ConstantResolverFactory(_MaterializingResolver(_make_plans())),
+        max_entries=1,
+    )
+    worker_collator = SingleGuideBatchCollator(
+        binding_index=_make_binding_index(),
+        guide_input_resolver=process_local_resolver,
+    )
+    worker_loader = GuidedDataLoader(
+        loader._data_loader.dataset,  # noqa: SLF001
+        batch_sampler=loader._data_loader.batch_sampler,  # noqa: SLF001
+        collator=worker_collator,
+        num_batches=1,
+        num_workers=1,
+        prefetch_factor=2,
+        persistent_workers=False,
+    )
+
+    batch = next(iter(worker_loader))
+
+    assert validate_guide_conditioned_batch(batch) == (1, 2)
 
 
 def test_guided_loader_rejects_mixed_binding_batch_from_sampler():
@@ -434,3 +472,25 @@ def test_guided_loader_requires_native_data_config_for_checkpoint_assets():
     native_config = object()
     loader._data_config = native_config  # noqa: SLF001
     assert loader.data_config() is native_config
+
+
+def test_device_prefetch_is_bounded_and_preserves_order(monkeypatch):
+    batches = [object(), object(), object()]
+    calls = []
+
+    def fake_device_put(batch, sharding):
+        calls.append((batch, sharding))
+        return ("device", batch)
+
+    monkeypatch.setattr(_guide_data_loader.jax, "device_put", fake_device_put)
+    iterator = _guide_data_loader.prefetch_guided_batches(
+        iter(batches),
+        sharding="sharding",
+        size=2,
+    )
+
+    first = next(iterator)
+    assert first == ("device", batches[0])
+    assert len(calls) == 2
+    assert list(iterator) == [("device", batches[1]), ("device", batches[2])]
+    assert [batch for batch, _ in calls] == batches

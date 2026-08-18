@@ -95,6 +95,40 @@ def _validate_items(
     return tuple(queries), shared_binding_index
 
 
+def _validate_grouped_items(
+    items: Sequence[Any],
+    *,
+    guides_per_batch: int,
+    queries_per_guide: int,
+    binding_index: GuideBindingIndex,
+) -> tuple[tuple[tuple[Mapping[str, Any], ...], ...], tuple[int, ...]]:
+    expected_items = guides_per_batch * queries_per_guide
+    if len(items) != expected_items:
+        raise ValueError(
+            f"grouped batch must contain G*Q={expected_items} items, got {len(items)}"
+        )
+
+    query_groups: list[tuple[Mapping[str, Any], ...]] = []
+    binding_indices: list[int] = []
+    document_ids: set[str] = set()
+
+    for group_index in range(guides_per_batch):
+        start = group_index * queries_per_guide
+        stop = start + queries_per_guide
+        group_queries, current_binding_index = _validate_items(items[start:stop])
+        record = binding_index.by_binding_index(current_binding_index)
+        if record.support_document_id in document_ids:
+            raise ValueError(
+                "each Guide group must use a distinct support document, got duplicate "
+                f"{record.support_document_id!r}"
+            )
+        document_ids.add(record.support_document_id)
+        query_groups.append(group_queries)
+        binding_indices.append(current_binding_index)
+
+    return tuple(query_groups), tuple(binding_indices)
+
+
 def _stack_tree(values: Sequence[Any]) -> Any:
     if not values:
         raise ValueError("cannot stack an empty sequence")
@@ -217,4 +251,105 @@ class SingleGuideBatchCollator:
                 f"item count {len(items)}"
             )
 
+        return batch
+
+
+def _concatenate_guides(guides: Sequence[GuideInput]) -> GuideInput:
+    if not guides:
+        raise ValueError("cannot concatenate an empty Guide sequence")
+
+    for index, guide in enumerate(guides):
+        if not isinstance(guide, GuideInput):
+            raise ValueError(
+                f"resolved guide {index} must be GuideInput, got {type(guide).__name__}"
+            )
+        leaves = jax.tree_util.tree_leaves(guide)
+        if any(not hasattr(leaf, "shape") or leaf.shape[0] != 1 for leaf in leaves):
+            raise ValueError(
+                f"resolved guide {index} must have exactly one leading Guide group"
+            )
+
+    return jax.tree_util.tree_map(
+        lambda *values: np.concatenate(
+            [np.asarray(value) for value in values], axis=0
+        ),
+        *guides,
+    )
+
+
+class MultiGuideBatchCollator:
+    """Collate one fixed ``G guides x Q queries`` batch.
+
+    The sampler is responsible for group-major item ordering.  This collator
+    validates that ordering, resolves each distinct Guide exactly once, and
+    returns the grouped tensor contract consumed by ``GuidePi0``.
+    """
+
+    def __init__(
+        self,
+        *,
+        binding_index: GuideBindingIndex,
+        guide_input_resolver: Callable[[GuideBindingRecord], GuideInput],
+        guides_per_batch: int,
+        queries_per_guide: int,
+    ):
+        if not callable(guide_input_resolver):
+            raise ValueError("guide_input_resolver must be callable")
+        for name, value in (
+            ("guides_per_batch", guides_per_batch),
+            ("queries_per_guide", queries_per_guide),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+
+        self._binding_index = binding_index
+        self._guide_input_resolver = guide_input_resolver
+        self._guides_per_batch = guides_per_batch
+        self._queries_per_guide = queries_per_guide
+
+    def __call__(self, items: Sequence[Mapping[str, Any]]) -> GuideConditionedBatch:
+        query_groups, binding_indices = _validate_grouped_items(
+            items,
+            guides_per_batch=self._guides_per_batch,
+            queries_per_guide=self._queries_per_guide,
+            binding_index=self._binding_index,
+        )
+
+        stacked_groups = [
+            _stack_query_items(group_queries)
+            for group_queries in query_groups
+        ]
+        collated_query = dict(_stack_tree(stacked_groups))
+        if "actions" not in collated_query:
+            raise ValueError("collated query must contain actions")
+
+        actions = collated_query.pop("actions")
+        observation = _model.Observation.from_dict(collated_query)
+
+        resolved_guides: list[GuideInput] = []
+        for current_binding_index in binding_indices:
+            record = self._binding_index.by_binding_index(current_binding_index)
+            try:
+                guide = self._guide_input_resolver(record)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"failed to resolve Guide for binding_index={current_binding_index}"
+                ) from exc
+            resolved_guides.append(guide)
+
+        batch = GuideConditionedBatch(
+            observation=observation,
+            actions=actions,
+            guide=_concatenate_guides(resolved_guides),
+        )
+        groups, queries = validate_guide_conditioned_batch(batch)
+        if (groups, queries) != (
+            self._guides_per_batch,
+            self._queries_per_guide,
+        ):
+            raise ValueError(
+                "collated grouped shape mismatch: expected "
+                f"{(self._guides_per_batch, self._queries_per_guide)}, "
+                f"got {(groups, queries)}"
+            )
         return batch

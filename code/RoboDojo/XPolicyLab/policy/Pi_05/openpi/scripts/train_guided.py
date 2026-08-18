@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib
+import itertools
 import logging
 from pathlib import Path
 from typing import Any
@@ -15,10 +16,10 @@ from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_inputs import validate_guide_conditioned_batch
 from openpi.models.guide_pi0 import GuidePi0
 from openpi.models.guide_pi0_config import GuidePi0Config
+from openpi.training.guide_data_loader import prefetch_guided_batches
 from openpi.training.guide_train_config import GuidedTrainRunConfig
 from openpi.training.guide_train_config import resolve_guided_train_config
 from openpi.training.guide_train_sharding import make_guided_batch_sharding
-from openpi.training.guide_train_sharding import put_guided_batch
 from openpi.training.guide_train_step import guided_train_step
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 
@@ -45,8 +46,11 @@ def _validate_runtime_config(run_config: GuidedTrainRunConfig, resolved_config: 
             "resolved TrainConfig.batch_size does not match guided_data.batch_size: "
             f"{resolved_config.batch_size} != {run_config.guided_data.batch_size}"
         )
-    if resolved_config.num_workers != 0:
-        raise ValueError("guided training requires num_workers=0")
+    if resolved_config.num_workers != run_config.guided_data.num_workers:
+        raise ValueError(
+            "resolved num_workers does not match guided data config: "
+            f"{resolved_config.num_workers} != {run_config.guided_data.num_workers}"
+        )
     if not isinstance(resolved_config.freeze_filter, nnx.Nothing):
         raise ValueError("M5 guided training requires full dense fine-tuning with freeze_filter=nnx.Nothing()")
     if run_config.base_params_path.resolve() == run_config.checkpoint_dir.resolve():
@@ -201,7 +205,12 @@ def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
         donate_argnums=(1,),
     )
 
-    batch = put_guided_batch(first_batch, batch_sharding)
+    device_batches = prefetch_guided_batches(
+        iter(itertools.chain((first_batch,), data_iter)),
+        sharding=batch_sharding,
+        size=run_config.guided_data.device_prefetch_size,
+    )
+    batch = next(device_batches)
     start_step = int(train_state.step)
 
     for step in range(start_step, resolved_config.num_train_steps):
@@ -225,7 +234,7 @@ def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
             save_guided_state(checkpoint_manager, train_state, data_loader, step)
 
         if step < resolved_config.num_train_steps - 1:
-            batch = put_guided_batch(next(data_iter), batch_sharding)
+            batch = next(device_batches)
 
     checkpoint_manager.wait_until_finished()
     return train_state
@@ -240,8 +249,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-artifact", type=Path, required=True)
     parser.add_argument("--documents-artifact", type=Path, required=True)
     parser.add_argument("--pairs-artifact", type=Path, required=True)
-    parser.add_argument("--query-episode-index", type=int, required=True)
+    parser.add_argument("--query-episode-index", type=int, action="append")
     parser.add_argument("--batch-size", type=int, required=True)
+    parser.add_argument("--guides-per-batch", type=int, default=1)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument("--device-prefetch-size", type=int, default=2)
+    parser.add_argument("--guide-cache-entries", type=int, default=2)
+    parser.add_argument("--guide-cache-max-bytes", type=int, default=256 * 1024 * 1024)
+    parser.add_argument("--worker-timeout-s", type=float, default=0.0)
+    parser.add_argument("--worker-torch-threads", type=int, default=1)
+    parser.add_argument("--no-persistent-workers", action="store_true")
     parser.add_argument("--max-frames", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
     parser.add_argument("--max-text-tokens", type=int, required=True)
@@ -260,6 +278,14 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _run_from_args(args: argparse.Namespace) -> Any:
+    raw_query_indices = args.query_episode_index
+    if raw_query_indices is None:
+        query_episode_indices = None
+    elif isinstance(raw_query_indices, int):
+        query_episode_indices = (raw_query_indices,)
+    else:
+        query_episode_indices = tuple(raw_query_indices)
+
     guided_data = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
@@ -272,7 +298,16 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         max_frames=args.max_frames,
         max_units=args.max_units,
         max_text_tokens=args.max_text_tokens,
-        query_episode_indices=(args.query_episode_index,),
+        query_episode_indices=query_episode_indices,
+        guides_per_batch=getattr(args, "guides_per_batch", 1),
+        num_workers=getattr(args, "num_workers", 0),
+        prefetch_factor=getattr(args, "prefetch_factor", 2),
+        persistent_workers=not getattr(args, "no_persistent_workers", False),
+        worker_timeout_s=getattr(args, "worker_timeout_s", 0.0),
+        worker_torch_threads=getattr(args, "worker_torch_threads", 1),
+        guide_cache_entries=getattr(args, "guide_cache_entries", 2),
+        guide_cache_max_bytes=getattr(args, "guide_cache_max_bytes", 256 * 1024 * 1024),
+        device_prefetch_size=getattr(args, "device_prefetch_size", 2),
     )
     run_config = GuidedTrainRunConfig(
         native_config_name=args.native_config_name,

@@ -272,3 +272,38 @@ def test_materialize_guide_rejects_invalid_slots(before_slot, after_slot):
             tokenizer=_RecordingTokenizer(max_len=6),
             config=_make_config(),
         )
+
+
+def test_materializer_uses_batch_frame_decoder_once():
+    plan = _make_plan()
+    calls = []
+
+    def frames_decoder(frame_refs):
+        calls.append(tuple(frame_refs))
+        return tuple(
+            np.full((2, 4, 3), 10 + index, dtype=np.uint8)
+            for index, _ in enumerate(frame_refs)
+        )
+
+    guide = materialize_guide(
+        plan,
+        frame_decoder=lambda _frame: pytest.fail("single-frame decoder should not run"),
+        frames_decoder=frames_decoder,
+        tokenizer=_RecordingTokenizer(max_len=6),
+        config=_make_config(),
+    )
+
+    assert calls == [plan.frames]
+    assert guide.images.shape[0] == 1
+
+
+def test_materializer_rejects_batch_decoder_length_mismatch():
+    plan = _make_plan()
+    with pytest.raises(ValueError, match="exactly one frame"):
+        materialize_guide(
+            plan,
+            frame_decoder=lambda _frame: pytest.fail("single decoder should not run"),
+            frames_decoder=lambda _frames: (),
+            tokenizer=_RecordingTokenizer(max_len=6),
+            config=_make_config(),
+        )

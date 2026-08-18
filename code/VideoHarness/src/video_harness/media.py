@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -133,3 +134,76 @@ class FFmpegFrameLoader:
                 f"{len(process.stdout)}; {stderr or 'no ffmpeg error output'}"
             )
         return np.frombuffer(process.stdout, dtype=np.uint8).reshape(self.rgb_shape).copy()
+
+    def load_rgb_many(
+        self,
+        document: dict[str, Any],
+        frame_refs: Sequence[dict[str, Any]],
+    ) -> tuple[np.ndarray, ...]:
+        """Decode many episode-local frames with one FFmpeg process.
+
+        Frames are decoded from the earliest requested timestamp and selected
+        by their integral source-frame offsets.  Input order and duplicates are
+        preserved in the returned tuple while FFmpeg only emits unique frames.
+        """
+
+        if not frame_refs:
+            return ()
+
+        resolved = [self._resolve_request(document, frame_ref) for frame_ref in frame_refs]
+        video_paths = {video_path for video_path, _ in resolved}
+        if len(video_paths) != 1:
+            raise FrameDecodeError("One batch decode request must reference one video shard")
+        video_path = next(iter(video_paths))
+
+        source = document["source"]
+        fps = float(source["fps"])
+        frame_indices = [int(frame_ref["episode_frame_index"]) for frame_ref in frame_refs]
+        first_index = min(frame_indices)
+        first_timestamp = float(source["video_from_timestamp"]) + first_index / fps
+        unique_indices = sorted(set(frame_indices))
+        relative_indices = [index - first_index for index in unique_indices]
+        select_expression = "+".join(
+            f"eq(n\\,{relative_index})" for relative_index in relative_indices
+        )
+
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{first_timestamp:.6f}",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"select={select_expression}",
+            "-vsync",
+            "0",
+            "-frames:v",
+            str(len(unique_indices)),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ]
+        process = subprocess.run(command, check=False, capture_output=True)
+        frame_size = int(np.prod(self.rgb_shape))
+        expected_size = frame_size * len(unique_indices)
+        if process.returncode != 0 or len(process.stdout) != expected_size:
+            stderr = process.stderr.decode("utf-8", errors="replace").strip()
+            raise FrameDecodeError(
+                f"ffmpeg batch decode failed for {video_path}: expected "
+                f"{expected_size} bytes for {len(unique_indices)} frames, got "
+                f"{len(process.stdout)}; {stderr or 'no ffmpeg error output'}"
+            )
+
+        decoded = np.frombuffer(process.stdout, dtype=np.uint8).reshape(
+            (len(unique_indices), *self.rgb_shape)
+        )
+        by_index = {
+            frame_index: np.array(decoded[position], copy=True)
+            for position, frame_index in enumerate(unique_indices)
+        }
+        return tuple(np.array(by_index[frame_index], copy=True) for frame_index in frame_indices)
