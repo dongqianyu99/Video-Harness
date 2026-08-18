@@ -76,6 +76,11 @@ smoke scripts must not rely on a runtime download.
 5. **Short training debug.** Use `train_guided.py` for a small, explicit step
    count. Verify checkpoint save/restore and EMA before considering a longer
    experiment.
+6. **Closed-loop guided eval.** Only after a trained guided checkpoint exists,
+   enable the `PI05_GUIDANCE_*` variables documented in
+   `policy/Pi_05/README.md`. Confirm that the selected support document is the
+   dataset-first episode for the task and that repeated eval episodes report a
+   single Guide materialization.
 
 ## Commands
 

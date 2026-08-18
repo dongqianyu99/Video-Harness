@@ -3,13 +3,11 @@
 """
 #!/usr/bin/python3
 """
+import importlib
 from pathlib import Path
-import os
-import sys
 from typing import Any
 
 import numpy as np
-
 from openpi.policies import policy_config as _policy_config
 from openpi.shared import normalize as _normalize
 from openpi.training import config as _config
@@ -21,7 +19,6 @@ from XPolicyLab.utils.process_data import (
     pack_robot_state,
     unpack_robot_state,
 )
-
 
 _POLICY_DIR = Path(__file__).resolve().parent
 _CHECKPOINTS_DIR = _POLICY_DIR / "checkpoints"
@@ -95,9 +92,43 @@ class Model(ModelTemplate):
         )
         self.observation_window: dict[str, Any] | None = None
         self._latest_env_idx_list: list[int] = [0]
+        self.guidance_enabled = bool(model_cfg.get("guidance_enabled", False))
+        self._guide_session = None
+        self._prepared_case_id: str | None = None
 
         self.policy = self.get_model(model_cfg=model_cfg)
         self.model = self.policy
+        if self.guidance_enabled:
+            self._guide_session = self._create_guide_session(model_cfg)
+
+    @staticmethod
+    def _positive_config_int(model_cfg: dict[str, Any], key: str) -> int:
+        value = model_cfg.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{key} must be a positive integer in guided eval mode")
+        return value
+
+    def _create_guide_session(self, model_cfg: dict[str, Any]):
+        session_module = importlib.import_module("XPolicyLab.policy.Pi_05.guidance_eval")
+
+        def absolute_path(key: str) -> Path:
+            raw_path = model_cfg.get(key)
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise ValueError(f"{key} is required in guided eval mode")
+            path = Path(raw_path).expanduser()
+            if not path.is_absolute():
+                raise ValueError(f"{key} must be an absolute path")
+            return path
+
+        return session_module.TaskGuideSession(
+            documents_path=absolute_path("guidance_documents_path"),
+            episodes_path=absolute_path("guidance_episodes_path"),
+            dataset_root=absolute_path("guidance_dataset_root"),
+            profile=model_cfg.get("guidance_profile", "actuator-v0"),
+            max_frames=self._positive_config_int(model_cfg, "guidance_max_frames"),
+            max_units=self._positive_config_int(model_cfg, "guidance_max_units"),
+            max_text_tokens=self._positive_config_int(model_cfg, "guidance_max_text_tokens"),
+        )
 
     def get_model(self, model_cfg: dict[str, Any]):
         train_config_name = model_cfg.get("train_config_name", "pi05_aloha")
@@ -109,12 +140,46 @@ class Model(ModelTemplate):
         if repo_id is not None:
             norm_stats = _normalize.load(model_root / "assets" / str(repo_id))
 
+        if self.guidance_enabled:
+            guided_policy = importlib.import_module("openpi.policies.guided_policy")
+            return guided_policy.create_trained_guided_policy(
+                config,
+                str(model_root),
+                norm_stats=norm_stats,
+            )
         return _policy_config.create_trained_policy(config, str(model_root), norm_stats=norm_stats)
+
+    def prepare_case(self, case_meta=None):
+        if not self.guidance_enabled:
+            return None
+        case_meta = {} if case_meta is None else dict(case_meta)
+        task_name = case_meta.get("task_name")
+        if task_name is not None and task_name != self.task_name:
+            raise ValueError(
+                f"Prepared task {task_name!r} does not match model task {self.task_name!r}"
+            )
+        self._prepared_case_id = case_meta.get("action_case_id")
+        return {
+            "task_name": self.task_name,
+            "guidance_prepared": self._guide_session.guide is not None,
+        }
+
+    def _ensure_task_guide(self, obs_list: list[dict[str, Any]]) -> None:
+        if not self.guidance_enabled:
+            return
+        if not obs_list:
+            raise ValueError("guided eval requires at least one observation")
+        instructions = {obs.get("instruction") for obs in obs_list}
+        if None in instructions or "" in instructions or len(instructions) != 1:
+            raise ValueError("guided eval requires one exact shared task instruction")
+        guide = self._guide_session.bind_instruction(next(iter(instructions)))
+        self.policy.set_guide(guide)
 
     def update_obs(self, obs):
         self.update_obs_batch([obs])
 
     def update_obs_batch(self, obs_list):
+        self._ensure_task_guide(obs_list)
         self._latest_env_idx_list = [obs.get("env_idx", index) for index, obs in enumerate(obs_list)]
         encoded_obs_list = [
             encode_obs(obs, self.action_type, self.robot_action_dim_info) for obs in obs_list
@@ -151,6 +216,12 @@ class Model(ModelTemplate):
         return action_list
 
     def reset(self):
+        # The task-level Guide is immutable and intentionally survives episode resets.
+        self.observation_window = None
+        self._latest_env_idx_list = [0]
+
+    def on_trial_end(self, result=None):
+        del result
         self.observation_window = None
         self._latest_env_idx_list = [0]
 

@@ -257,6 +257,13 @@ export HF_LEROBOT_HOME=/parent/of/RoboDojo_lerobot_v30_video
 export OPENPI_LEROBOT_REPO_ID=RoboDojo_lerobot_v30_video
 ```
 
+Training uses `pairs.jsonl`. Evaluation deliberately uses a separate rule:
+`eval_guidance.load_eval_guidance_catalog()` validates `episodes.jsonl` and
+binds every task to the annotated document whose `source.episode_index` is the
+smallest dataset episode for that task. All layouts and repeats of that task
+reuse the same immutable Guide; missing or non-trainable first documents fail
+instead of falling back to a later demonstration.
+
 ## Current limitations
 
 - VLM annotation currently writes its output after the requested run completes;
@@ -266,5 +273,6 @@ export OPENPI_LEROBOT_REPO_ID=RoboDojo_lerobot_v30_video
 - Schema validity does not guarantee semantic correctness. Manually audit a
   stratified sample before using generated evidence for training.
 - The 1 Hz units are uniform temporal samples, not discovered semantic stages.
-- Actuator attention, Guide memory, retrieval, caching, and training integration
-  remain separate work.
+- The Pi_05 integration implements compact Guide memory, training, and a
+  task-level evaluation bridge. Learned retrieval, decoded-frame caching,
+  multi-Guide batching, and full-model/real-data validation remain future work.

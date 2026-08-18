@@ -56,6 +56,33 @@ bash eval.sh RoboDojo stack_bowls RoboDojo-cotrain-arx_x5-joint-0 arx_x5 joint 0
 
 `EVAL_ENV_TYPE=debug` runs the offline wiring check (no simulator); leave it unset or set `EVAL_ENV_TYPE=sim` for RoboDojo simulation. For split-machine deployment via `setup_eval_policy_server.sh` / `setup_eval_env_client.sh`, follow the [Deployment Flow](../../README.md#-deployment-flow).
 
+### Guide-conditioned evaluation
+
+Guide-conditioned checkpoints use one immutable Behavior Document per task.
+The catalog validates `episodes.jsonl` and always selects the document generated
+from the smallest dataset `episode_index` for that task; every RoboDojo layout
+and repeat then reuses the same materialized Guide.
+
+Install `VideoHarness` in the Pi_05 OpenPI environment and provide absolute
+artifact paths:
+
+```bash
+export PI05_GUIDANCE_ENABLED=1
+export PI05_GUIDANCE_DOCUMENTS_PATH=/path/to/documents.annotated.jsonl
+export PI05_GUIDANCE_EPISODES_PATH=/path/to/episodes.jsonl
+export PI05_GUIDANCE_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
+export PI05_GUIDANCE_MAX_FRAMES=64
+export PI05_GUIDANCE_MAX_UNITS=32
+export PI05_GUIDANCE_MAX_TEXT_TOKENS=128
+
+bash eval.sh RoboDojo <task_name> <guided_ckpt> arx_x5 joint 0 0 0 uv <eval_env_conda_env>
+```
+
+The three budgets above are explicit capacity limits, not recommended defaults;
+set them from the generated corpus report. Guided eval currently supports JAX
+checkpoints only. With `PI05_GUIDANCE_ENABLED` unset, the official stock Pi_05
+evaluation path is unchanged.
+
 ## Configuration
 
 `deploy.yml` keys to check before evaluation: `checkpoint_num`, `result_dir`, `obs_transform_pipeline`, `policy_uv_env_path`, `train_config_name` (must match the config used by `train.sh`), `repo_id`.
@@ -69,5 +96,10 @@ Environment variables used by the adapter scripts:
 | `OPENPI_TRAIN_CONFIG_NAME` | Overrides the training config; defaults to `pi05_base_aloha_full_sim_arx-x5_seed_0`. |
 | `OPENPI_DATA_MODE` | Data-processing mode passed to `openpi/scripts/process_data.py`; defaults to `image`. |
 | `OPENPI_LOCAL_CACHE_ROOT` | Per-host local cache root for the HF datasets / JAX compilation caches; defaults to `/tmp/openpi-cache-$(hostname)`. |
+| `PI05_GUIDANCE_ENABLED` | Set to `1` to enable task-level Behavior Document evaluation. |
+| `PI05_GUIDANCE_DOCUMENTS_PATH` | Absolute annotated document JSON/JSONL path. |
+| `PI05_GUIDANCE_EPISODES_PATH` | Absolute `episodes.jsonl` path used to prove dataset-first selection. |
+| `PI05_GUIDANCE_DATASET_ROOT` | Absolute LeRobot dataset root used to decode support frames. |
+| `PI05_GUIDANCE_MAX_FRAMES` / `MAX_UNITS` / `MAX_TEXT_TOKENS` | Fixed Guide capacity limits. |
 
 `OPENPI_ROOT` and `OPENPI_SRC` are additional overrides consumed by the local scripts.

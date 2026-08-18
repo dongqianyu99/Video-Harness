@@ -72,6 +72,23 @@ if [[ -d "${OPENPI_SRC}" ]]; then
     PYTHONPATH_PARTS+=("${OPENPI_SRC}")
 fi
 
+GUIDANCE_OVERRIDES=()
+if [[ "${PI05_GUIDANCE_ENABLED:-0}" == "1" ]]; then
+    : "${PI05_GUIDANCE_DOCUMENTS_PATH:?Set PI05_GUIDANCE_DOCUMENTS_PATH}"
+    : "${PI05_GUIDANCE_EPISODES_PATH:?Set PI05_GUIDANCE_EPISODES_PATH}"
+    : "${PI05_GUIDANCE_DATASET_ROOT:?Set PI05_GUIDANCE_DATASET_ROOT}"
+    GUIDANCE_OVERRIDES+=(
+        guidance_enabled=true
+        "guidance_documents_path=${PI05_GUIDANCE_DOCUMENTS_PATH}"
+        "guidance_episodes_path=${PI05_GUIDANCE_EPISODES_PATH}"
+        "guidance_dataset_root=${PI05_GUIDANCE_DATASET_ROOT}"
+        "guidance_profile=${PI05_GUIDANCE_PROFILE:-actuator-v0}"
+        "guidance_max_frames=${PI05_GUIDANCE_MAX_FRAMES:-64}"
+        "guidance_max_units=${PI05_GUIDANCE_MAX_UNITS:-32}"
+        "guidance_max_text_tokens=${PI05_GUIDANCE_MAX_TEXT_TOKENS:-128}"
+    )
+fi
+
 exec env \
     PYTHONUNBUFFERED=1 \
     PYTHONWARNINGS=ignore::UserWarning \
@@ -89,4 +106,5 @@ exec env \
             seed="${seed}" \
             policy_name="${policy_name}" \
             action_type="${action_type}" \
-            action_dim="${action_dim}"
+            action_dim="${action_dim}" \
+            "${GUIDANCE_OVERRIDES[@]}"
