@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
@@ -53,6 +53,9 @@ class RoboDojoGuideResolverFactory:
     dataset_root: Path
     binding_records: tuple[GuideBindingRecord, ...]
     materializer_config: GuideMaterializerConfig
+    materializer_configs_by_binding: tuple[
+        tuple[int, GuideMaterializerConfig], ...
+    ] = ()
     profile: str = "actuator-v0"
 
     def __call__(self) -> VideoHarnessGuideResolver:
@@ -73,6 +76,9 @@ class RoboDojoGuideResolverFactory:
             dataset_root=self.dataset_root,
             tokenizer=tokenizer,
             materializer_config=self.materializer_config,
+            materializer_configs_by_binding=dict(
+                self.materializer_configs_by_binding
+            ),
             profile=self.profile,
         )
 
@@ -149,6 +155,9 @@ class VideoHarnessGuideResolver:
         dataset_root: Path,
         tokenizer: Any,
         materializer_config: GuideMaterializerConfig,
+        materializer_configs_by_binding: Mapping[
+            int, GuideMaterializerConfig
+        ] | None = None,
         profile: str = "actuator-v0",
         frame_loader: Any | None = None,
         plan_builder: Callable[..., Any] | None = None,
@@ -165,6 +174,11 @@ class VideoHarnessGuideResolver:
         self._dataset_root = Path(dataset_root)
         self._tokenizer = tokenizer
         self._materializer_config = materializer_config
+        self._materializer_configs_by_binding = (
+            {}
+            if materializer_configs_by_binding is None
+            else dict(materializer_configs_by_binding)
+        )
         self._profile = profile
         self._frame_loader = (
             _default_frame_loader(self._dataset_root)
@@ -266,7 +280,9 @@ class VideoHarnessGuideResolver:
                 frame_decoder=frame_decoder,
                 frames_decoder=frames_decoder,
                 tokenizer=self._tokenizer,
-                config=self._materializer_config,
+                config=self._materializer_configs_by_binding.get(
+                    record.binding_index, self._materializer_config
+                ),
             )
             if not isinstance(guide, GuideInput):
                 raise ValueError(

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import pytest
 
 from openpi.training.guide_dataset import GuideBindingIndex
+from openpi.training.guide_dataset import GuideSampleIndex
 from openpi.training.guide_sampler import BindingBatchStats
 from openpi.training.guide_sampler import GroupedBindingBatchSampler
 from openpi.training.guide_sampler import HomogeneousBindingBatchSampler
@@ -353,3 +354,108 @@ def test_grouped_sampler_is_reproducible_and_changes_order_by_epoch():
     second.set_epoch(1)
     assert list(first) == list(second)
     assert list(first) != epoch_zero
+
+
+def test_grouped_sampler_keeps_length_buckets_and_accumulation_blocks_homogeneous():
+    index = GuideBindingIndex.from_bindings(
+        [
+            _SupportBinding(10, 11, 0, "doc-a"),
+            _SupportBinding(20, 21, 1, "doc-b"),
+            _SupportBinding(30, 31, 2, "doc-c"),
+            _SupportBinding(40, 41, 3, "doc-d"),
+        ]
+    )
+    mapping = {
+        0: tuple(range(8)),
+        1: tuple(range(8, 16)),
+        2: tuple(range(16, 24)),
+        3: tuple(range(24, 32)),
+    }
+    binding_to_bucket = {0: "small", 1: "small", 2: "large", 3: "large"}
+    sample_to_binding = {
+        sample: binding for binding, samples in mapping.items() for sample in samples
+    }
+    sampler = GroupedBindingBatchSampler(
+        mapping,
+        binding_index=index,
+        guides_per_batch=2,
+        queries_per_guide=2,
+        seed=5,
+        binding_to_bucket=binding_to_bucket,
+        batch_block_size=2,
+    )
+
+    batches = list(sampler)
+    batch_buckets = []
+    for batch in batches:
+        bindings = {
+            sample_to_binding[
+                sample.sample_index if isinstance(sample, GuideSampleIndex) else sample
+            ]
+            for sample in batch
+        }
+        buckets = {binding_to_bucket[binding] for binding in bindings}
+        assert len(buckets) == 1
+        batch_buckets.append(next(iter(buckets)))
+    assert all(
+        batch_buckets[index] == batch_buckets[index + 1]
+        for index in range(0, len(batch_buckets), 2)
+    )
+    assert dict(sampler.stats.bucket_batch_counts) == {"large": 4, "small": 4}
+
+
+def test_pad_mask_preserves_query_remainders_and_marks_padding_invalid():
+    index = GuideBindingIndex.from_bindings(
+        [
+            _SupportBinding(10, 11, 0, "doc-a"),
+            _SupportBinding(20, 21, 1, "doc-b"),
+        ]
+    )
+    sampler = GroupedBindingBatchSampler(
+        {0: (0, 1, 2), 1: (3,)},
+        binding_index=index,
+        guides_per_batch=2,
+        queries_per_guide=2,
+        remainder_strategy="pad_mask",
+        seed=1,
+    )
+
+    batches = list(sampler)
+    validity = [
+        sample.query_valid if isinstance(sample, GuideSampleIndex) else True
+        for batch in batches
+        for sample in batch
+    ]
+    raw_indices = [
+        sample.sample_index if isinstance(sample, GuideSampleIndex) else sample
+        for batch in batches
+        for sample in batch
+        if not isinstance(sample, GuideSampleIndex) or sample.query_valid
+    ]
+
+    assert sorted(raw_indices) == [0, 1, 2, 3]
+    assert sum(validity) == 4
+    assert sampler.stats.valid_query_samples == 4
+    assert sampler.stats.padded_query_slots == len(validity) - 4
+    assert sampler.stats.dropped_query_samples == 0
+
+
+def test_pad_mask_can_complete_final_guide_and_accumulation_dimensions():
+    index = GuideBindingIndex.from_bindings(
+        [_SupportBinding(10, 11, 0, "doc-a")]
+    )
+    sampler = GroupedBindingBatchSampler(
+        {0: (0, 1, 2)},
+        binding_index=index,
+        guides_per_batch=2,
+        queries_per_guide=2,
+        remainder_strategy="pad_mask",
+        batch_block_size=2,
+    )
+
+    batches = list(sampler)
+
+    assert len(batches) % 2 == 0
+    assert sampler.stats.valid_query_samples == 3
+    assert sampler.stats.dropped_query_samples == 0
+    assert sampler.stats.padded_query_slots == len(batches) * 4 - 3

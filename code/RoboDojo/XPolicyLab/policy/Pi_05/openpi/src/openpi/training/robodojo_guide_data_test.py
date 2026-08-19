@@ -13,6 +13,7 @@ import pytest
 from openpi.models import model as _model
 from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.training import robodojo_guide_data as _guide_data
+from openpi.training.guide_buckets import GuideLengthBucket
 from openpi.training.guide_sampler import QueryEpisodeRange
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
@@ -390,6 +391,64 @@ def test_factory_mixes_two_tasks_and_two_guides_in_one_grouped_batch(tmp_path):
     assert len(frame_loader.calls) == 4
     assert loader.groups_per_batch == 2
     assert loader.queries_per_guide == 2
+
+
+def test_factory_materializes_each_length_bucket_with_its_own_shape(tmp_path):
+    setup = _make_setup(tmp_path)
+    config, train_config, _, bundle, episodes, plans, tokenizer, frame_loader, _ = setup
+    config = dataclasses.replace(
+        config,
+        max_frames=4,
+        max_units=2,
+        guide_length_buckets=(
+            GuideLengthBucket(1, 2),
+            GuideLengthBucket(2, 4),
+        ),
+    )
+    plans = dict(plans)
+    plans[200] = _Plan(
+        200,
+        "doc-1",
+        201,
+        5,
+        (
+            _Frame("doc-1", 201, 0, 0.0),
+            _Frame("doc-1", 201, 2, 0.08),
+            _Frame("doc-1", 201, 3, 0.12),
+        ),
+        (_Unit(0, 1, "guide-1a"), _Unit(1, 2, "guide-1b")),
+    )
+
+    loader = create_robodojo_guided_data_loader(
+        train_config,
+        config,
+        num_batches=4,
+        skip_norm_stats=True,
+        dataset_factory=lambda *_args: setup[2],
+        artifact_loader=lambda **_paths: bundle,
+        episode_reader=lambda _root: episodes,
+        tokenizer=tokenizer,
+        frame_loader=frame_loader,
+        plan_builder=lambda _bundle, *, query_episode_index, profile: plans[query_episode_index],
+        transforms_module=_TRANSFORMS,
+    )
+
+    batches = list(loader)
+
+    assert {
+        (batch.guide.images.shape[1], batch.guide.unit_mask.shape[1])
+        for batch in batches
+    } == {(2, 1), (4, 2)}
+    assert loader.host_metadata["guide_binding_bucket_counts"] == (
+        ("u1-f2", 1),
+        ("u2-f4", 1),
+    )
+    assert loader.host_metadata["guide_document_bucket_counts"] == (
+        ("u1-f2", 1),
+        ("u2-f4", 1),
+    )
+    assert loader.host_metadata["guide_length_summary"]["documents"] == 2
+    assert loader.host_metadata["guide_length_summary"]["units_max"] == 2
 
 
 def test_factory_uses_split_manifest_query_scope_before_optional_debug_subset(

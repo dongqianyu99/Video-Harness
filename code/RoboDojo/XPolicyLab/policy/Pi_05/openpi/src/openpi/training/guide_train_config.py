@@ -32,6 +32,9 @@ class GuidedTrainRunConfig:
     overwrite: bool = False
     resume: bool = False
     wandb_enabled: bool = False
+    gradient_accumulation_steps: int = 1
+    reference_global_batch_size: int = 256
+    enforce_reference_batch_size: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.native_config_name, str) or not self.native_config_name.strip():
@@ -43,13 +46,35 @@ class GuidedTrainRunConfig:
         if not isinstance(self.experiment_name, str) or not self.experiment_name.strip():
             raise ValueError("experiment_name must be a non-empty string")
 
-        for name in ("num_train_steps", "log_interval", "save_interval", "fsdp_devices"):
+        for name in (
+            "num_train_steps",
+            "log_interval",
+            "save_interval",
+            "fsdp_devices",
+            "gradient_accumulation_steps",
+            "reference_global_batch_size",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
         if self.overwrite and self.resume:
             raise ValueError("overwrite and resume cannot both be true")
+        if not isinstance(self.enforce_reference_batch_size, bool):
+            raise ValueError("enforce_reference_batch_size must be bool")
+        if (
+            self.guided_data.gradient_accumulation_steps
+            != self.gradient_accumulation_steps
+        ):
+            raise ValueError(
+                "guided_data.gradient_accumulation_steps must match the run config"
+            )
+
+    @property
+    def effective_global_batch_size(self) -> int:
+        """Valid-query capacity per optimizer step in strict drop mode."""
+
+        return self.guided_data.batch_size * self.gradient_accumulation_steps
 
 
 def _native_config() -> Any:

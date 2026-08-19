@@ -65,8 +65,10 @@ The real training loader uses a fixed `G guides x Q queries` batch, where
 `batch_size = G * Q`. Query samples remain group-major and every query group
 is bound to one immutable support document for the whole query episode. The
 grouped sampler prefers different tasks and requires distinct support
-documents inside a batch; it does not duplicate query frames to fill an
-incomplete batch.
+documents inside a batch. `remainder_strategy=drop` discards incomplete query
+groups explicitly. `pad_mask` preserves them by repeating only the storage
+slot and setting `query_mask=false`; masked slots are processed but contribute
+zero loss and zero gradient.
 
 Each persistent data worker loads its VideoHarness bundle and tokenizer once,
 decodes all unique frames of one Guide with one FFmpeg process, and keeps a
@@ -75,6 +77,30 @@ prefetch overlaps native LeRobot/video work with training, while a separate
 JAX queue asynchronously places upcoming grouped batches on device. These are
 performance mechanisms only: they do not cache SigLIP features, change Guide
 bindings, or modify the native Pi0.5 loss.
+
+Guide length buckets use repeated `--guide-length-bucket
+MAX_UNITS:MAX_FRAMES` arguments. Every support document is assigned to the
+smallest fitting bucket; batches and gradient-accumulation blocks never mix
+buckets. Oversized Guides fail rather than being truncated. First run the data
+benchmark with one generous `max_units/max_frames` budget and use its
+`guide_length_summary` to choose bucket boundaries.
+With strict `drop`, every bucket must contain at least `G` distinct support
+documents; otherwise merge that sparse bucket with a neighbor or reduce `G`.
+
+The official RoboDojo Pi0.5 recipe in the vendored release uses global batch
+256, two FSDP devices, and 60,000 optimizer steps. In this single-process JAX
+path, `batch_size=G*Q` is already the global microbatch distributed across the
+devices—do not multiply it by the FSDP device count. Alignment is therefore:
+
+```text
+effective_global_batch = (G * Q) * gradient_accumulation_steps
+```
+
+Formal training checks this value against 256. Gradient accumulation applies
+one optimizer update, one EMA update, and one step increment after all
+microbatches. Strict alignment requires `remainder_strategy=drop`; `pad_mask`
+reports its actual valid-query count and requires an explicit batch-mismatch
+opt-out.
 
 Start with `G=1`, one worker, and one manifest query episode for correctness. For the
 first throughput run, use `G=2` or `G=4`, at least four workers, and omit
@@ -174,6 +200,7 @@ uv run python scripts/train_guided.py \
   --num-workers 1 \
   --prefetch-factor 2 \
   --device-prefetch-size 2 \
+  --allow-effective-batch-mismatch \
   --max-frames "$GUIDE_MAX_FRAMES" \
   --max-units "$GUIDE_MAX_UNITS" \
   --max-text-tokens "$GUIDE_MAX_TEXT_TOKENS" \
@@ -204,6 +231,9 @@ uv run python scripts/train_guided.py \
   --num-workers 8 \
   --prefetch-factor 2 \
   --device-prefetch-size 2 \
+  --gradient-accumulation-steps 16 \
+  --reference-global-batch-size 256 \
+  --remainder-strategy drop \
   --guide-cache-entries 2 \
   --guide-cache-max-bytes 268435456 \
   --max-frames "$GUIDE_MAX_FRAMES" \
@@ -236,6 +266,8 @@ uv run python scripts/benchmark_guided_data_loader.py \
   --guides-per-batch 4 \
   --num-workers 8 \
   --prefetch-factor 2 \
+  --gradient-accumulation-steps 16 \
+  --remainder-strategy drop \
   --max-frames "$GUIDE_MAX_FRAMES" \
   --max-units "$GUIDE_MAX_UNITS" \
   --max-text-tokens "$GUIDE_MAX_TEXT_TOKENS" \

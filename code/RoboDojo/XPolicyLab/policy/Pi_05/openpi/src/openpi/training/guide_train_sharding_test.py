@@ -104,6 +104,19 @@ def test_optional_observation_fields_remain_none() -> None:
     assert sharding.observation.tokenized_prompt_mask is None
 
 
+def test_query_mask_uses_the_same_group_query_sharding_contract() -> None:
+    batch = dataclasses.replace(
+        _batch(groups=1, queries=4),
+        query_mask=jnp.ones((1, 4), dtype=jnp.bool_),
+    )
+    mesh = stock_sharding.make_mesh(1)
+
+    sharding = make_guided_batch_sharding(batch, mesh)
+
+    assert sharding.query_mask is not None
+    assert sharding.query_mask.spec == jax.sharding.PartitionSpec()
+
+
 def test_invalid_leading_dimensions_fail_clearly() -> None:
     mesh = stock_sharding.make_mesh(1)
     batch = _batch()

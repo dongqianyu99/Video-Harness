@@ -29,6 +29,7 @@ class GuideConditionedBatch:
     observation: _model.Observation
     actions: _model.Actions
     guide: GuideInput
+    query_mask: jax.Array | None = None
 
 
 def _format_tree_path(path) -> str:
@@ -101,7 +102,24 @@ def validate_guide_conditioned_batch(
         name="guide",
     )
 
+    if batch.query_mask is not None:
+        if batch.query_mask.shape != (groups, queries):
+            raise ValueError(
+                "query_mask must have shape [G, Q], got "
+                f"{batch.query_mask.shape} for G={groups}, Q={queries}"
+            )
+        if batch.query_mask.dtype != jnp.bool_:
+            raise ValueError(
+                f"query_mask must have boolean dtype, got {batch.query_mask.dtype}"
+            )
     return groups, queries
+
+
+def query_mask_or_ones(batch: GuideConditionedBatch) -> jax.Array:
+    groups, queries = batch.actions.shape[:2]
+    if batch.query_mask is None:
+        return jnp.ones((groups, queries), dtype=jnp.bool_)
+    return batch.query_mask
 
 
 def validate_guide_conditioned_observation(

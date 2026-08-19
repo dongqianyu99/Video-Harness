@@ -13,7 +13,8 @@ from openpi.models.guide_inputs import validate_guide_conditioned_batch
 from openpi.training.guide_dataset import GuideBindingIndex
 from openpi.training.guide_dataset import GuideBindingRecord
 
-_ITEM_KEYS = frozenset(("query", "guide_binding_index"))
+_REQUIRED_ITEM_KEYS = frozenset(("query", "guide_binding_index"))
+_OPTIONAL_ITEM_KEYS = frozenset(("query_valid",))
 
 
 def _read_binding_index(
@@ -48,11 +49,12 @@ def _read_binding_index(
 
 def _validate_items(
     items: Sequence[Any],
-) -> tuple[tuple[Mapping[str, Any], ...], int]:
+) -> tuple[tuple[Mapping[str, Any], ...], int, np.ndarray]:
     if not items:
         raise ValueError("cannot collate an empty batch")
 
     queries: list[Mapping[str, Any]] = []
+    query_validity: list[bool] = []
     shared_binding_index: int | None = None
 
     for item_index, item in enumerate(items):
@@ -62,10 +64,13 @@ def _validate_items(
                 f"got {type(item).__name__}"
             )
 
-        if set(item) != _ITEM_KEYS:
+        item_keys = set(item)
+        if not item_keys >= _REQUIRED_ITEM_KEYS or not item_keys <= (
+            _REQUIRED_ITEM_KEYS | _OPTIONAL_ITEM_KEYS
+        ):
             raise ValueError(
-                f"item {item_index} must contain exactly "
-                f"{sorted(_ITEM_KEYS)}, got {sorted(item)}"
+                f"item {item_index} must contain {sorted(_REQUIRED_ITEM_KEYS)} "
+                f"and only optional {sorted(_OPTIONAL_ITEM_KEYS)}, got {sorted(item)}"
             )
 
         query = item["query"]
@@ -90,9 +95,19 @@ def _validate_items(
             )
 
         queries.append(query)
+        validity = np.asarray(item.get("query_valid", True))
+        if validity.ndim != 0 or validity.dtype != np.bool_:
+            raise ValueError(
+                f"item {item_index} query_valid must be a scalar bool"
+            )
+        query_validity.append(bool(validity.item()))
 
     assert shared_binding_index is not None
-    return tuple(queries), shared_binding_index
+    return (
+        tuple(queries),
+        shared_binding_index,
+        np.asarray(query_validity, dtype=np.bool_),
+    )
 
 
 def _validate_grouped_items(
@@ -101,7 +116,11 @@ def _validate_grouped_items(
     guides_per_batch: int,
     queries_per_guide: int,
     binding_index: GuideBindingIndex,
-) -> tuple[tuple[tuple[Mapping[str, Any], ...], ...], tuple[int, ...]]:
+) -> tuple[
+    tuple[tuple[Mapping[str, Any], ...], ...],
+    tuple[int, ...],
+    np.ndarray,
+]:
     expected_items = guides_per_batch * queries_per_guide
     if len(items) != expected_items:
         raise ValueError(
@@ -110,23 +129,32 @@ def _validate_grouped_items(
 
     query_groups: list[tuple[Mapping[str, Any], ...]] = []
     binding_indices: list[int] = []
+    query_masks: list[np.ndarray] = []
     document_ids: set[str] = set()
 
     for group_index in range(guides_per_batch):
         start = group_index * queries_per_guide
         stop = start + queries_per_guide
-        group_queries, current_binding_index = _validate_items(items[start:stop])
+        group_queries, current_binding_index, group_query_mask = _validate_items(
+            items[start:stop]
+        )
         record = binding_index.by_binding_index(current_binding_index)
-        if record.support_document_id in document_ids:
+        if record.support_document_id in document_ids and bool(np.any(group_query_mask)):
             raise ValueError(
                 "each Guide group must use a distinct support document, got duplicate "
                 f"{record.support_document_id!r}"
             )
-        document_ids.add(record.support_document_id)
+        if bool(np.any(group_query_mask)):
+            document_ids.add(record.support_document_id)
         query_groups.append(group_queries)
         binding_indices.append(current_binding_index)
+        query_masks.append(group_query_mask)
 
-    return tuple(query_groups), tuple(binding_indices)
+    return (
+        tuple(query_groups),
+        tuple(binding_indices),
+        np.stack(query_masks, axis=0),
+    )
 
 
 def _stack_tree(values: Sequence[Any]) -> Any:
@@ -203,7 +231,7 @@ class SingleGuideBatchCollator:
         self,
         items: Sequence[Mapping[str, Any]],
     ) -> GuideConditionedBatch:
-        queries, binding_index = _validate_items(items)
+        queries, binding_index, query_mask = _validate_items(items)
         collated_query = dict(_stack_query_items(queries))
 
         if "actions" not in collated_query:
@@ -236,6 +264,7 @@ class SingleGuideBatchCollator:
             observation=grouped_observation,
             actions=grouped_actions,
             guide=guide,
+            query_mask=query_mask[None, ...],
         )
 
         groups, queries_count = validate_guide_conditioned_batch(batch)
@@ -308,7 +337,7 @@ class MultiGuideBatchCollator:
         self._queries_per_guide = queries_per_guide
 
     def __call__(self, items: Sequence[Mapping[str, Any]]) -> GuideConditionedBatch:
-        query_groups, binding_indices = _validate_grouped_items(
+        query_groups, binding_indices, query_mask = _validate_grouped_items(
             items,
             guides_per_batch=self._guides_per_batch,
             queries_per_guide=self._queries_per_guide,
@@ -341,6 +370,7 @@ class MultiGuideBatchCollator:
             observation=observation,
             actions=actions,
             guide=_concatenate_guides(resolved_guides),
+            query_mask=query_mask,
         )
         groups, queries = validate_guide_conditioned_batch(batch)
         if (groups, queries) != (

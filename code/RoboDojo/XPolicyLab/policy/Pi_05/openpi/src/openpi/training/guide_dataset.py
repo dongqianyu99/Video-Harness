@@ -18,6 +18,14 @@ class GuideBindingRecord:
     support_document_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class GuideSampleIndex:
+    """One native sample index plus its loss-validity bit."""
+
+    sample_index: int
+    query_valid: bool = True
+
+
 def _require_non_negative_integral(value: Any, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral) or value < 0:
         raise ValueError(
@@ -214,8 +222,14 @@ class GuideBoundDataset:
     def __len__(self) -> int:
         return len(self._dataset)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        sample = self._dataset[index]
+    def __getitem__(self, index: Any) -> dict[str, Any]:
+        if isinstance(index, GuideSampleIndex):
+            sample_index = index.sample_index
+            query_valid = index.query_valid
+        else:
+            sample_index = index
+            query_valid = True
+        sample = self._dataset[sample_index]
 
         if not isinstance(sample, Mapping):
             raise ValueError(
@@ -250,4 +264,5 @@ class GuideBoundDataset:
                 binding.binding_index,
                 dtype=np.int32,
             ),
+            "query_valid": np.asarray(query_valid, dtype=np.bool_),
         }

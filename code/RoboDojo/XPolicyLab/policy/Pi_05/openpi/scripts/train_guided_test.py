@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,11 +94,21 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
 
     args.query_episode_index = None
     args.split_manifest = tmp_path / "training-split.json"
+    args.guide_length_bucket = ["1:2"]
+    args.remainder_strategy = "pad_mask"
+    args.gradient_accumulation_steps = 2
+    args.reference_global_batch_size = 4
+    args.allow_effective_batch_mismatch = True
     _train._run_from_args(args)  # noqa: SLF001
     formal_data = captured["run_config"].guided_data
     assert formal_data.query_episode_indices is None
     assert formal_data.split_manifest_path == args.split_manifest
     assert formal_data.require_all_tasks
+    assert formal_data.guide_length_buckets[0].bucket_id == "u1-f2"
+    assert formal_data.remainder_strategy == "pad_mask"
+    assert formal_data.gradient_accumulation_steps == 2
+    assert captured["run_config"].gradient_accumulation_steps == 2
+    assert not captured["run_config"].enforce_reference_batch_size
 
 
 def test_argument_entry_rejects_unscoped_training():
@@ -154,6 +165,44 @@ def test_runtime_validation_separates_base_and_resume_paths(tmp_path: Path) -> N
                 freeze_filter=nnx.Nothing(),
             ),
         )
+
+
+def test_runtime_validation_aligns_effective_batch_with_official_global_256(
+    tmp_path: Path,
+) -> None:
+    guided_data = dataclasses.replace(
+        _guided_data(tmp_path),
+        batch_size=64,
+        gradient_accumulation_steps=4,
+    )
+    run_config = dataclasses.replace(
+        _run_config(tmp_path),
+        guided_data=guided_data,
+        gradient_accumulation_steps=4,
+        reference_global_batch_size=256,
+        enforce_reference_batch_size=True,
+    )
+    resolved = SimpleNamespace(
+        model=GuidePi0Config(),
+        batch_size=64,
+        num_workers=0,
+        freeze_filter=nnx.Nothing(),
+    )
+
+    _train._validate_runtime_config(run_config, resolved)  # noqa: SLF001
+
+    mismatched_data = dataclasses.replace(guided_data, batch_size=32)
+    mismatched = dataclasses.replace(run_config, guided_data=mismatched_data)
+    with pytest.raises(ValueError, match="effective global batch"):
+        _train._validate_runtime_config(  # noqa: SLF001
+            mismatched,
+            SimpleNamespace(**{**vars(resolved), "batch_size": 32}),
+        )
+
+    padded_data = dataclasses.replace(guided_data, remainder_strategy="pad_mask")
+    padded = dataclasses.replace(run_config, guided_data=padded_data)
+    with pytest.raises(ValueError, match="remainder_strategy='drop'"):
+        _train._validate_runtime_config(padded, resolved)  # noqa: SLF001
 
 
 def test_checkpoint_wrappers_delegate_to_stock_format(monkeypatch, tmp_path: Path) -> None:

@@ -12,7 +12,9 @@ from typing import Any
 import jax
 import numpy as np
 
+from openpi.models.guide_inputs import query_mask_or_ones
 from openpi.models.guide_inputs import validate_guide_conditioned_batch
+from openpi.training.guide_buckets import parse_guide_length_bucket
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
 
@@ -43,6 +45,7 @@ def benchmark_loader(
 
     wait_ms: list[float] = []
     first_batch = None
+    valid_queries = 0
     start_total = time.perf_counter()
     for _ in range(measured_batches):
         start = time.perf_counter()
@@ -50,11 +53,12 @@ def benchmark_loader(
         wait_ms.append((time.perf_counter() - start) * 1000.0)
         if first_batch is None:
             first_batch = batch
+        valid_queries += int(np.sum(np.asarray(query_mask_or_ones(batch))))
     elapsed = time.perf_counter() - start_total
 
     assert first_batch is not None
     groups, queries = validate_guide_conditioned_batch(first_batch)
-    total_queries = measured_batches * groups * queries
+    total_query_slots = measured_batches * groups * queries
     return {
         "schema_version": "openpi.guided-data-benchmark.v0",
         "warmup_batches": warmup_batches,
@@ -64,7 +68,10 @@ def benchmark_loader(
         "queries_per_batch": groups * queries,
         "elapsed_s": elapsed,
         "batches_per_s": measured_batches / elapsed,
-        "queries_per_s": total_queries / elapsed,
+        "query_slots_per_s": total_query_slots / elapsed,
+        "valid_queries_per_s": valid_queries / elapsed,
+        "valid_queries": valid_queries,
+        "padded_query_slots": total_query_slots - valid_queries,
         "data_wait_ms": {
             "mean": statistics.fmean(wait_ms),
             "p50": _percentile(wait_ms, 50),
@@ -95,6 +102,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-torch-threads", type=int, default=1)
     parser.add_argument("--guide-cache-entries", type=int, default=2)
     parser.add_argument("--guide-cache-max-bytes", type=int, default=256 * 1024 * 1024)
+    parser.add_argument(
+        "--remainder-strategy", choices=("drop", "pad_mask"), default="drop"
+    )
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument(
+        "--guide-length-bucket",
+        action="append",
+        default=[],
+        metavar="MAX_UNITS:MAX_FRAMES",
+    )
     parser.add_argument("--max-frames", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
     parser.add_argument("--max-text-tokens", type=int, required=True)
@@ -131,6 +148,15 @@ def main(argv: list[str] | None = None) -> int:
         guide_cache_max_bytes=args.guide_cache_max_bytes,
         split_manifest_path=args.split_manifest,
         require_all_tasks=True,
+        guide_length_buckets=(
+            tuple(
+                parse_guide_length_bucket(spec)
+                for spec in args.guide_length_bucket
+            )
+            or None
+        ),
+        remainder_strategy=args.remainder_strategy,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
     loader = create_robodojo_guided_data_loader(native_config, config)
     report = benchmark_loader(

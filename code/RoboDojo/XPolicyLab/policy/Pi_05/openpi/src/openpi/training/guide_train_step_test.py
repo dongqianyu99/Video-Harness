@@ -13,6 +13,7 @@ import pytest
 from openpi.models import model as _model
 from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_inputs import GuideInput
+from openpi.training.guide_train_step import guided_accumulated_train_step
 from openpi.training.guide_train_step import guided_train_step
 from openpi.training.utils import TrainState
 
@@ -170,3 +171,81 @@ def test_batch_is_not_mutated() -> None:
         np.testing.assert_array_equal(old, new)
 
     jax.tree.map(_assert_equal, before, batch)
+
+
+def test_query_mask_prevents_padded_query_from_affecting_gradients() -> None:
+    first = dataclasses.replace(
+        _make_batch(),
+        query_mask=jnp.asarray([[True, False]], dtype=jnp.bool_),
+    )
+    altered_actions = first.actions.at[:, 1].set(10_000.0)
+    altered = dataclasses.replace(first, actions=altered_actions)
+
+    first_state, first_info = guided_train_step(
+        _TinyConfig(), jax.random.key(9), _make_state(), first
+    )
+    altered_state, altered_info = guided_train_step(
+        _TinyConfig(), jax.random.key(9), _make_state(), altered
+    )
+
+    for path, value in _state_values(first_state.params).items():
+        np.testing.assert_allclose(value, _state_values(altered_state.params)[path])
+    np.testing.assert_allclose(first_info["loss"], altered_info["loss"])
+    assert int(first_info["valid_queries"]) == 1
+
+
+def test_gradient_accumulation_matches_one_combined_sample_mean_update() -> None:
+    first = _make_batch()
+    second = dataclasses.replace(
+        _make_batch(),
+        actions=jnp.full_like(_make_batch().actions, 2.0),
+    )
+    combined = GuideConditionedBatch(
+        observation=jax.tree.map(
+            lambda left, right: jnp.concatenate([left, right], axis=1),
+            first.observation,
+            second.observation,
+        ),
+        actions=jnp.concatenate([first.actions, second.actions], axis=1),
+        guide=first.guide,
+        query_mask=jnp.ones((1, 4), dtype=jnp.bool_),
+    )
+
+    accumulated_state, accumulated_info = guided_accumulated_train_step(
+        _TinyConfig(),
+        jax.random.key(5),
+        _make_state(),
+        (first, second),
+    )
+    combined_state, combined_info = guided_train_step(
+        _TinyConfig(), jax.random.key(5), _make_state(), combined
+    )
+
+    for path, value in _state_values(accumulated_state.params).items():
+        np.testing.assert_allclose(
+            value, _state_values(combined_state.params)[path], rtol=1e-6
+        )
+    assert int(accumulated_state.step) == 1
+    assert int(accumulated_info["microbatches"]) == 2
+    assert int(accumulated_info["valid_queries"]) == 4
+    np.testing.assert_allclose(accumulated_info["loss"], combined_info["loss"])
+
+
+def test_all_masked_accumulation_padding_does_not_change_valid_microbatch_update() -> None:
+    valid = _make_batch()
+    padding = dataclasses.replace(
+        _make_batch(),
+        actions=jnp.full_like(_make_batch().actions, 1000.0),
+        query_mask=jnp.zeros((1, 2), dtype=jnp.bool_),
+    )
+
+    accumulated_state, info = guided_accumulated_train_step(
+        _TinyConfig(), jax.random.key(7), _make_state(), (valid, padding)
+    )
+    expected_state, _ = guided_train_step(
+        _TinyConfig(), jax.random.key(7), _make_state(), valid
+    )
+
+    for path, value in _state_values(accumulated_state.params).items():
+        np.testing.assert_allclose(value, _state_values(expected_state.params)[path])
+    assert int(info["valid_queries"]) == 2

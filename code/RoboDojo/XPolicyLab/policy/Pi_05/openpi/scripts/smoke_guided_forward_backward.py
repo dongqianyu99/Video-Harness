@@ -150,9 +150,17 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                     resolved_config, step_rng, state, guided_batch
                 ),
                 in_shardings=(replicated_sharding, train_state_sharding, batch_sharding),
-                out_shardings=(replicated_sharding, grad_sharding, replicated_sharding, replicated_sharding),
+                out_shardings=(
+                    replicated_sharding,
+                    grad_sharding,
+                    replicated_sharding,
+                    replicated_sharding,
+                    replicated_sharding,
+                ),
             )
-            loss, grads, groups, queries = pforward(rng, train_state, batch)
+            loss, grads, groups, queries, valid_queries = pforward(
+                rng, train_state, batch
+            )
             jax.block_until_ready((loss, grads))
             info = {
                 "loss": loss,
@@ -162,6 +170,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "G": groups,
                 "Q": queries,
+                "valid_queries": valid_queries,
             }
         else:
             ptrain_step = jax.jit(

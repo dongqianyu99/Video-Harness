@@ -5,11 +5,15 @@ import dataclasses
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
+import statistics
 from typing import Any
 
 import jax
 
 from openpi.models.guide_materializer import GuideMaterializerConfig
+from openpi.training.guide_buckets import GuideLengthBucket
+from openpi.training.guide_buckets import assign_guide_length_buckets
+from openpi.training.guide_buckets import normalize_guide_length_buckets
 from openpi.training.guide_cache import ConstantResolverFactory
 from openpi.training.guide_cache import ProcessLocalGuideResolver
 from openpi.training.guide_collator import MultiGuideBatchCollator
@@ -52,6 +56,9 @@ class RoboDojoGuidedDataConfig:
     device_prefetch_size: int = 2
     split_manifest_path: Path | None = None
     require_all_tasks: bool = True
+    guide_length_buckets: tuple[GuideLengthBucket, ...] | None = None
+    remainder_strategy: str = "drop"
+    gradient_accumulation_steps: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.repo_id, str) or not self.repo_id.strip():
@@ -78,6 +85,7 @@ class RoboDojoGuidedDataConfig:
             "prefetch_factor",
             "device_prefetch_size",
             "worker_torch_threads",
+            "gradient_accumulation_steps",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -97,12 +105,25 @@ class RoboDojoGuidedDataConfig:
             raise ValueError("persistent_workers must be bool")
         if not isinstance(self.require_all_tasks, bool):
             raise ValueError("require_all_tasks must be bool")
+        if self.remainder_strategy not in {"drop", "pad_mask"}:
+            raise ValueError("remainder_strategy must be 'drop' or 'pad_mask'")
         if isinstance(self.worker_timeout_s, bool) or not isinstance(self.worker_timeout_s, (int, float)) or self.worker_timeout_s < 0:
             raise ValueError("worker_timeout_s must be non-negative")
         for name in ("guide_cache_entries", "guide_cache_max_bytes"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+
+        if self.guide_length_buckets is not None:
+            buckets = normalize_guide_length_buckets(self.guide_length_buckets)
+            if (
+                buckets[-1].max_units > self.max_units
+                or buckets[-1].max_frames > self.max_frames
+            ):
+                raise ValueError(
+                    "the largest Guide bucket must fit within max_units/max_frames"
+                )
+            object.__setattr__(self, "guide_length_buckets", buckets)
 
         if self.query_episode_indices is not None:
             indices = tuple(self.query_episode_indices)
@@ -287,6 +308,32 @@ def _select_bindings(bundle: Any, query_episode_indices: tuple[int, ...] | None)
     return selected
 
 
+def _guide_length_summary(
+    document_lengths: dict[str, tuple[int, int]] | Any,
+) -> dict[str, float | int]:
+    lengths = tuple(document_lengths.values())
+    units = sorted(value[0] for value in lengths)
+    frames = sorted(value[1] for value in lengths)
+
+    def percentile(values: list[int], fraction: float) -> int:
+        index = round((len(values) - 1) * fraction)
+        return values[index]
+
+    return {
+        "documents": len(lengths),
+        "units_min": min(units),
+        "units_mean": statistics.fmean(units),
+        "units_p50": percentile(units, 0.50),
+        "units_p95": percentile(units, 0.95),
+        "units_max": max(units),
+        "frames_min": min(frames),
+        "frames_mean": statistics.fmean(frames),
+        "frames_p50": percentile(frames, 0.50),
+        "frames_p95": percentile(frames, 0.95),
+        "frames_max": max(frames),
+    }
+
+
 def _make_tokenizer(tokenizer: Any | None, max_text_tokens: int) -> Any:
     if tokenizer is not None:
         return tokenizer
@@ -390,6 +437,24 @@ def create_robodojo_guided_data_loader(
         query_episode_indices,
     )
     binding_index = GuideBindingIndex.from_bindings(selected_bindings)
+    guide_buckets = (
+        guided_data_config.guide_length_buckets
+        if guided_data_config.guide_length_buckets is not None
+        else (
+            GuideLengthBucket(
+                max_units=guided_data_config.max_units,
+                max_frames=guided_data_config.max_frames,
+            ),
+        )
+    )
+    bucket_assignment = assign_guide_length_buckets(
+        artifact_bundle=bundle,
+        binding_index=binding_index,
+        buckets=guide_buckets,
+        max_text_tokens=guided_data_config.max_text_tokens,
+        profile=guided_data_config.profile,
+        plan_builder=plan_builder,
+    )
     binding_to_samples = build_binding_to_sample_indices(
         _make_episode_ranges(episode_records),
         binding_index=binding_index,
@@ -401,6 +466,9 @@ def create_robodojo_guided_data_loader(
         guides_per_batch=guided_data_config.guides_per_batch,
         queries_per_guide=guided_data_config.queries_per_guide,
         seed=guided_data_config.seed,
+        binding_to_bucket=bucket_assignment.binding_to_bucket,
+        remainder_strategy=guided_data_config.remainder_strategy,
+        batch_block_size=guided_data_config.gradient_accumulation_steps,
     )
 
     materializer_config = GuideMaterializerConfig(
@@ -427,6 +495,9 @@ def create_robodojo_guided_data_loader(
             dataset_root=guided_data_config.dataset_root,
             binding_records=binding_index.records,
             materializer_config=materializer_config,
+            materializer_configs_by_binding=tuple(
+                bucket_assignment.binding_to_materializer_config.items()
+            ),
             profile=guided_data_config.profile,
         )
     else:
@@ -436,6 +507,9 @@ def create_robodojo_guided_data_loader(
             dataset_root=guided_data_config.dataset_root,
             tokenizer=_make_tokenizer(tokenizer, guided_data_config.max_text_tokens),
             materializer_config=materializer_config,
+            materializer_configs_by_binding=(
+                bucket_assignment.binding_to_materializer_config
+            ),
             profile=guided_data_config.profile,
             frame_loader=frame_loader,
             plan_builder=plan_builder,
@@ -484,5 +558,16 @@ def create_robodojo_guided_data_loader(
             "guide_cache_entries": guided_data_config.guide_cache_entries,
             "guide_cache_max_bytes": guided_data_config.guide_cache_max_bytes,
             "sampler_stats": dataclasses.asdict(sampler.stats),
+            "guide_binding_bucket_counts": bucket_assignment.bucket_counts,
+            "guide_document_bucket_counts": (
+                bucket_assignment.document_bucket_counts
+            ),
+            "guide_length_summary": _guide_length_summary(
+                bucket_assignment.document_lengths
+            ),
+            "remainder_strategy": guided_data_config.remainder_strategy,
+            "gradient_accumulation_steps": (
+                guided_data_config.gradient_accumulation_steps
+            ),
         },
     )

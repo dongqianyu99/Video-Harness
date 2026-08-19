@@ -192,6 +192,27 @@ def test_resolver_prefers_one_batch_decode_for_all_unique_guide_frames():
     )
 
 
+def test_resolver_uses_binding_specific_materializer_bucket():
+    binding_index, bundle, plan = _make_setup()
+    resolver = VideoHarnessGuideResolver(
+        artifact_bundle=bundle,
+        binding_index=binding_index,
+        dataset_root=Path("/explicit/dataset"),
+        tokenizer=_Tokenizer(),
+        materializer_config=GuideMaterializerConfig(8, 4, 4),
+        materializer_configs_by_binding={
+            0: GuideMaterializerConfig(3, 2, 4)
+        },
+        frame_loader=_FrameLoader(),
+        plan_builder=lambda *_args, **_kwargs: plan,
+    )
+
+    guide = resolver(binding_index.by_binding_index(0))
+
+    assert guide.images.shape == (1, 3, 224, 224, 3)
+    assert guide.unit_mask.shape == (1, 2)
+
+
 def test_resolver_rejects_non_rgb_frame_from_video_harness_boundary():
     binding_index, bundle, plan = _make_setup()
 

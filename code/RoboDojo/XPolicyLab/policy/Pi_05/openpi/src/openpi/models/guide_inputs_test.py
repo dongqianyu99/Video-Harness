@@ -3,10 +3,12 @@ import dataclasses
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from openpi.models import model as _model
 from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_inputs import GuideInput
+from openpi.models.guide_inputs import validate_guide_conditioned_batch
 
 
 def _make_guide() -> GuideInput:
@@ -115,3 +117,20 @@ def test_guide_conditioned_batch_does_not_change_stock_observation_definition() 
     )
     assert isinstance(batch.observation, _model.Observation)
     assert isinstance(batch.guide, GuideInput)
+
+
+def test_query_mask_contract_is_group_query_shaped_and_boolean() -> None:
+    batch = GuideConditionedBatch(
+        observation=_make_observation(),
+        actions=jnp.zeros((2, 3, 50, 32), dtype=jnp.float32),
+        guide=_make_guide(),
+        query_mask=jnp.asarray(
+            [[True, True, False], [True, False, False]], dtype=jnp.bool_
+        ),
+    )
+    assert validate_guide_conditioned_batch(batch) == (2, 3)
+
+    with pytest.raises(ValueError, match="query_mask"):
+        validate_guide_conditioned_batch(
+            dataclasses.replace(batch, query_mask=jnp.ones((2, 2), dtype=jnp.bool_))
+        )

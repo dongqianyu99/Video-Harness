@@ -320,6 +320,38 @@ def test_multi_guide_collator_rejects_duplicate_support_document():
         collator(items)
 
 
+def test_multi_guide_collator_emits_query_mask_and_allows_masked_guide_padding():
+    binding = _make_binding(query_episode_index=10, support_episode_index=11)
+    collator = _guide_collator.MultiGuideBatchCollator(
+        binding_index=_make_index(binding),
+        guide_input_resolver=_RecordingResolver(),
+        guides_per_batch=2,
+        queries_per_guide=2,
+    )
+    items = [
+        {
+            **_make_bound_item(binding_index=0, value=1.0),
+            "query_valid": np.array(1, dtype=np.bool_),
+        },
+        {
+            **_make_bound_item(binding_index=0, value=2.0),
+            "query_valid": np.array(1, dtype=np.bool_),
+        },
+        {
+            **_make_bound_item(binding_index=0, value=1.0),
+            "query_valid": np.array(0, dtype=np.bool_),
+        },
+        {
+            **_make_bound_item(binding_index=0, value=2.0),
+            "query_valid": np.array(0, dtype=np.bool_),
+        },
+    ]
+
+    batch = collator(items)
+
+    np.testing.assert_array_equal(batch.query_mask, [[True, True], [False, False]])
+
+
 def test_single_guide_collator_rejects_empty_batch_before_resolver():
     resolver = _RecordingResolver()
 

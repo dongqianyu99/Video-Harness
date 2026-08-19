@@ -119,6 +119,18 @@ def make_guided_batch_sharding(
         observation=observation_sharding,
         actions=action_sharding,
         guide=guide_sharding,
+        query_mask=(
+            None
+            if batch.query_mask is None
+            else _query_sharding(
+                batch.query_mask,
+                groups=groups,
+                queries=queries,
+                mesh=mesh,
+                data_axis_size=data_axis_size,
+                name="query_mask",
+            )
+        ),
     )
 
 

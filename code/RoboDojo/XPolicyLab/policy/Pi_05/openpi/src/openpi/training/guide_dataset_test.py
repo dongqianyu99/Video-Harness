@@ -202,7 +202,8 @@ def test_bound_dataset_removes_identity_metadata_and_preserves_content():
 
     assert len(bound_dataset) == len(dataset)
     assert dataset.calls == [0]
-    assert set(result) == {"query", "guide_binding_index"}
+    assert set(result) == {"query", "guide_binding_index", "query_valid"}
+    assert bool(result["query_valid"])
     assert set(result["query"]) == {"observation", "actions"}
     assert result["guide_binding_index"].shape == ()
     assert result["guide_binding_index"].dtype == np.int32

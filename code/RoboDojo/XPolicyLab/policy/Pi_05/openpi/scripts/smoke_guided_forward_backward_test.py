@@ -22,7 +22,8 @@ def test_smoke_uses_mesh_context_and_sharded_jit_for_both_modes():
     assert "with mesh_module.set_mesh(mesh):" in SOURCE
     assert "in_shardings=(replicated_sharding, train_state_sharding, batch_sharding)" in SOURCE
     assert "out_shardings=(train_state_sharding, replicated_sharding)" in SOURCE
-    assert "out_shardings=(replicated_sharding, grad_sharding, replicated_sharding, replicated_sharding)" in SOURCE
+    assert "grad_sharding," in SOURCE
+    assert "loss, grads, groups, queries, valid_queries = pforward" in SOURCE
 
 
 def test_smoke_has_one_execution_path_per_mode():

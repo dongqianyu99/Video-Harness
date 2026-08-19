@@ -57,6 +57,9 @@ def test_benchmark_loader_reports_grouped_throughput_and_bytes():
     assert report["queries_per_batch"] == 6
     assert report["measured_batches"] == 3
     assert report["batches_per_s"] > 0
-    assert report["queries_per_s"] > 0
+    assert report["query_slots_per_s"] > 0
+    assert report["valid_queries_per_s"] > 0
+    assert report["valid_queries"] == 18
+    assert report["padded_query_slots"] == 0
     assert report["batch_bytes"] > report["guide_bytes"] > 0
     assert report["host_metadata"]["sampler_stats"]["num_batches"] == 4
