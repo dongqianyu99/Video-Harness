@@ -6,6 +6,7 @@ import importlib
 import itertools
 import logging
 from pathlib import Path
+import time
 from typing import Any
 
 import flax.nnx as nnx
@@ -18,6 +19,12 @@ from openpi.models.guide_pi0 import GuidePi0
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.training.guide_buckets import parse_guide_length_bucket
 from openpi.training.guide_data_loader import prefetch_guided_batches
+from openpi.training.guide_run import GuidedRunLayout
+from openpi.training.guide_run import configure_guided_run_logging
+from openpi.training.guide_run import finish_guided_wandb
+from openpi.training.guide_run import init_guided_wandb
+from openpi.training.guide_run import prepare_guided_run_layout
+from openpi.training.guide_run import write_guided_run_manifest
 from openpi.training.guide_train_config import GuidedTrainRunConfig
 from openpi.training.guide_train_config import resolve_guided_train_config
 from openpi.training.guide_train_sharding import make_guided_batch_sharding
@@ -146,7 +153,11 @@ def _detach_ema_buffers(state: Any) -> Any:
     )
 
 
-def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
+def _run_guided_training_impl(
+    run_config: GuidedTrainRunConfig,
+    layout: GuidedRunLayout,
+    session: dict[str, Any],
+) -> Any:
     """Run the guided loop; real model/data execution belongs on the server."""
 
     resolved_config = resolve_guided_train_config(run_config)
@@ -164,12 +175,13 @@ def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
         resume=resolved_config.resume,
     )
 
-    train_script = importlib.import_module("scripts.train")
-    train_script.init_wandb(
-        resolved_config,
+    session["wandb_run"] = init_guided_wandb(
+        layout=layout,
+        run_config=run_config,
+        resolved_config=resolved_config,
         resuming=resuming,
-        enabled=resolved_config.wandb_enabled,
     )
+    train_script = importlib.import_module("scripts.train")
 
     data_module = importlib.import_module("openpi.training.robodojo_guide_data")
     data_loader = data_module.create_robodojo_guided_data_loader(
@@ -182,6 +194,25 @@ def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
     if not isinstance(first_batch, GuideConditionedBatch):
         raise ValueError("guided data loader did not return GuideConditionedBatch")
     groups, queries = validate_guide_conditioned_batch(first_batch)
+    runtime_metadata = {
+        "groups_per_microbatch": groups,
+        "queries_per_guide": queries,
+        "effective_global_batch_size": run_config.effective_global_batch_size,
+        "data": getattr(data_loader, "host_metadata", {}),
+    }
+    write_guided_run_manifest(
+        layout,
+        run_config=run_config,
+        status="running",
+        runtime=runtime_metadata,
+    )
+    wandb_run = session.get("wandb_run")
+    wandb_config = getattr(wandb_run, "config", None)
+    update_wandb_config = getattr(wandb_config, "update", None)
+    if callable(update_wandb_config):
+        update_wandb_config(
+            {"runtime": runtime_metadata}, allow_val_change=True
+        )
 
     mesh_module = importlib.import_module("openpi.training.sharding")
     mesh = mesh_module.make_mesh(resolved_config.fsdp_devices)
@@ -241,13 +272,53 @@ def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
     )
     batches = tuple(next(device_batches) for _ in range(accumulation_steps))
     start_step = int(train_state.step)
+    lr_schedule = resolved_config.lr_schedule.create()
+    last_log_time = time.perf_counter()
+    last_log_step = start_step
+    accumulated_data_wait_s = 0.0
 
     for step in range(start_step, resolved_config.num_train_steps):
         with mesh_module.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batches)
 
+        if step < resolved_config.num_train_steps - 1:
+            data_wait_start = time.perf_counter()
+            batches = tuple(
+                next(device_batches) for _ in range(accumulation_steps)
+            )
+            accumulated_data_wait_s += time.perf_counter() - data_wait_start
+
         if step % resolved_config.log_interval == 0:
             host_info = {key: float(value) for key, value in jax.device_get(info).items() if key not in {"G", "Q"}}
+            now = time.perf_counter()
+            interval_steps = step - last_log_step + 1
+            interval_s = max(now - last_log_time, 1e-9)
+            metrics = {
+                "train/optimizer_step": step,
+                "train/loss": host_info["loss"],
+                "train/grad_norm": host_info["grad_norm"],
+                "train/param_norm": host_info["param_norm"],
+                "train/guide_encoder_grad_norm": host_info[
+                    "guide_encoder_grad_norm"
+                ],
+                "train/native_backbone_grad_norm": host_info[
+                    "native_backbone_grad_norm"
+                ],
+                "train/learning_rate": float(
+                    jax.device_get(lr_schedule(step))
+                ),
+                "batch/groups": int(info["G"]),
+                "batch/queries_per_guide": int(info["Q"]),
+                "batch/valid_queries": int(info["valid_queries"]),
+                "batch/microbatches": int(info["microbatches"]),
+                "batch/effective_capacity": run_config.effective_global_batch_size,
+                "batch/reference_global_batch": run_config.reference_global_batch_size,
+                "performance/optimizer_steps_per_s": interval_steps / interval_s,
+                "performance/data_wait_ms_per_step": (
+                    accumulated_data_wait_s / interval_steps * 1000.0
+                ),
+                "system/device_count": jax.device_count(),
+            }
             logger.info(
                 "step=%d loss=%.6f grad_norm=%.6f guide_grad_norm=%.6f native_grad_norm=%.6f "
                 "G=%s Q=%s valid_queries=%s microbatches=%s effective_capacity=%d reference_batch=%d",
@@ -263,17 +334,59 @@ def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
                 run_config.guided_data.batch_size * accumulation_steps,
                 run_config.reference_global_batch_size,
             )
+            wandb_run = session.get("wandb_run")
+            if wandb_run is not None:
+                wandb_run.log(metrics, step=step)
+            last_log_time = now
+            last_log_step = step + 1
+            accumulated_data_wait_s = 0.0
 
         if (step % resolved_config.save_interval == 0 and step > start_step) or step == resolved_config.num_train_steps - 1:
             save_guided_state(checkpoint_manager, train_state, data_loader, step)
 
-        if step < resolved_config.num_train_steps - 1:
-            batches = tuple(
-                next(device_batches) for _ in range(accumulation_steps)
-            )
-
     checkpoint_manager.wait_until_finished()
     return train_state
+
+
+def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
+    """Run one tracked Guide-conditioned training experiment."""
+
+    layout = GuidedRunLayout.from_paths(
+        run_dir=run_config.run_dir,
+        checkpoint_dir=run_config.checkpoint_dir,
+    )
+    prepare_guided_run_layout(
+        layout,
+        resume=run_config.resume,
+        overwrite=run_config.overwrite,
+    )
+    configure_guided_run_logging(layout, resume=run_config.resume)
+    write_guided_run_manifest(
+        layout,
+        run_config=run_config,
+        status="running",
+    )
+    session: dict[str, Any] = {}
+    try:
+        result = _run_guided_training_impl(run_config, layout, session)
+    except BaseException as exc:
+        logger.exception("Guided training failed")
+        write_guided_run_manifest(
+            layout,
+            run_config=run_config,
+            status="failed",
+            error=exc,
+        )
+        finish_guided_wandb(session.get("wandb_run"), exit_code=1)
+        raise
+    write_guided_run_manifest(
+        layout,
+        run_config=run_config,
+        status="completed",
+        runtime={"final_optimizer_step": int(result.step)},
+    )
+    finish_guided_wandb(session.get("wandb_run"), exit_code=0)
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -322,7 +435,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-units", type=int, required=True)
     parser.add_argument("--max-text-tokens", type=int, required=True)
     parser.add_argument("--experiment-name", required=True)
-    parser.add_argument("--checkpoint-dir", type=Path, required=True)
+    parser.add_argument("--run-dir", type=Path)
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        help="legacy path; new runs should use --run-dir",
+    )
     parser.add_argument("--num-train-steps", type=int, required=True)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--save-interval", type=int, default=1000)
@@ -355,6 +473,20 @@ def _run_from_args(args: argparse.Namespace) -> Any:
             "formal training requires --split-manifest; use "
             "--debug-query-episode-index only for an explicit smoke run"
         )
+    run_dir = getattr(args, "run_dir", None)
+    checkpoint_dir = getattr(args, "checkpoint_dir", None)
+    if run_dir is not None:
+        expected_checkpoint_dir = run_dir / "checkpoints"
+        if (
+            checkpoint_dir is not None
+            and checkpoint_dir.resolve() != expected_checkpoint_dir.resolve()
+        ):
+            raise ValueError(
+                "--checkpoint-dir must equal --run-dir/checkpoints when both are set"
+            )
+        checkpoint_dir = expected_checkpoint_dir
+    elif checkpoint_dir is None:
+        raise ValueError("provide --run-dir for a tracked run")
 
     guided_data = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
@@ -389,7 +521,7 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         base_params_path=args.base_params_path,
         guided_data=guided_data,
         experiment_name=args.experiment_name,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
         num_train_steps=args.num_train_steps,
         log_interval=args.log_interval,
         save_interval=args.save_interval,
@@ -405,6 +537,7 @@ def _run_from_args(args: argparse.Namespace) -> Any:
             split_manifest is not None
             and not getattr(args, "allow_effective_batch_mismatch", False)
         ),
+        run_dir=run_dir,
     )
     return run_guided_training(run_config)
 

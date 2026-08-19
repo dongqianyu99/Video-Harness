@@ -41,6 +41,7 @@ export GUIDE_GROUPS_PER_BATCH=1
 export GUIDE_MAX_FRAMES=64
 export GUIDE_MAX_UNITS=32
 export GUIDE_MAX_TEXT_TOKENS=128
+export GUIDED_RUN_ROOT=/path/to/runs/guided-server-debug
 
 cd "$OPENPI_DIR"
 uv pip install -e "$VIDEO_HARNESS_DIR"
@@ -77,6 +78,22 @@ prefetch overlaps native LeRobot/video work with training, while a separate
 JAX queue asynchronously places upcoming grouped batches on device. These are
 performance mechanisms only: they do not cache SigLIP features, change Guide
 bindings, or modify the native Pi0.5 loss.
+
+Every new training invocation uses one explicit run directory:
+
+```text
+<run-dir>/
+├── run.json
+├── logs/train.log
+├── wandb/
+├── checkpoints/
+└── eval/
+```
+
+The terminal logger and the file logger receive the same training records.
+When W&B is enabled, its local files and stable resume ID remain under this
+run. Set `ROBODOJO_EVAL_ROOT=<run-dir>/eval` when evaluating a checkpoint from
+the run so RoboDojo results and videos remain colocated.
 
 Guide length buckets use repeated `--guide-length-bucket
 MAX_UNITS:MAX_FRAMES` arguments. Every support document is assigned to the
@@ -205,7 +222,7 @@ uv run python scripts/train_guided.py \
   --max-units "$GUIDE_MAX_UNITS" \
   --max-text-tokens "$GUIDE_MAX_TEXT_TOKENS" \
   --experiment-name guided-server-debug \
-  --checkpoint-dir /path/to/guided-debug-checkpoint \
+  --run-dir "$GUIDED_RUN_ROOT" \
   --num-train-steps 10 \
   --log-interval 1 \
   --save-interval 5 \
@@ -240,7 +257,7 @@ uv run python scripts/train_guided.py \
   --max-units "$GUIDE_MAX_UNITS" \
   --max-text-tokens "$GUIDE_MAX_TEXT_TOKENS" \
   --experiment-name guided-full-data \
-  --checkpoint-dir /path/to/guided-full-data-checkpoint \
+  --run-dir /path/to/runs/guided-full-data \
   --num-train-steps 60000 \
   --log-interval 100 \
   --save-interval 10000 \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 import dataclasses
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -109,6 +110,13 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
     assert formal_data.gradient_accumulation_steps == 2
     assert captured["run_config"].gradient_accumulation_steps == 2
     assert not captured["run_config"].enforce_reference_batch_size
+
+    args.run_dir = tmp_path / "tracked-run"
+    args.checkpoint_dir = None
+    _train._run_from_args(args)  # noqa: SLF001
+    tracked = captured["run_config"]
+    assert tracked.run_dir == args.run_dir
+    assert tracked.checkpoint_dir == args.run_dir / "checkpoints"
 
 
 def test_argument_entry_rejects_unscoped_training():
@@ -292,10 +300,19 @@ def test_one_step_fake_guided_entry_uses_sharding_and_checkpoint_hooks(monkeypat
         num_train_steps=1,
         log_interval=1,
         save_interval=1,
+        lr_schedule=SimpleNamespace(create=lambda: lambda _step: 1e-5),
     )
     state = _make_state()
     batch = _make_batch()
     calls = {"saved": 0, "waited": 0}
+    wandb_logs = []
+
+    class _WandbRun:
+        def log(self, payload, *, step):
+            wandb_logs.append((payload, step))
+
+        def finish(self, *, exit_code):
+            calls["wandb_exit_code"] = exit_code
 
     class _Manager:
         def wait_until_finished(self):
@@ -339,6 +356,11 @@ def test_one_step_fake_guided_entry_uses_sharding_and_checkpoint_hooks(monkeypat
     monkeypatch.setattr(_train, "GuidePi0", _TinyGuidedModel)
     monkeypatch.setattr(
         _train,
+        "init_guided_wandb",
+        lambda **_kwargs: _WandbRun(),
+    )
+    monkeypatch.setattr(
+        _train,
         "save_guided_state",
         lambda *args, **kwargs: calls.__setitem__("saved", calls["saved"] + 1),
     )
@@ -346,4 +368,32 @@ def test_one_step_fake_guided_entry_uses_sharding_and_checkpoint_hooks(monkeypat
     result = _train.run_guided_training(run_config)
 
     assert int(result.step) == 1
-    assert calls == {"saved": 1, "waited": 1}
+    assert calls == {"saved": 1, "waited": 1, "wandb_exit_code": 0}
+    assert wandb_logs[0][1] == 0
+    assert "train/loss" in wandb_logs[0][0]
+    assert "performance/optimizer_steps_per_s" in wandb_logs[0][0]
+    run_root = run_config.checkpoint_dir.parent / f"{run_config.checkpoint_dir.name}.run"
+    manifest = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "completed"
+    assert (run_root / "logs" / "train.log").is_file()
+    assert (run_root / "eval").is_dir()
+
+
+def test_run_failure_is_recorded_in_manifest(monkeypatch, tmp_path: Path) -> None:
+    run_config = _run_config(tmp_path)
+
+    def fail(_run_config, _layout, _session):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(_train, "_run_guided_training_impl", fail)
+
+    with pytest.raises(RuntimeError, match="synthetic failure"):
+        _train.run_guided_training(run_config)
+
+    run_root = run_config.checkpoint_dir.parent / f"{run_config.checkpoint_dir.name}.run"
+    manifest = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["error"] == {
+        "type": "RuntimeError",
+        "message": "synthetic failure",
+    }

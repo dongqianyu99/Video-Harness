@@ -59,6 +59,10 @@ bash eval.sh RoboDojo stack_bowls RoboDojo-cotrain-arx_x5-joint-0 arx_x5 joint 0
 ### Guide-conditioned evaluation
 
 Guide-conditioned checkpoints use one immutable Behavior Document per task.
+When evaluating a checkpoint from a tracked training run, set
+`ROBODOJO_EVAL_ROOT=/absolute/path/to/run/eval`; RoboDojo will place result
+JSON, videos, and resume manifests below that run-local directory instead of
+the repository-level `eval_result/` tree.
 The catalog validates `episodes.jsonl` and always selects the document generated
 from the smallest dataset `episode_index` for that task; every RoboDojo layout
 and repeat then reuses the same materialized Guide.

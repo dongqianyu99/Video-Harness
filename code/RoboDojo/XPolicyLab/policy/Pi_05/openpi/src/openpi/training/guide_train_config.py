@@ -35,6 +35,7 @@ class GuidedTrainRunConfig:
     gradient_accumulation_steps: int = 1
     reference_global_batch_size: int = 256
     enforce_reference_batch_size: bool = False
+    run_dir: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.native_config_name, str) or not self.native_config_name.strip():
@@ -43,6 +44,8 @@ class GuidedTrainRunConfig:
             raise ValueError("base_params_path must be a pathlib.Path")
         if not isinstance(self.checkpoint_dir, Path):
             raise ValueError("checkpoint_dir must be a pathlib.Path")
+        if self.run_dir is not None and not isinstance(self.run_dir, Path):
+            raise ValueError("run_dir must be pathlib.Path or None")
         if not isinstance(self.experiment_name, str) or not self.experiment_name.strip():
             raise ValueError("experiment_name must be a non-empty string")
 

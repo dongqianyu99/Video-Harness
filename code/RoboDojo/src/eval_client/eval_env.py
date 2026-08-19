@@ -77,8 +77,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                 os.environ["ROBODOJO_RUN_ID"] = run_id
             self.run_id = run_id
+            self.eval_root = os.environ.get(
+                "ROBODOJO_EVAL_ROOT", "eval_result"
+            ).strip() or "eval_result"
             self.save_dir = os.path.join(
-                "eval_result",
+                self.eval_root,
                 f"{BENCHMARK}",
                 self.task_name,
                 self.policy_name,
@@ -659,7 +662,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             locate by humans.
             """
             return os.path.join(
-                "eval_result",
+                self.eval_root,
                 f"{BENCHMARK}",
                 self.task_name,
                 self.policy_name,
