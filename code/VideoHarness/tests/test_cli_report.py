@@ -17,13 +17,18 @@ def _document(record: dict) -> dict:
         dataset_from_index=0,
         dataset_to_index=2,
         data_path="data/chunk-000/file-000.parquet",
-        videos=(
+        videos=tuple(
             VideoSlice(
-                key="observation.images.cam_high",
-                path="videos/observation.images.cam_high/chunk-000/file-000.mp4",
+                key=key,
+                path=f"videos/{key}/chunk-000/file-000.mp4",
                 from_timestamp=0.0,
                 to_timestamp=0.08,
-            ),
+            )
+            for key in (
+                "observation.images.cam_high",
+                "observation.images.cam_left_wrist",
+                "observation.images.cam_right_wrist",
+            )
         ),
     )
     document = plan_document(source, build_id="test-build")
@@ -33,9 +38,18 @@ def _document(record: dict) -> dict:
         "status": "complete",
         "record": record,
         "provenance": {
-            "provider": "test",
-            "model": "test-model",
-            "prompt_version": "test-prompt",
+            "call1": {
+                "provider": "test",
+                "model": "test-motion",
+                "prompt_version": "test-inspection",
+            },
+            "call2": {
+                "provider": "test",
+                "model": "test-evidence",
+                "prompt_version": "test-evidence",
+                "attempts": 1,
+                "selected_attempt": 1,
+            },
         },
     }
     return document
@@ -47,8 +61,9 @@ def test_report_counts_trainable_structured_evidence(tmp_path, capsys, changed_e
     assert _report(SimpleNamespace(documents=path)) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["trainable_units_default"] == 1
-    assert report["entity_roles"] == {"manipulated_object": 1, "target_receptacle": 1}
-    assert report["operation_labels"] == {"insert": 1}
+    assert report["review_status"] == {"accepted": 1}
+    assert report["causal_validation"] == {"pass": 1}
+    assert report["detail_observation"] == {"present": 1}
 
 
 def test_report_fails_closed_on_unknown_annotation_field(tmp_path, capsys, changed_evidence) -> None:
@@ -62,20 +77,9 @@ def test_report_fails_closed_on_unknown_annotation_field(tmp_path, capsys, chang
 
 
 def test_report_validates_pending_annotation_contract(tmp_path, capsys) -> None:
-    document = _document({
-        "change_status": "insufficient_visual_evidence",
-        "visual_observation": {
-            "before": None,
-            "after": None,
-            "change": None,
-            "support": "insufficient",
-        },
-        "entities": [],
-        "operation_hint": None,
-        "visible_end_effector": "uncertain",
-        "task_relevance": "uncertain",
-        "visibility_limits": ["motion_path", "force", "precise_pose"],
-    })
+    from video_harness.evidence import mock_evidence_record
+
+    document = _document(mock_evidence_record())
     document["status"] = "planned"
     annotation = document["guidance_units"][0]["annotation"]
     annotation.update(

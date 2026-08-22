@@ -49,6 +49,14 @@ def test_interactive_runner_keeps_outputs_local_without_upload_credentials() -> 
     assert "Generated artifacts remain" in script
 
 
+def test_interactive_runner_exposes_debug_and_always_routes_source_media() -> None:
+    script = (PROJECT_ROOT / "scripts" / "run_interactive.sh").read_text()
+    assert "Enable debug mode" in script
+    assert '--debug-root "${output_root}/debug"' in script
+    assert '--dataset-root "${dataset_root}"' in script
+    assert "--provider mock" not in script
+
+
 def test_all_guidance_build_entrypoints_exclude_dlc() -> None:
     interactive = (PROJECT_ROOT / "scripts" / "run_interactive.sh").read_text()
     smoke = (PROJECT_ROOT / "scripts" / "smoke_test.sh").read_text()

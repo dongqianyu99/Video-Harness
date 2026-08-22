@@ -1,121 +1,136 @@
 # Video Harness
 
-`VideoHarness` converts one successful RoboDojo support demonstration into a
-lightweight behavior-document sidecar. It samples the head-camera video at 1 Hz,
-sends each ordered BEFORE/AFTER pair to a VLM, validates the returned structured
-evidence, and stores only text, frame indices, provenance, and support/query
-pairing. It does not copy images or videos into the generated document.
+`VideoHarness` compiles a successful RoboDojo demonstration into a lightweight,
+source-grounded behavior document. A canonical document stores only text,
+frame references, source identity, and provenance. Images, videos, sheets, and
+crops are reconstructed from the source dataset at annotation time and are not
+saved unless debug mode is explicitly enabled.
+
+The compiler processes each nominal one-second guidance Unit as 26
+consecutive frames at 25 Hz from three synchronized cameras. It uses two VLM
+calls:
+
+1. **Motion analysis** receives one 5×5 overview and one higher-resolution 2×3
+   stage sheet per camera. It is task-blind, preserves a Motion Summary, and may
+   request one fixed `cam_high` detail crop.
+2. **Task interpretation** receives that Motion Summary, six original-resolution
+   BEFORE/AFTER endpoint images, the optional detail sheet, and finally the coarse
+   Task Instruction. It describes each camera endpoint, interprets the Unit, and
+   performs a permissive causal self-check.
+
+This is a compiler/harness boundary, not a replacement for the Actuator. The
+query policy still receives its native live observations and task prompt; a
+different same-task support episode supplies the behavior document.
+
+### Camera authority
+
+- `cam_high [FIXED_GLOBAL]` is a fixed elevated oblique view of the tabletop and
+  is authoritative for global position, pad occupancy, object count, ordering,
+  scene state, and world-relative displacement.
+- `cam_left_wrist [MOVING_LOCAL_LEFT_WRIST]` moves with the left gripper and is
+  authoritative for local identity, left-gripper state, contact, grasp, and
+  release.
+- `cam_right_wrist [MOVING_LOCAL_RIGHT_WRIST]` provides the corresponding local
+  evidence for the right gripper.
+
+All views observe the same synchronized scene. Wrist-camera pixel motion includes
+camera ego-motion and cannot by itself establish global object movement. Every
+provider image label contains `EVIDENCE`, `VIEW`, and `CAMERA_ROLE` fields.
+
+## Repository layout
+
+```text
+src/video_harness/
+├── cli.py                 # command entry points
+├── config.py              # immutable runtime/debug contract
+├── pipeline.py            # two-call Unit state machine
+├── temporal_media.py      # exact multiview decode and visual products
+├── annotations.py         # OpenAI, Anthropic, and mock providers
+├── prompts.py             # versioned prompts and strict tool schemas
+├── evidence.py            # structured-output validation
+├── debug_artifacts.py     # no-op or filesystem diagnostic sink
+├── sampling.py            # canonical document planning and validation
+├── reader.py              # Actuator-facing document boundary
+└── renderer.py            # deterministic derived Guide text
+```
+
+See [architecture.md](docs/architecture.md) for module ownership and
+[evidence-prompt.md](docs/evidence-prompt.md) for the provider contract.
 
 ## Run on a new machine
 
-The recommended entry point is the interactive runner:
+The interactive runner prepares the environment, downloads RoboDojo, asks for
+the provider and hidden API token, builds documents, annotates them, and reports
+quality:
 
 ```bash
 cd code/VideoHarness
 bash scripts/run_interactive.sh
 ```
 
-It performs the complete workflow in this order:
+Machine requirements:
 
-1. checks or installs `uv`;
-2. checks or installs `ffmpeg` on an apt-based Linux system;
-3. resolves a Python environment from `pyproject.toml` and runs the test suite;
-4. downloads `RoboDojo_lerobot_v30_video` with the official `hf` CLI;
-5. verifies the public Pi_05-compatible source contract and excludes DLC from
-   guidance generation;
-6. asks you to select OpenAI, Anthropic Claude, or the no-token mock backend;
-7. reads the API token with hidden terminal input and asks for a model ID;
-8. asks for the processing scale;
-9. builds documents, decodes referenced frames, annotates them, and prints an
-   evidence-quality report;
-10. keeps the generated result directory locally and prints its artifact paths.
+- Linux with network access;
+- Python 3.11 or newer, resolved by `uv`;
+- `ffmpeg` with PNG, JPEG, and H.264 support;
+- about 120 GB for the public joint-space LeRobot v3 dataset;
+- an OpenAI or Anthropic token for a real run. The mock backend needs no token.
 
-The default **API smoke** processes only three guidance units. Use it before a
-larger paid run. The script also offers a one-task pilot, all 34 benchmark tasks,
-and a custom subset. Full 1 Hz processing requires tens of thousands of VLM
-calls, so it requires an explicit `FULL` confirmation.
+The runner reads API tokens with hidden terminal input, exports them only to the
+current process, and removes them on exit. It does not put them in command-line
+arguments or output artifacts.
 
-OpenAI and Anthropic tokens exist only in the current script process environment.
-They are not written to a file, included in a command-line argument, or copied
-into an artifact. The runner contains no upload credential or automatic upload
-destination. RoboDojo is public and needs no HF token.
-
-### Machine requirements
-
-- Linux with outbound network access;
-- approximately 120 GB for RoboDojo, plus environment and output space;
-- `curl` if `uv` is not already installed;
-- root or `sudo` only if the script must install `ffmpeg` automatically.
-
-On a managed system without apt/root access, ask the administrator to provide
-`uv` and `ffmpeg`, then rerun the same script.
-
-## Manual workflow
-
-The following commands are equivalent to the interactive path.
-
-### 1. Prepare the environment
+## Manual setup
 
 ```bash
 cd code/VideoHarness
 
-# Only needed when uv is absent.
+# If uv is absent:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
-# Ubuntu example; skip when ffmpeg is already installed.
+# Ubuntu example; skip if ffmpeg is already present:
 sudo apt-get update
 sudo apt-get install -y ffmpeg
 
 uv sync --extra dev --extra providers
 uv run pytest -q
 uv run hf version
+ffmpeg -version | head -n 1
 ```
 
-Do not copy `.venv` between machines. Recreate it from `pyproject.toml` and
-let `uv` resolve the environment on each machine. A locally generated
-`uv.lock` is intentionally ignored and must not be committed or uploaded.
+Do not copy `.venv` between machines. Recreate it from `pyproject.toml`; this
+portable package intentionally does not distribute a machine-generated
+`uv.lock`.
 
-### 2. Download RoboDojo with `hf`
-
-Choose a location outside the source package:
+## Download RoboDojo
 
 ```bash
 export ROBODOJO_REPO_ROOT=/path/to/data/robodojo-hf
-
 scripts/download_robodojo.sh "$ROBODOJO_REPO_ROOT"
 
 export ROBODOJO_DATASET_ROOT="$ROBODOJO_REPO_ROOT/data/RoboDojo_lerobot_v30_video"
 scripts/verify_robodojo.sh "$ROBODOJO_DATASET_ROOT"
 ```
 
-The downloader runs the equivalent of:
+This downloads the public joint-space LeRobot v3 export used by the Pi_05 data
+contract: three RGB cameras, 14D joint state/action, 25 Hz. The compiler selects
+the 34 runnable benchmark tasks and excludes the DLC auxiliary task from
+guidance generation.
 
-```bash
-uv run hf download RoboDojo-Benchmark/RoboDojo \
-  --type dataset \
-  --revision main \
-  --include 'data/RoboDojo_lerobot_v30_video/**' \
-  --local-dir "$ROBODOJO_REPO_ROOT"
-```
-
-Downloads are resumable by running the same command again. For metadata-only
-development, use:
+Metadata-only download remains useful for inventory work, but annotation,
+including the mock end-to-end media smoke, requires the full video shards:
 
 ```bash
 scripts/download_robodojo.sh "$ROBODOJO_REPO_ROOT" --metadata-only
 ```
 
-Metadata is enough for `inspect`, `build`, mock annotation, and `report`. A real
-VLM run and `decode-smoke` require the full video download.
+## Build documents
 
-### 3. Build behavior documents
-
-Use a new output directory. This small example selects one task and three
-episodes:
+Use a new output directory:
 
 ```bash
-export VH_OUTPUT=/path/to/output/video-harness-smoke
+export VH_OUTPUT=/path/to/output/RoboDojo
 
 uv run video-harness inspect \
   --dataset-root "$ROBODOJO_DATASET_ROOT"
@@ -127,29 +142,14 @@ uv run video-harness build \
   --supports-per-query 1 \
   --max-tasks 1 \
   --episodes-per-task 3
-
-uv run video-harness decode-smoke \
-  --dataset-root "$ROBODOJO_DATASET_ROOT" \
-  --documents "$VH_OUTPUT/documents.jsonl" \
-  --limit-frames 4
 ```
 
-The compiler always selects the 34 runnable benchmark tasks: 3,400 episodes in
-total. The legacy DLC task is deliberately excluded from VLM processing because
-it is auxiliary Pi_05 fine-tuning data rather than a benchmark guidance task.
-When assembling the final policy-training dataset, add the original 100 DLC
-trajectories separately, without generated guidance. This preserves their role
-as auxiliary policy data without paying for or learning a DLC behavior document.
+The build writes immutable source/frame references with pending annotation
+slots. It does not decode or duplicate media.
 
-### Complete-run output
+## Annotate
 
-When the interactive runner uses **Scale 3: All benchmark data**, successful
-annotation and validation remain under the explicitly selected local output
-directory. The runner does not upload, publish, or copy that directory to any
-remote service. Review and archive the output separately after the evidence
-report and a manual sample audit pass.
-
-### 4. Annotate with OpenAI
+### OpenAI
 
 ```bash
 read -r -s -p "OpenAI API token: " OPENAI_API_KEY
@@ -158,7 +158,7 @@ export OPENAI_API_KEY
 
 uv run video-harness annotate \
   --provider openai \
-  --model <vision-capable-openai-model-id> \
+  --model <vision-capable-model-id> \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --documents "$VH_OUTPUT/documents.jsonl" \
   --output "$VH_OUTPUT/documents.openai.jsonl" \
@@ -166,12 +166,9 @@ uv run video-harness annotate \
   --limit-units-per-document 3
 
 unset OPENAI_API_KEY
-
-uv run video-harness report \
-  --documents "$VH_OUTPUT/documents.openai.jsonl"
 ```
 
-### 5. Annotate with Anthropic Claude
+### Anthropic Claude
 
 ```bash
 read -r -s -p "Anthropic API token: " ANTHROPIC_API_KEY
@@ -180,7 +177,7 @@ export ANTHROPIC_API_KEY
 
 uv run video-harness annotate \
   --provider anthropic \
-  --model <vision-capable-claude-model-id> \
+  --model <vision-capable-model-id> \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --documents "$VH_OUTPUT/documents.jsonl" \
   --output "$VH_OUTPUT/documents.anthropic.jsonl" \
@@ -188,60 +185,113 @@ uv run video-harness annotate \
   --limit-units-per-document 3
 
 unset ANTHROPIC_API_KEY
-
-uv run video-harness report \
-  --documents "$VH_OUTPUT/documents.anthropic.jsonl"
 ```
 
-### 6. No-token pipeline smoke
+### Mock pipeline smoke
 
-Mock annotation validates the entire artifact pipeline but deliberately returns
-non-trainable `insufficient_visual_evidence` records:
+The mock follows the same decode/sheet/two-pass pipeline but makes no API call
+and deliberately produces non-trainable evidence:
 
 ```bash
 uv run video-harness annotate \
   --provider mock \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --documents "$VH_OUTPUT/documents.jsonl" \
-  --output "$VH_OUTPUT/documents.mock.jsonl"
-
-uv run video-harness report \
-  --documents "$VH_OUTPUT/documents.mock.jsonl"
+  --output "$VH_OUTPUT/documents.mock.jsonl" \
+  --limit-documents 1 \
+  --limit-units-per-document 1
 ```
 
-### 7. Create the formal training split
-
-After annotation and quality review, create a separate split directory. The
-support and held-out counts are required decisions rather than hidden defaults.
-Set the two counts only after inspecting annotation coverage; all remaining
-source episodes become train queries:
+Validate any result with:
 
 ```bash
-export VH_SPLIT=/path/to/output/video-harness-split-seed0
-export TRAIN_SUPPORTS_PER_TASK=<decide-this-count>
-export HELDOUT_DOCUMENTS_PER_TASK=<decide-this-count>
-
-uv run video-harness make-training-split \
-  --dataset-artifact "$VH_OUTPUT/dataset.json" \
-  --episodes "$VH_OUTPUT/episodes.jsonl" \
-  --documents "$VH_OUTPUT/documents.openai.jsonl" \
-  --output-root "$VH_SPLIT" \
-  --support-documents-per-task "$TRAIN_SUPPORTS_PER_TASK" \
-  --heldout-documents-per-task "$HELDOUT_DOCUMENTS_PER_TASK" \
-  --min-trainable-units 1 \
-  --seed 0
+uv run video-harness report --documents "$VH_OUTPUT/documents.openai.jsonl"
 ```
 
-This produces `training-split.json` and `train-pairs.jsonl`. For every task,
-source episodes have exactly one role: train support, train query, held-out
-document, or unused. Held-out document source episodes are excluded from both
-the supervised query frames and the training Guide pool. Every query episode
-is assigned one same-task support document for its entire lifetime. Assignment
-first balances query-episode counts across support documents and then balances
-their frame load; the resulting gap in query counts is at most one.
+## Full run
 
-`pairs.jsonl` from the original build remains a legacy/smoke artifact. Formal
-training must use `training-split.json` together with its derived
-`train-pairs.jsonl`.
+Omit all build and annotation limits:
+
+```bash
+uv run video-harness build \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
+  --output-root "$VH_OUTPUT" \
+  --sample-hz 1 \
+  --supports-per-query 1
+
+uv run video-harness annotate \
+  --provider openai \
+  --model <vision-capable-model-id> \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
+  --documents "$VH_OUTPUT/documents.jsonl" \
+  --output "$VH_OUTPUT/documents.openai.jsonl"
+
+uv run video-harness report \
+  --documents "$VH_OUTPUT/documents.openai.jsonl"
+```
+
+The full 1 Hz corpus contains many thousands of Units and therefore many paid
+API calls. Always run a bounded pilot first.
+
+## Debug mode
+
+Normal mode writes no intermediate media. Enable debug explicitly for a small
+pilot:
+
+```bash
+uv run video-harness annotate \
+  --provider openai \
+  --model <vision-capable-model-id> \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
+  --documents "$VH_OUTPUT/documents.jsonl" \
+  --output "$VH_OUTPUT/documents.openai.debug-pilot.jsonl" \
+  --limit-documents 1 \
+  --limit-units-per-document 1 \
+  --debug \
+  --debug-root "$VH_OUTPUT/debug"
+```
+
+Each debug Unit contains:
+
+```text
+debug/<document>/<unit>/
+├── call1.json
+├── call2-attempt-01.json       # or attempt-scoped error
+├── call2-attempt-02.json       # only when Call 2 requests retry
+├── call2-attempt-03.json       # maximum third attempt
+├── final.json                  # selected attempt and canonical evidence
+├── manifest.json
+├── videos/{cam_high,cam_left_wrist,cam_right_wrist}.mp4
+├── frames/<view>/frame-00.jpg ... frame-25.jpg
+├── sheets/<view>-overview.png
+├── sheets/<view>-stage.png
+├── sheets/cam_high-detail.png  # only when requested
+└── endpoints/*.jpg
+```
+
+Debug media is diagnostic only. It is not canonical data and must not be used as
+the Actuator training source.
+
+## Evidence contract
+
+The two calls are composed into `video-harness.evidence`:
+
+- the task-blind `motion_summary` from Call 1;
+- separate BEFORE and AFTER descriptions for all three camera views;
+- an optional `detail_observation`;
+- `action_description` and `task_role` from Call 2;
+- Call 2 `causal_validation`;
+- `review_status: accepted | needs_review`.
+
+Every Guidance Unit is treated as an interval of robot execution. The VLM does
+not classify Units as changed/no-change/insufficient or decide whether to discard
+them. Even when global object placement appears stable, local action such as
+gripper closure, contact, grasp, release, or transport must be recorded.
+
+Call 2 can run at most three times. It requests retry only for a clear basic
+causal or physical contradiction. If all three schema-valid interpretations ask
+for retry, the final result is retained as `needs_review` and excluded from
+training by default.
 
 ## Generated artifacts
 
@@ -252,69 +302,35 @@ training must use `training-split.json` together with its derived
 ├── documents.jsonl
 ├── documents.<provider>.jsonl
 └── pairs.jsonl
-
-<split-output>/
-├── training-split.json
-└── train-pairs.jsonl
 ```
 
-| Artifact | Purpose |
-| --- | --- |
-| `dataset.json` | Benchmark-34 source, sampling, selection, and build identity |
-| `episodes.jsonl` | Episode and video-shard routing |
-| `documents.jsonl` | Immutable frame references with pending annotation slots |
-| `documents.<provider>.jsonl` | Structured VLM evidence and per-unit provenance |
-| `pairs.jsonl` | Same-task, different-episode support/query binding |
-| `training-split.json` | Role-disjoint train/support/held-out manifest and assignment statistics |
-| `train-pairs.jsonl` | Balanced, episode-static bindings derived from the training split |
-
-All artifacts from one build carry the same `build_id`. Training code must reject
+Canonical artifacts contain no copied source media or raw API response. All
+files from one build carry the same `build_id`; downstream readers must reject
 mismatched build IDs or schema versions.
 
-## Evidence contract
+## Formal training split
 
-Each VLM call returns a strict `video-harness.evidence.v1` record containing:
-
-- direct BEFORE, AFTER, and visible endpoint change;
-- task-relevant entities and roles, including the manipulated object and target;
-- a bounded operation hypothesis with explicit evidence source;
-- the end effector visible near the endpoint;
-- task relevance without a success claim;
-- visibility limits such as unseen motion path, force, and precise pose.
-
-Task-conditioned names and operation hypotheses are marked separately from
-direct visual facts. By default, only `complete + changed + clear + relevant`
-evidence is considered trainable. The full prompt and schema rationale are in
-[`docs/evidence-prompt-v1.md`](docs/evidence-prompt-v1.md).
-
-## Reader handoff
-
-The query episode remains the native Pi_05 observation/action sample. Only a
-different, same-task support episode is rendered as guidance. The public folder
-can be exposed to OpenPI as:
+After annotation quality review:
 
 ```bash
-export HF_LEROBOT_HOME=/parent/of/RoboDojo_lerobot_v30_video
-export OPENPI_LEROBOT_REPO_ID=RoboDojo_lerobot_v30_video
+uv run video-harness make-training-split \
+  --dataset-artifact "$VH_OUTPUT/dataset.json" \
+  --episodes "$VH_OUTPUT/episodes.jsonl" \
+  --documents "$VH_OUTPUT/documents.openai.jsonl" \
+  --output-root /path/to/output/video-harness-split-seed0 \
+  --support-documents-per-task <decide-count> \
+  --heldout-documents-per-task <decide-count> \
+  --min-trainable-units 1 \
+  --seed 0
 ```
 
-Formal training uses `training-split.json` and `train-pairs.jsonl`. Evaluation
-deliberately uses a separate rule:
-`eval_guidance.load_eval_guidance_catalog()` validates `episodes.jsonl` and
-binds every task to the annotated document whose `source.episode_index` is the
-smallest dataset episode for that task. All layouts and repeats of that task
-reuse the same immutable Guide; missing or non-trainable first documents fail
-instead of falling back to a later demonstration.
+Support, query, held-out, and unused source episodes are role-disjoint. Every
+query episode receives one same-task support document for its full lifetime.
 
-## Current limitations
+## Current validation boundary
 
-- VLM annotation currently writes its output after the requested run completes;
-  full-dataset retry/checkpoint support remains to be implemented.
-- Frame decoding launches one `ffmpeg` process per referenced frame; use a small
-  API smoke before scaling and replace this with batched decoding for production.
-- Schema validity does not guarantee semantic correctness. Manually audit a
-  stratified sample before using generated evidence for training.
-- The 1 Hz units are uniform temporal samples, not discovered semantic stages.
-- The Pi_05 integration implements compact Guide memory, training, and a
-  task-level evaluation bridge. Learned retrieval, decoded-frame caching,
-  multi-Guide batching, and full-model/real-data validation remain future work.
+Local tests validate source identity, exact frame-index routing, media layout,
+provider serialization, structured-output contracts, the two-pass pipeline,
+debug/no-debug behavior, canonical document invariants, and reader handoff. They
+do not prove VLM semantic correctness. Before training, manually audit a
+stratified sample of debug pilots and final canonical records.

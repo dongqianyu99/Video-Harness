@@ -44,7 +44,7 @@ def test_smoke_cli_scopes_loader_to_requested_query_episode(monkeypatch):
         max_units=4,
         max_text_tokens=32,
         seed=0,
-        profile="actuator-v0",
+        profile="actuator",
         num_batches=1,
     )
 

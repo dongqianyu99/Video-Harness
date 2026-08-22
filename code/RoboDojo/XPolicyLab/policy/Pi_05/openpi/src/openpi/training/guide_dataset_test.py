@@ -18,7 +18,7 @@ class _SupportBinding:
     support_rank: int = 0
     task_index: int = 4
     task_instruction: str = "open the cabinet"
-    guide_schema_version: str = "actuator-v0"
+    guide_schema_version: str = "actuator"
 
 
 def _make_binding(**overrides) -> _SupportBinding:
@@ -31,7 +31,7 @@ def _make_binding(**overrides) -> _SupportBinding:
         "support_rank": 0,
         "task_index": 4,
         "task_instruction": "open the cabinet",
-        "guide_schema_version": "actuator-v0",
+        "guide_schema_version": "actuator",
     }
     values.update(overrides)
     return _SupportBinding(**values)

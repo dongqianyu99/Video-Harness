@@ -204,7 +204,7 @@ def _make_setup(tmp_path: Path):
     bundle = _Bundle(
         build_id="build-test",
         dataset={
-            "schema_version": "video-harness.robodojo-source.v0",
+            "schema_version": "video-harness.robodojo-source",
             "fps": 25,
             "document_camera": "observation.images.cam_high",
         },
@@ -276,7 +276,7 @@ def _make_setup(tmp_path: Path):
         pairs_artifact_path=artifact_paths[2],
         batch_size=2,
         seed=7,
-        profile="actuator-v0",
+        profile="actuator",
         max_frames=2,
         max_units=1,
         max_text_tokens=4,

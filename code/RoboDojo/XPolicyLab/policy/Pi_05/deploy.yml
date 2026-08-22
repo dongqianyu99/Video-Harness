@@ -24,7 +24,7 @@ guidance_enabled: false
 guidance_documents_path: null
 guidance_episodes_path: null
 guidance_dataset_root: null
-guidance_profile: actuator-v0
+guidance_profile: actuator
 guidance_max_frames: 64
 guidance_max_units: 32
 guidance_max_text_tokens: 128

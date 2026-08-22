@@ -56,7 +56,7 @@ class RoboDojoGuideResolverFactory:
     materializer_configs_by_binding: tuple[
         tuple[int, GuideMaterializerConfig], ...
     ] = ()
-    profile: str = "actuator-v0"
+    profile: str = "actuator"
 
     def __call__(self) -> VideoHarnessGuideResolver:
         reader = importlib.import_module("video_harness.reader")
@@ -158,7 +158,7 @@ class VideoHarnessGuideResolver:
         materializer_configs_by_binding: Mapping[
             int, GuideMaterializerConfig
         ] | None = None,
-        profile: str = "actuator-v0",
+        profile: str = "actuator",
         frame_loader: Any | None = None,
         plan_builder: Callable[..., Any] | None = None,
     ):

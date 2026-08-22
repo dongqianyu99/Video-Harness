@@ -21,7 +21,7 @@ class TaskGuideSession:
         documents_path: Path,
         episodes_path: Path,
         dataset_root: Path,
-        profile: str = "actuator-v0",
+        profile: str = "actuator",
         max_frames: int,
         max_units: int,
         max_text_tokens: int,

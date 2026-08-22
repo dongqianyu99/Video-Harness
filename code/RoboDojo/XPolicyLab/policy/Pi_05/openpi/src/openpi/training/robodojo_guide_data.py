@@ -223,8 +223,8 @@ def _validate_artifact_dataset_contract(bundle: Any, records: list[Any]) -> None
     dataset = getattr(bundle, "dataset", None)
     if not isinstance(dataset, dict) and not hasattr(dataset, "get"):
         raise ValueError("GuideArtifactBundle.dataset must be a mapping")
-    if dataset.get("schema_version") != "video-harness.robodojo-source.v0":
-        raise ValueError("VideoHarness dataset artifact schema is not RoboDojo v0")
+    if dataset.get("schema_version") != "video-harness.robodojo-source":
+        raise ValueError("VideoHarness dataset artifact does not use the RoboDojo schema")
     if dataset.get("fps") != 25:
         raise ValueError(f"artifact/dataset FPS mismatch: expected 25, got {dataset.get('fps')!r}")
     if dataset.get("document_camera") != "observation.images.cam_high":

@@ -4,44 +4,45 @@ import copy
 
 import pytest
 
+from video_harness.evidence import compose_evidence_record
 
-_CHANGED_EVIDENCE = {
-    "change_status": "changed",
-    "visual_observation": {
-        "before": "A bread slice rests on the table beside the toaster.",
-        "after": "The bread slice is visible inside the toaster slot.",
-        "change": "The bread slice is now inside the toaster slot.",
-        "support": "clear",
-    },
-    "entities": [
-        {
-            "name": "bread slice",
-            "visual_description": "A light-brown rectangular slice beside the toaster.",
-            "role": "manipulated_object",
-            "visible_in": "both",
-            "grounding": "visual_plus_task",
-            "support": "clear",
+
+_CALL2_RECORD = {
+    "endpoint_observation": {
+        "before": {
+            "cam_high": "A bread slice rests beside the toaster.",
+            "cam_left_wrist": "The bread slice is visible near the open gripper.",
+            "cam_right_wrist": "The toaster remains visible beyond the right gripper.",
         },
-        {
-            "name": "toaster slot",
-            "visual_description": "A dark slot on top of the toaster.",
-            "role": "target_receptacle",
-            "visible_in": "both",
-            "grounding": "visual_plus_task",
-            "support": "clear",
+        "after": {
+            "cam_high": "The bread slice is visible inside the toaster slot.",
+            "cam_left_wrist": "The gripper is open after releasing the bread slice.",
+            "cam_right_wrist": "The toaster slot contains the bread slice.",
         },
-    ],
-    "operation_hint": {
-        "label": "insert",
-        "description": "Insert the bread slice into the toaster slot.",
-        "support": "endpoint_plus_task_context",
     },
-    "visible_end_effector": "right",
-    "task_relevance": "relevant",
-    "visibility_limits": ["motion_path", "force", "precise_pose", "grasp_contact"],
+    "detail_observation": "The bread slice passes below the gripper tips into the slot.",
+    "unit_interpretation": {
+        "action_description": "The robot inserts the bread slice into the toaster slot.",
+        "task_role": "This Unit places one bread slice into the toaster.",
+    },
+    "causal_validation": {
+        "status": "pass",
+        "reason": "The visible gripper motion and endpoint states support the insertion.",
+    },
 }
+
+_ACCEPTED_EVIDENCE = compose_evidence_record(
+    "The gripper transports the bread slice toward the toaster and releases it into the slot.",
+    _CALL2_RECORD,
+    review_status="accepted",
+)
+
+
+@pytest.fixture
+def call2_record() -> dict:
+    return copy.deepcopy(_CALL2_RECORD)
 
 
 @pytest.fixture
 def changed_evidence() -> dict:
-    return copy.deepcopy(_CHANGED_EVIDENCE)
+    return copy.deepcopy(_ACCEPTED_EVIDENCE)

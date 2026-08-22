@@ -82,7 +82,7 @@ if [[ "${PI05_GUIDANCE_ENABLED:-0}" == "1" ]]; then
         "guidance_documents_path=${PI05_GUIDANCE_DOCUMENTS_PATH}"
         "guidance_episodes_path=${PI05_GUIDANCE_EPISODES_PATH}"
         "guidance_dataset_root=${PI05_GUIDANCE_DATASET_ROOT}"
-        "guidance_profile=${PI05_GUIDANCE_PROFILE:-actuator-v0}"
+        "guidance_profile=${PI05_GUIDANCE_PROFILE:-actuator}"
         "guidance_max_frames=${PI05_GUIDANCE_MAX_FRAMES:-64}"
         "guidance_max_units=${PI05_GUIDANCE_MAX_UNITS:-32}"
         "guidance_max_text_tokens=${PI05_GUIDANCE_MAX_TEXT_TOKENS:-128}"

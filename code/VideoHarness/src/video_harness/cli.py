@@ -7,7 +7,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .annotations import EvidenceRequest, make_backend
+from .annotations import make_backends
+from .config import HarnessConfig
 from .evidence import (
     EVIDENCE_SCHEMA_VERSION,
     evidence_is_trainable,
@@ -15,8 +16,10 @@ from .evidence import (
 )
 from .media import FFmpegFrameLoader
 from .pairing import build_pairs
+from .pipeline import UnitPipeline
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
 from .sampling import plan_document, validate_document
+from .temporal_media import TemporalMediaBuilder
 from .training_split import build_training_split, episode_record_from_dict
 
 
@@ -144,12 +147,26 @@ def _annotate(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise FileExistsError(f"Annotation output already exists: {args.output}")
     documents = _read_jsonl(args.documents)
-    backend = make_backend(args.provider, args.model)
-    if backend.requires_images and args.dataset_root is None:
-        raise ValueError("--dataset-root is required for OpenAI and Anthropic providers")
-    loader = FFmpegFrameLoader(args.dataset_root) if backend.requires_images else None
+    inspection_backend, evidence_backend = make_backends(args.provider, args.model)
+    debug_root = None
+    if args.debug:
+        debug_root = args.debug_root or args.output.with_suffix(args.output.suffix + ".debug")
+    config = HarnessConfig(
+        debug=args.debug,
+        debug_root=debug_root,
+        inspection_retries=args.inspection_retries,
+        call2_max_attempts=args.call2_max_attempts,
+    )
+    pipeline = UnitPipeline(
+        inspection_backend=inspection_backend,
+        evidence_backend=evidence_backend,
+        media_builder=TemporalMediaBuilder(args.dataset_root),
+        config=config,
+    )
     annotated_units = 0
     annotated_documents = 0
+    failed_units = 0
+    failures: list[dict[str, str]] = []
 
     for document_index, original in enumerate(documents):
         if args.limit_documents is not None and document_index >= args.limit_documents:
@@ -158,44 +175,53 @@ def _annotate(args: argparse.Namespace) -> int:
         document = copy.deepcopy(original)
         unit_budget = args.limit_units_per_document
         document_annotations = 0
-        image_cache: dict[int, bytes] = {}
         for unit in document["guidance_units"]:
             if unit_budget is not None and document_annotations >= unit_budget:
                 break
             annotation = unit["annotation"]
             if annotation.get("status") in {"complete", "mock"} and annotation.get("record"):
                 continue
-            before_ref = unit["before"]
-            after_ref = unit["after"]
-            before_image = after_image = None
-            if loader is not None:
-                before_index = int(before_ref["episode_frame_index"])
-                after_index = int(after_ref["episode_frame_index"])
-                if before_index not in image_cache:
-                    image_cache[before_index] = loader.load(document, before_ref)
-                if after_index not in image_cache:
-                    image_cache[after_index] = loader.load(document, after_ref)
-                before_image = image_cache[before_index]
-                after_image = image_cache[after_index]
-            result = backend.annotate(
-                EvidenceRequest(
-                    document_id=document["document_id"],
-                    unit_id=unit["unit_id"],
-                    task_instruction=document["task_instruction"],
-                    camera_key=document["source"]["camera_key"],
-                    before_frame=int(before_ref["episode_frame_index"]),
-                    after_frame=int(after_ref["episode_frame_index"]),
-                    before_image=before_image,
-                    after_image=after_image,
+            try:
+                result = pipeline.run(document, unit)
+            except Exception as exc:
+                annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
+                annotation["status"] = "failed"
+                annotation["record"] = None
+                annotation["provenance"] = None
+                document_annotations += 1
+                failed_units += 1
+                failures.append(
+                    {
+                        "document_id": document["document_id"],
+                        "unit_id": unit["unit_id"],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
                 )
-            )
+                continue
             annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
-            annotation["status"] = "mock" if result.provider == "mock" else "complete"
-            annotation["record"] = result.evidence
+            annotation["status"] = (
+                "mock" if result.evidence.provider == "mock" else "complete"
+            )
+            annotation["record"] = result.evidence.evidence
             annotation["provenance"] = {
-                "provider": result.provider,
-                "model": result.model,
-                "prompt_version": result.prompt_version,
+                "call1": {
+                    "provider": result.inspection.provider,
+                    "model": (
+                        result.inspection.trace.response_model
+                        or result.inspection.requested_model
+                    ),
+                    "prompt_version": result.inspection.prompt_version,
+                },
+                "call2": {
+                    "provider": result.evidence.provider,
+                    "model": (
+                        result.evidence.trace.response_model
+                        or result.evidence.requested_model
+                    ),
+                    "prompt_version": result.evidence.prompt_version,
+                    "attempts": result.call2_attempts,
+                    "selected_attempt": result.selected_call2_attempt,
+                },
             }
             document_annotations += 1
             annotated_units += 1
@@ -219,10 +245,13 @@ def _annotate(args: argparse.Namespace) -> int:
     print(
         json.dumps(
             {
-                "provider": backend.provider,
-                "model": backend.model,
+                "provider": evidence_backend.provider,
+                "model": evidence_backend.model,
                 "documents_touched": annotated_documents,
                 "units_annotated": annotated_units,
+                "units_failed": failed_units,
+                "failure_examples": failures[:20],
+                "debug_root": None if debug_root is None else str(debug_root),
                 "output": str(args.output),
             },
             indent=2,
@@ -273,10 +302,9 @@ def _make_training_split(args: argparse.Namespace) -> int:
 def _report(args: argparse.Namespace) -> int:
     documents = _read_jsonl(args.documents)
     annotation_status: Counter[str] = Counter()
-    change_status: Counter[str] = Counter()
-    visual_support: Counter[str] = Counter()
-    operation_labels: Counter[str] = Counter()
-    entity_roles: Counter[str] = Counter()
+    review_status: Counter[str] = Counter()
+    causal_validation: Counter[str] = Counter()
+    detail_observation: Counter[str] = Counter()
     trainable_units = 0
     invalid: list[dict[str, str]] = []
     total_units = 0
@@ -331,17 +359,8 @@ def _report(args: argparse.Namespace) -> int:
                 evidence = validate_evidence_record(record)
                 if status in {"complete", "mock"}:
                     provenance = annotation.get("provenance")
-                    if not isinstance(provenance, dict) or set(provenance) != {
-                        "provider",
-                        "model",
-                        "prompt_version",
-                    }:
-                        raise ValueError("complete/mock evidence requires exact provenance")
-                    if any(
-                        not isinstance(provenance[field], str) or not provenance[field].strip()
-                        for field in ("provider", "model", "prompt_version")
-                    ):
-                        raise ValueError("complete/mock provenance fields must be non-empty strings")
+                    if not isinstance(provenance, dict):
+                        raise ValueError("complete/mock evidence requires provenance")
                 elif status not in {"pending", "failed"}:
                     raise ValueError(f"unsupported annotation status {status!r}")
             except (TypeError, ValueError) as exc:
@@ -354,12 +373,11 @@ def _report(args: argparse.Namespace) -> int:
                 )
                 continue
 
-            change_status[evidence["change_status"]] += 1
-            visual_support[evidence["visual_observation"]["support"]] += 1
-            if evidence["operation_hint"] is not None:
-                operation_labels[evidence["operation_hint"]["label"]] += 1
-            for entity in evidence["entities"]:
-                entity_roles[entity["role"]] += 1
+            review_status[evidence["review_status"]] += 1
+            causal_validation[evidence["causal_validation"]["status"]] += 1
+            detail_observation[
+                "present" if evidence["detail_observation"] is not None else "absent"
+            ] += 1
             if status == "complete" and evidence_is_trainable(evidence):
                 trainable_units += 1
 
@@ -367,10 +385,9 @@ def _report(args: argparse.Namespace) -> int:
         "documents": len(documents),
         "units": total_units,
         "annotation_status": dict(sorted(annotation_status.items())),
-        "change_status": dict(sorted(change_status.items())),
-        "visual_support": dict(sorted(visual_support.items())),
-        "operation_labels": dict(sorted(operation_labels.items())),
-        "entity_roles": dict(sorted(entity_roles.items())),
+        "review_status": dict(sorted(review_status.items())),
+        "causal_validation": dict(sorted(causal_validation.items())),
+        "detail_observation": dict(sorted(detail_observation.items())),
         "trainable_units_default": trainable_units,
         "invalid_units": len(invalid),
         "invalid_examples": invalid[:20],
@@ -410,7 +427,7 @@ def _decode_smoke(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Naive Video Harness data compiler")
+    parser = argparse.ArgumentParser(description="Multiview temporal Video Harness compiler")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     inspect = subparsers.add_parser("inspect", help="validate the public RoboDojo Pi_05 source")
@@ -432,11 +449,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     annotate.add_argument("--documents", type=Path, required=True)
     annotate.add_argument("--output", type=Path, required=True)
-    annotate.add_argument("--dataset-root", type=Path)
+    annotate.add_argument("--dataset-root", type=Path, required=True)
     annotate.add_argument("--provider", choices=("mock", "openai", "anthropic"), required=True)
     annotate.add_argument("--model")
     annotate.add_argument("--limit-documents", type=int)
     annotate.add_argument("--limit-units-per-document", type=int)
+    annotate.add_argument("--debug", action="store_true")
+    annotate.add_argument("--debug-root", type=Path)
+    annotate.add_argument("--inspection-retries", type=int, default=1)
+    annotate.add_argument("--call2-max-attempts", type=int, default=3)
     annotate.set_defaults(handler=_annotate)
 
     split = subparsers.add_parser(

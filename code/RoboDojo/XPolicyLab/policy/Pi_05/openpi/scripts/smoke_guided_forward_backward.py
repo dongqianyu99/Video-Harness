@@ -39,7 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fsdp-devices", type=int, default=1)
     parser.add_argument("--no-optimizer-update", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--profile", default="actuator-v0")
+    parser.add_argument("--profile", default="actuator")
     return parser
 
 

@@ -1,29 +1,38 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from .camera_contract import CAMERA_VIEWS, camera_spec, system_prompt_camera_contract
 from .evidence import (
-    CHANGE_STATUSES,
-    END_EFFECTORS,
-    ENTITY_ROLES,
-    GROUNDING_SOURCES,
-    OPERATION_LABELS,
-    OPERATION_SUPPORT,
-    TASK_RELEVANCE,
-    VISIBILITY_LIMITS,
-    VISIBLE_IN,
-    VISUAL_SUPPORT,
+    CAUSAL_VALIDATION_STATUSES,
+    DETAIL_REASONS,
 )
 
 
-PROMPT_VERSION = "video-harness.evidence.v1"
+PROMPT_VERSION = "video-harness.evidence"
+INSPECTION_PROMPT_VERSION = "video-harness.inspection"
 TOOL_NAME = "record_transition_evidence"
+INSPECTION_TOOL_NAME = "locate_temporal_detail"
+CAMERA_CONTRACT = system_prompt_camera_contract()
 
 
-def _nullable_string(description: str) -> dict[str, Any]:
+def _view_string_schema() -> dict[str, Any]:
     return {
-        "anyOf": [{"type": "string"}, {"type": "null"}],
-        "description": description,
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(CAMERA_VIEWS),
+        "properties": {
+            view: {
+                "type": "string",
+                "description": (
+                    f"A concise static-state description grounded in the {view} "
+                    f"[{camera_spec(view).role_id}] endpoint and limited to that "
+                    "camera's evidence authority."
+                ),
+            }
+            for view in CAMERA_VIEWS
+        },
     }
 
 
@@ -31,187 +40,175 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "change_status",
-        "visual_observation",
-        "entities",
-        "operation_hint",
-        "visible_end_effector",
-        "task_relevance",
-        "visibility_limits",
+        "endpoint_observation",
+        "detail_observation",
+        "unit_interpretation",
+        "causal_validation",
     ],
     "properties": {
-        "change_status": {
-            "type": "string",
-            "enum": list(CHANGE_STATUSES),
-            "description": (
-                "Whether the sampled endpoints show a task-relevant visible state change, "
-                "show no such change, or are too ambiguous to judge."
-            ),
-        },
-        "visual_observation": {
+        "endpoint_observation": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["before", "after", "change", "support"],
+            "required": ["before", "after"],
             "properties": {
-                "before": _nullable_string(
-                    "One short sentence describing only the task-relevant state visible in BEFORE."
-                ),
-                "after": _nullable_string(
-                    "One short sentence describing only the task-relevant state visible in AFTER."
-                ),
-                "change": _nullable_string(
-                    "One short present-state sentence describing the visible endpoint difference, "
-                    "not an unobserved process. Null unless change_status is changed."
-                ),
-                "support": {
+                "before": _view_string_schema(),
+                "after": _view_string_schema(),
+            },
+        },
+        "detail_observation": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": "A direct description of the optional cam_high detail sheet, or null when no detail sheet is supplied.",
+        },
+        "unit_interpretation": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action_description", "task_role"],
+            "properties": {
+                "action_description": {
                     "type": "string",
-                    "enum": list(VISUAL_SUPPORT),
-                    "description": "Visibility strength of the endpoint observation, not a probability.",
+                    "description": "What the robot physically does during this Unit, grounded in motion, endpoints, and optional detail.",
+                },
+                "task_role": {
+                    "type": "string",
+                    "description": "What this Unit contributes to the task, without claiming more progress than the evidence supports.",
                 },
             },
         },
-        "entities": {
-            "type": "array",
-            "description": "At most five entities needed to understand this local transition.",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "name",
-                    "visual_description",
-                    "role",
-                    "visible_in",
-                    "grounding",
-                    "support",
-                ],
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "A short entity name; use a generic name when identity is unclear.",
-                    },
-                    "visual_description": {
-                        "type": "string",
-                        "description": "A concise visible appearance/location description for grounding.",
-                    },
-                    "role": {"type": "string", "enum": list(ENTITY_ROLES)},
-                    "visible_in": {"type": "string", "enum": list(VISIBLE_IN)},
-                    "grounding": {
-                        "type": "string",
-                        "enum": list(GROUNDING_SOURCES),
-                        "description": "Whether the role/name is visual-only or uses task context.",
-                    },
-                    "support": {"type": "string", "enum": ["clear", "ambiguous"]},
+        "causal_validation": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["status", "reason"],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": list(CAUSAL_VALIDATION_STATUSES),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "A concise explanation of whether the interpretation obeys basic causal and physical constraints.",
                 },
             },
-        },
-        "operation_hint": {
-            "anyOf": [
-                {"type": "null"},
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["label", "description", "support"],
-                    "properties": {
-                        "label": {"type": "string", "enum": list(OPERATION_LABELS)},
-                        "description": {
-                            "type": "string",
-                            "description": (
-                                "One short local operation hypothesis. It is metadata, not a visual fact."
-                            ),
-                        },
-                        "support": {"type": "string", "enum": list(OPERATION_SUPPORT)},
-                    },
-                },
-            ],
-            "description": "A bounded operation hypothesis, or null when endpoints do not support one.",
-        },
-        "visible_end_effector": {
-            "type": "string",
-            "enum": list(END_EFFECTORS),
-            "description": (
-                "Which end effector is directly visible near the relevant endpoint state; "
-                "use uncertain rather than inferring which arm caused the change."
-            ),
-        },
-        "task_relevance": {
-            "type": "string",
-            "enum": list(TASK_RELEVANCE),
-            "description": "Relation to the task instruction, never a task-success judgment.",
-        },
-        "visibility_limits": {
-            "type": "array",
-            "items": {"type": "string", "enum": list(VISIBILITY_LIMITS)},
-            "description": (
-                "Include motion_path, force, and precise_pose for every endpoint pair, plus any "
-                "other explicitly applicable visibility limits."
-            ),
         },
     },
 }
 
 
-SYSTEM_PROMPT = f"""\
-You are the Video Harness evidence compiler. You receive exactly two temporally
-ordered sampled endpoints from one interval of a successful robot demonstration:
-BEFORE and AFTER. You also receive a coarse task instruction as context.
+INSPECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "motion_summary",
+        "interaction_window",
+        "needs_detail",
+        "detail_request",
+    ],
+    "properties": {
+        "motion_summary": {
+            "type": "string",
+            "description": "One concise task-blind description of the visible geometric and temporal motion facts.",
+        },
+        "interaction_window": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["start_frame", "end_frame"],
+            "properties": {
+                "start_frame": {"type": "integer"},
+                "end_frame": {"type": "integer"},
+            },
+        },
+        "needs_detail": {"type": "boolean"},
+        "detail_request": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["x_min", "y_min", "x_max", "y_max", "reason"],
+                    "properties": {
+                        "x_min": {"type": "number"},
+                        "y_min": {"type": "number"},
+                        "x_max": {"type": "number"},
+                        "y_max": {"type": "number"},
+                        "reason": {
+                            "type": "string",
+                            "enum": list(DETAIL_REASONS),
+                        },
+                    },
+                },
+            ]
+        },
+    },
+}
 
-Your job is not to caption everything, reconstruct the hidden motion, or write a
-plan. Compile a small, evidence-grounded record that a downstream robot policy can
-render in different ways without asking a VLM again. Return exactly one call to
-{TOOL_NAME}; output no explanation or reasoning outside the tool.
 
-Follow this evidence hierarchy:
+INSPECTION_SYSTEM_PROMPT = f"""You are the Video Harness task-blind temporal motion analyst. You receive synchronized 5×5 overview sheets and higher-resolution 2×3 stage sheets from cam_high, cam_left_wrist, and cam_right_wrist. All sheets cover the same Unit in chronological order.
 
-1. visual_observation contains only facts and relations directly supported by the
-   two images. BEFORE and AFTER may describe task-relevant visible state. The
-   change sentence describes an endpoint state difference, not the unseen process.
-2. entities contains only the few objects needed for this interval. Mark an
-   entity as manipulated_object, target_object, target_receptacle, tool,
-   support_surface, context_object, or unknown. If the task instruction helps name
-   or assign the role, grounding must be visual_plus_task. Use a generic visible
-   description when identity is uncertain.
-3. operation_hint is an explicitly bounded hypothesis. Use null rather than guess.
-   Its support must reveal whether an interaction is visible, inferred only from
-   the endpoint change, or additionally disambiguated by the task instruction.
-4. visible_end_effector records which arm is directly visible near the relevant
-   endpoint state: left, right, both, none_visible, or uncertain. It does not
-   establish which arm caused the unseen transition.
-5. task_relevance may be relevant, incidental, or uncertain. It never means the
-   whole task or subtask succeeded.
-6. visibility_limits always includes motion_path, force, and precise_pose because
-   two sampled endpoints cannot provide them. Add grasp_contact, occluded_state,
-   or object_identity only when applicable.
+{CAMERA_CONTRACT}
 
-Set change_status to changed only when a task-relevant endpoint difference is
-visible. Use no_task_relevant_change when both states are visible but no relevant
-change occurs. Use insufficient_visual_evidence when occlusion, blur, or ambiguity
-prevents a reliable judgment. The visual support must agree with that status.
+Describe the visible geometric and temporal motion facts in one concise motion_summary. Explicitly distinguish wrist-camera ego-motion from physical object motion. Focus on arm and gripper motion, object motion, approach, contact, grasp, release, and changes in spatial relation. Do not infer task intent, success, future steps, trajectories, velocities, forces, coordinates, or precise poses.
 
-The images are authoritative evidence. The task instruction may focus attention
-and disambiguate names or operation labels, but it must never create a visual fact.
-Do not claim task success. Do not invent hidden substeps, future steps, causal
-intent, exact paths, grasp force or quality, trajectories, velocities,
-coordinates, distances, angles, 3-D positions, joint values, or precise poses.
-Keep every free-text field concise, plain English, and limited to one sentence.
-"""
+Decide whether the final evidence compiler needs one fixed high-resolution crop from cam_high to judge a small or occluded interaction. Request no detail when the supplied sheets already show the relevant interaction. If detail is needed, return one normalized cam_high ROI and the smallest contiguous frame interval that contains the interaction. The ROI must include the end effector, relevant object, and enough context to interpret their relation.
+
+Return exactly one locate_temporal_detail tool call and no other text."""
 
 
-def user_prompt(
+SYSTEM_PROMPT = f"""You are the Video Harness task-conditioned evidence compiler and lightweight causal validator. You receive a task-blind motion_summary from Call 1, synchronized original-resolution BEFORE and AFTER endpoints from cam_high, cam_left_wrist, and cam_right_wrist, an optional cam_high detail sheet, and a coarse task instruction.
+
+{CAMERA_CONTRACT}
+
+First describe the static state visible in every camera endpoint without collapsing the three views into one imagined camera. Use cam_high to ground global positions, object counts, pad occupancy, and scene-state changes; use wrist endpoints to resolve local identity, gripper closure, contact, grasp, and release. If a detail sheet is supplied, describe only the fine interaction evidence that it directly shows. Then combine those static observations, the optional detail observation, the Call 1 motion_summary, and the task instruction to explain what the robot physically does in this Unit and what role the Unit plays in the task. Treat motion_summary as a useful task-blind temporal observation, not as unquestionable ground truth; correct or qualify it when the endpoint or detail evidence disagrees.
+
+Finally perform a permissive causal validation of your own interpretation. Use status=retry only for a clear violation of basic causal or physical logic, such as claiming object displacement with no compatible interaction, or claiming global movement solely from apparent motion or visibility changes in a moving wrist camera while cam_high remains inconsistent with that claim. Use status=pass when the interpretation is physically plausible even if fine details remain uncertain. Do not retry merely because the exact motion, object identity, or task role is incomplete.
+
+Do not invent hidden substeps, future states, success, trajectories, velocities, coordinates, forces, joint values, or precise poses. Return exactly one record_transition_evidence tool call and no other text."""
+
+
+def inspection_user_prompt(
     *,
-    task_instruction: str,
-    camera_key: str,
+    document_id: str,
     unit_id: str,
-    before_frame: int,
-    after_frame: int,
+    episode_start_frame: int,
+    episode_end_frame: int,
 ) -> str:
-    return f"""\
-Task instruction (context only; it is not visual evidence):
-{task_instruction}
+    return (
+        f"Document={document_id} | Unit={unit_id} | FPS=25 | "
+        f"episode_frames={episode_start_frame}..{episode_end_frame}. "
+        "Images are authoritative and labels identify view and Unit-local frame. "
+        "Describe the task-blind temporal motion and return the strict localization tool call."
+    )
 
-Camera: {camera_key}
-Transition unit: {unit_id}
-BEFORE episode-local frame: {before_frame}
-AFTER episode-local frame: {after_frame}
 
-Compile the strict transition evidence record from the labeled sampled endpoints.
-"""
+def call2_context_prompt(*, motion_summary: str) -> str:
+    return (
+        "Call 1 task-blind motion summary (temporal evidence to verify, not an "
+        f"authoritative conclusion): {motion_summary}"
+    )
+
+
+def evidence_user_prompt(
+    *,
+    document_id: str,
+    unit_id: str,
+    episode_start_frame: int,
+    episode_end_frame: int,
+    task_instruction: str,
+    detail_supplied: bool,
+    previous_attempt: dict[str, Any] | None,
+) -> str:
+    retry_context = ""
+    if previous_attempt is not None:
+        retry_context = (
+            " Previous Call 2 interpretation was marked retry. Re-evaluate the "
+            "same evidence and correct the causal inconsistency without inventing "
+            "new events. Previous output: "
+            + json.dumps(previous_attempt, ensure_ascii=False, sort_keys=True)
+        )
+    return (
+        f"Document={document_id} | Unit={unit_id} | FPS=25 | "
+        f"episode_frames={episode_start_frame}..{episode_end_frame}. "
+        f"Detail sheet supplied: {'yes' if detail_supplied else 'no'}. "
+        f"Task instruction (context for interpretation, not visual evidence): {task_instruction}. "
+        "Describe all six endpoint states, the optional detail, the Unit action, "
+        "its task role, and perform the permissive causal validation."
+        + retry_context
+    )

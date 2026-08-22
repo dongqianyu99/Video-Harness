@@ -42,13 +42,13 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     }
     if set(manifest) != expected:
         raise ValueError("training split manifest has unexpected top-level fields")
-    if manifest["schema_version"] != "video-harness.training-split.v0":
+    if manifest["schema_version"] != "video-harness.training-split":
         raise ValueError("unexpected training split schema")
-    if manifest["guide_schema_version"] != "video-harness.behavior-document.v0.2":
+    if manifest["guide_schema_version"] != "video-harness.behavior-document":
         raise ValueError("training split Guide schema mismatch")
-    if manifest["pair_schema_version"] != "video-harness.support-query-pair.v0.1":
+    if manifest["pair_schema_version"] != "video-harness.support-query-pair":
         raise ValueError("training split pair schema mismatch")
-    if manifest["pairing_strategy"] != "balanced-static-assignment-v1":
+    if manifest["pairing_strategy"] != "balanced-static-assignment":
         raise ValueError("unsupported pairing strategy")
     if manifest["binding_scope"] != "query_episode":
         raise ValueError("training split bindings must be episode-scoped")

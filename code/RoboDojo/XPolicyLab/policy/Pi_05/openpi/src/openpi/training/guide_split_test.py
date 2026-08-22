@@ -95,12 +95,12 @@ def _manifest() -> dict:
             }
         )
     manifest = {
-        "schema_version": "video-harness.training-split.v0",
+        "schema_version": "video-harness.training-split",
         "split_id": "test-split",
         "build_id": "test-build",
-        "guide_schema_version": "video-harness.behavior-document.v0.2",
-        "pair_schema_version": "video-harness.support-query-pair.v0.1",
-        "pairing_strategy": "balanced-static-assignment-v1",
+        "guide_schema_version": "video-harness.behavior-document",
+        "pair_schema_version": "video-harness.support-query-pair",
+        "pairing_strategy": "balanced-static-assignment",
         "binding_scope": "query_episode",
         "seed": 0,
         "task_scope": "partial",

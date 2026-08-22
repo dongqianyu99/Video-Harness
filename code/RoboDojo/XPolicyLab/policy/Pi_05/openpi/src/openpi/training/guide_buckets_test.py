@@ -47,7 +47,7 @@ def test_bucket_assignment_uses_smallest_fitting_shape():
         binding_index=_index(),
         buckets=(GuideLengthBucket(16, 24), GuideLengthBucket(8, 10)),
         max_text_tokens=32,
-        profile="actuator-v0",
+        profile="actuator",
         plan_builder=lambda _bundle, *, query_episode_index, profile: plans[
             query_episode_index
         ],
@@ -77,7 +77,7 @@ def test_bucket_assignment_fails_instead_of_truncating_oversized_guide():
             binding_index=index,
             buckets=(GuideLengthBucket(8, 16),),
             max_text_tokens=32,
-            profile="actuator-v0",
+            profile="actuator",
             plan_builder=lambda *_args, **_kwargs: plan,
         )
 

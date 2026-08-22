@@ -124,7 +124,7 @@ class Model(ModelTemplate):
             documents_path=absolute_path("guidance_documents_path"),
             episodes_path=absolute_path("guidance_episodes_path"),
             dataset_root=absolute_path("guidance_dataset_root"),
-            profile=model_cfg.get("guidance_profile", "actuator-v0"),
+            profile=model_cfg.get("guidance_profile", "actuator"),
             max_frames=self._positive_config_int(model_cfg, "guidance_max_frames"),
             max_units=self._positive_config_int(model_cfg, "guidance_max_units"),
             max_text_tokens=self._positive_config_int(model_cfg, "guidance_max_text_tokens"),

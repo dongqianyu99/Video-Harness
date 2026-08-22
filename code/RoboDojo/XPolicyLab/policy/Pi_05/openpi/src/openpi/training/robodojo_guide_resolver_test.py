@@ -158,7 +158,7 @@ def test_resolver_builds_guide_input_from_support_frames_only():
     assert guide.images.shape == (1, 2, 224, 224, 3)
     assert guide.text_tokens.shape == (1, 1, 4)
     assert guide.unit_mask.tolist() == [[True]]
-    assert plan_calls == [(1, "actuator-v0")]
+    assert plan_calls == [(1, "actuator")]
     assert tokenizer.calls == [plan.units[0].transition_text]
     assert [call[1] for call in frame_loader.calls] == [
         {"episode_frame_index": 0, "timestamp_s": 0.0},
@@ -285,7 +285,7 @@ def test_resolver_rejects_encoded_frame_payload_inside_xpolicylab():
 def test_materialization_config_has_explicit_dataset_root_and_budgets():
     config = RoboDojoGuideMaterializationConfig(
         dataset_root=Path("/dataset"),
-        profile="actuator-v0",
+        profile="actuator",
         max_frames=4,
         max_units=2,
         max_text_tokens=8,

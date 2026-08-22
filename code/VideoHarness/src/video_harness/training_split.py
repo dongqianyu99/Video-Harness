@@ -11,8 +11,8 @@ from .evidence import evidence_is_trainable
 from .robodojo import EpisodeRecord, VideoSlice
 from .sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION, validate_document
 
-TRAINING_SPLIT_SCHEMA_VERSION = "video-harness.training-split.v0"
-PAIR_SCHEMA_VERSION = "video-harness.support-query-pair.v0.1"
+TRAINING_SPLIT_SCHEMA_VERSION = "video-harness.training-split"
+PAIR_SCHEMA_VERSION = "video-harness.support-query-pair"
 
 
 def _require_nonnegative_int(value: Any, *, name: str) -> int:
@@ -383,7 +383,7 @@ def build_training_split(
         "build_id": build_id,
         "guide_schema_version": BEHAVIOR_DOCUMENT_SCHEMA_VERSION,
         "pair_schema_version": PAIR_SCHEMA_VERSION,
-        "pairing_strategy": "balanced-static-assignment-v1",
+        "pairing_strategy": "balanced-static-assignment",
         "binding_scope": "query_episode",
         "seed": seed,
         "task_scope": "all" if len(by_task) == 34 else "partial",
@@ -431,7 +431,7 @@ def validate_training_split_manifest(manifest: Mapping[str, Any]) -> None:
         raise ValueError("training split Guide schema mismatch")
     if manifest["pair_schema_version"] != PAIR_SCHEMA_VERSION:
         raise ValueError("training split pair schema mismatch")
-    if manifest["pairing_strategy"] != "balanced-static-assignment-v1":
+    if manifest["pairing_strategy"] != "balanced-static-assignment":
         raise ValueError("unsupported pairing strategy")
     if manifest["binding_scope"] != "query_episode":
         raise ValueError("training split bindings must be episode-scoped")

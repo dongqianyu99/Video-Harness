@@ -31,13 +31,18 @@ def _document(
         dataset_from_index=episode_index * 51,
         dataset_to_index=(episode_index + 1) * 51,
         data_path="data/chunk-000/file-000.parquet",
-        videos=(
+        videos=tuple(
             VideoSlice(
-                key="observation.images.cam_high",
-                path="videos/observation.images.cam_high/chunk-000/file-000.mp4",
+                key=key,
+                path=f"videos/{key}/chunk-000/file-000.mp4",
                 from_timestamp=0.0,
                 to_timestamp=51 / 25,
-            ),
+            )
+            for key in (
+                "observation.images.cam_high",
+                "observation.images.cam_left_wrist",
+                "observation.images.cam_right_wrist",
+            )
         ),
     )
     document = plan_document(record, build_id=build_id)
@@ -47,9 +52,18 @@ def _document(
         "status": "complete",
         "record": copy.deepcopy(changed_evidence),
         "provenance": {
-            "provider": "test",
-            "model": "test",
-            "prompt_version": "test",
+            "call1": {
+                "provider": "test",
+                "model": "test-motion",
+                "prompt_version": "test-inspection",
+            },
+            "call2": {
+                "provider": "test",
+                "model": "test-evidence",
+                "prompt_version": "test-evidence",
+                "attempts": 1,
+                "selected_attempt": 1,
+            },
         },
     }
     return document
@@ -92,7 +106,7 @@ def test_plan_skips_pending_units_and_deduplicates_frames(changed_evidence):
     assert len(plan.units) == 1
     assert plan.units[0].before_slot == 0
     assert plan.units[0].after_slot == 1
-    assert "Visible change:" in plan.units[0].transition_text
+    assert "Action:" in plan.units[0].transition_text
 
 
 def test_catalog_rejects_document_that_is_not_dataset_first(changed_evidence):

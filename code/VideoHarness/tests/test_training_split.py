@@ -5,6 +5,7 @@ import json
 
 import pytest
 from video_harness.cli import _make_training_split
+from video_harness.evidence import EVIDENCE_SCHEMA_VERSION
 from video_harness.robodojo import EpisodeRecord, VideoSlice
 from video_harness.sampling import plan_document
 from video_harness.training_split import (
@@ -47,13 +48,22 @@ def _annotated_document(record: EpisodeRecord, evidence: dict) -> dict:
     document = plan_document(record, build_id="test-build", sample_hz=1)
     for unit in document["guidance_units"]:
         unit["annotation"] = {
-            "schema_version": "video-harness.evidence.v1",
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
             "status": "complete",
             "record": copy.deepcopy(evidence),
             "provenance": {
-                "provider": "test",
-                "model": "test",
-                "prompt_version": "test-v1",
+                "call1": {
+                    "provider": "test",
+                    "model": "test-motion",
+                    "prompt_version": "test-inspection",
+                },
+                "call2": {
+                    "provider": "test",
+                    "model": "test-evidence",
+                    "prompt_version": "test-evidence",
+                    "attempts": 1,
+                    "selected_attempt": 1,
+                },
             },
         }
     document["status"] = "annotated"
@@ -128,7 +138,7 @@ def test_split_uses_only_trainable_documents_for_support_and_heldout(changed_evi
     for document in documents[:2]:
         for unit in document["guidance_units"]:
             unit["annotation"] = {
-                "schema_version": "video-harness.evidence.v1",
+                "schema_version": EVIDENCE_SCHEMA_VERSION,
                 "status": "pending",
                 "record": None,
                 "provenance": None,

@@ -1,6 +1,6 @@
 # Guide-conditioned server validation
 
-This runbook covers the first Linux/GPU validation of the Actuator v0 Guide path.
+This runbook covers the first Linux/GPU validation of the Actuator Guide path.
 It is intentionally limited to one real batch, one forward/backward pass, and
 short debugging runs. All paths below are placeholders and must be supplied
 explicitly for the server; do not infer them from the working directory.

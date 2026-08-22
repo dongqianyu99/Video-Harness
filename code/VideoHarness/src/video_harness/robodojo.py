@@ -134,7 +134,7 @@ def read_tasks(dataset_root: Path) -> dict[str, int]:
     if len(mapping) != 35:
         raise SourceContractError(f"Expected 35 task labels, found {len(mapping)}")
     if DLC_INSTRUCTION not in mapping:
-        raise SourceContractError("The expected legacy DLC task is absent")
+        raise SourceContractError("The expected auxiliary DLC task is absent")
     return mapping
 
 
@@ -263,7 +263,7 @@ def summarize(records: Iterable[EpisodeRecord]) -> dict[str, Any]:
     for record in records:
         counts[record.task_index] = counts.get(record.task_index, 0) + 1
     return {
-        "schema_version": "video-harness.robodojo-source.v0",
+        "schema_version": "video-harness.robodojo-source",
         "task_scope": "benchmark-34",
         "episodes": len(records),
         "tasks": len(counts),

@@ -5,71 +5,184 @@ import pytest
 
 from video_harness.annotations import (
     AnnotationError,
-    AnthropicEvidenceBackend,
     EvidenceRequest,
+    ImagePayload,
+    InspectionRequest,
     MockEvidenceBackend,
-    OpenAIEvidenceBackend,
+    MockInspectionBackend,
+    OpenAIBackend,
 )
-from video_harness.prompts import EVIDENCE_SCHEMA, PROMPT_VERSION, SYSTEM_PROMPT, TOOL_NAME
+from video_harness.camera_contract import image_label
+from video_harness.prompts import (
+    EVIDENCE_SCHEMA,
+    INSPECTION_SCHEMA,
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    TOOL_NAME,
+)
 
 
-def test_mock_is_explicit_and_schema_valid() -> None:
-    backend = MockEvidenceBackend()
-    result = backend.annotate(
-        EvidenceRequest(
-            document_id="doc",
-            unit_id="u0000",
-            task_instruction="Put bread into the toaster.",
-            camera_key="observation.images.cam_high",
-            before_frame=0,
-            after_frame=25,
-        )
+def _image(label: str) -> ImagePayload:
+    return ImagePayload(label=label, data=b"jpeg", media_type="image/jpeg")
+
+
+def _camera_image(role: str, view: str) -> ImagePayload:
+    return _image(
+        image_label(evidence_role=role, view=view, metadata="TEST_FIXTURE=true")
     )
-    assert result.evidence["change_status"] == "insufficient_visual_evidence"
-    assert result.prompt_version == PROMPT_VERSION
-    assert backend.requires_images is False
 
 
-def test_prompt_defines_evidence_hierarchy() -> None:
-    normalized = " ".join(SYSTEM_PROMPT.split()).lower()
-    assert "images are authoritative evidence" in normalized
-    assert "operation_hint is an explicitly bounded hypothesis" in normalized
-    assert "must never create a visual fact" in normalized
-    assert "do not claim task success" in normalized
+def _inspection_request() -> InspectionRequest:
+    views = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+    return InspectionRequest(
+        document_id="doc",
+        unit_id="u0000",
+        episode_start_frame=100,
+        episode_end_frame=125,
+        overviews=tuple(_camera_image("OVERVIEW", view) for view in views),
+        stages=tuple(_camera_image("STAGE", view) for view in views),
+    )
 
 
-def test_provider_schema_uses_only_portable_strict_keywords() -> None:
-    forbidden = {"maxItems", "minItems", "uniqueItems", "maxLength", "minLength"}
-
-    def walk(value):
-        if isinstance(value, dict):
-            assert not forbidden.intersection(value)
-            for child in value.values():
-                walk(child)
-        elif isinstance(value, list):
-            for child in value:
-                walk(child)
-
-    walk(EVIDENCE_SCHEMA)
-
-
-def _image_request() -> EvidenceRequest:
+def _evidence_request(*, detail: bool = False, previous_attempt=None) -> EvidenceRequest:
     return EvidenceRequest(
         document_id="doc",
         unit_id="u0000",
+        episode_start_frame=100,
+        episode_end_frame=125,
+        motion_summary="The right gripper approaches the bread slice and closes around it.",
         task_instruction="Put bread into the toaster.",
-        camera_key="observation.images.cam_high",
-        before_frame=0,
-        after_frame=25,
-        before_image=b"before-jpeg",
-        after_image=b"after-jpeg",
+        detail=_camera_image("DETAIL", "cam_high") if detail else None,
+        endpoints=tuple(
+            _camera_image(f"ENDPOINT_{role}", view)
+            for role in ("BEFORE", "AFTER")
+            for view in ("cam_high", "cam_left_wrist", "cam_right_wrist")
+        ),
+        previous_attempt=previous_attempt,
     )
 
 
-def test_openai_adapter_requires_shared_strict_schema(changed_evidence) -> None:
+def test_mock_backends_are_explicit_and_schema_valid() -> None:
+    inspection = MockInspectionBackend().inspect(_inspection_request())
+    evidence = MockEvidenceBackend().annotate(_evidence_request())
+    assert inspection.inspection["needs_detail"] is False
+    assert "active_end_effector" not in inspection.inspection
+    assert evidence.evidence["causal_validation"]["status"] == "retry"
+    assert evidence.prompt_version == PROMPT_VERSION
+
+
+def test_prompt_and_schema_define_progressive_calls() -> None:
+    normalized = " ".join(SYSTEM_PROMPT.split()).lower()
+    assert "task-blind motion_summary from call 1" in normalized
+    assert "static state visible in every camera endpoint" in normalized
+    assert "status=retry only for a clear violation" in normalized
+    assert "active_end_effector" not in INSPECTION_SCHEMA["properties"]
+    before = EVIDENCE_SCHEMA["properties"]["endpoint_observation"]["properties"]["before"]
+    assert set(before["required"]) == {
+        "cam_high",
+        "cam_left_wrist",
+        "cam_right_wrist",
+    }
+
+
+def test_request_requires_three_overviews_three_stages_and_six_endpoints() -> None:
+    inspection = _inspection_request()
+    with pytest.raises(ValueError, match="three stage"):
+        InspectionRequest(
+            document_id="doc",
+            unit_id="u0000",
+            episode_start_frame=0,
+            episode_end_frame=25,
+            overviews=inspection.overviews,
+            stages=inspection.stages[:2],
+        )
+    request = _evidence_request()
+    with pytest.raises(ValueError, match="six endpoint"):
+        EvidenceRequest(
+            document_id=request.document_id,
+            unit_id=request.unit_id,
+            episode_start_frame=0,
+            episode_end_frame=25,
+            motion_summary=request.motion_summary,
+            task_instruction=request.task_instruction,
+            detail=None,
+            endpoints=request.endpoints[:5],
+        )
+
+
+def test_openai_inspection_uses_six_images_without_task_text() -> None:
+    inspection = {
+        "motion_summary": "The left gripper approaches one yellow object.",
+        "interaction_window": {"start_frame": 5, "end_frame": 18},
+        "needs_detail": False,
+        "detail_request": None,
+    }
+
     class Responses:
-        def __init__(self):
-            self.kwargs = None
+        kwargs = None
+
+        def create(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                id="req-inspect",
+                model="response-model",
+                usage={"total_tokens": 10},
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name="locate_temporal_detail",
+                        arguments=json.dumps(inspection),
+                    )
+                ],
+            )
+
+    responses = Responses()
+    result = OpenAIBackend(
+        "requested-model", client=SimpleNamespace(responses=responses)
+    ).inspect(_inspection_request())
+    body = responses.kwargs
+    assert body["tools"][0]["strict"] is True
+    assert sum(
+        item["type"] == "input_image" for item in body["input"][0]["content"]
+    ) == 6
+    assert "Put bread" not in json.dumps(body)
+    assert result.trace.request_id == "req-inspect"
+
+
+def test_openai_call2_uses_endpoints_detail_motion_and_task_last(call2_record) -> None:
+    class Responses:
+        kwargs = None
+
+        def create(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                id="req-evidence",
+                model="response-model",
+                usage=None,
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name=TOOL_NAME,
+                        arguments=json.dumps(call2_record),
+                    )
+                ],
+            )
+
+    responses = Responses()
+    result = OpenAIBackend(
+        "requested-model", client=SimpleNamespace(responses=responses)
+    ).annotate(_evidence_request(detail=True))
+    content = responses.kwargs["input"][0]["content"]
+    assert "motion summary" in content[0]["text"].lower()
+    assert content[-1]["type"] == "input_text"
+    assert "Task instruction" in content[-1]["text"]
+    assert sum(item["type"] == "input_image" for item in content) == 7
+    assert result.evidence["unit_interpretation"]["action_description"]
+
+
+def test_retry_context_is_passed_to_call2(call2_record) -> None:
+    class Responses:
+        kwargs = None
 
         def create(self, **kwargs):
             self.kwargs = kwargs
@@ -78,61 +191,31 @@ def test_openai_adapter_requires_shared_strict_schema(changed_evidence) -> None:
                     SimpleNamespace(
                         type="function_call",
                         name=TOOL_NAME,
-                        arguments=json.dumps(changed_evidence),
+                        arguments=json.dumps(call2_record),
                     )
                 ]
             )
 
     responses = Responses()
-    result = OpenAIEvidenceBackend(
-        "test-model", client=SimpleNamespace(responses=responses)
-    ).annotate(_image_request())
-    assert result.evidence["entities"][0]["role"] == "manipulated_object"
-    assert responses.kwargs["tool_choice"]["name"] == TOOL_NAME
-    assert responses.kwargs["tools"][0]["strict"] is True
+    OpenAIBackend(
+        "requested-model", client=SimpleNamespace(responses=responses)
+    ).annotate(_evidence_request(previous_attempt=call2_record))
+    assert "Previous Call 2 interpretation was marked retry" in responses.kwargs["input"][0]["content"][-1]["text"]
 
 
-def test_anthropic_adapter_requires_shared_strict_schema(changed_evidence) -> None:
-    class Messages:
-        def __init__(self):
-            self.kwargs = None
-
-        def create(self, **kwargs):
-            self.kwargs = kwargs
-            return SimpleNamespace(
-                content=[SimpleNamespace(type="tool_use", name=TOOL_NAME, input=changed_evidence)]
-            )
-
-    messages = Messages()
-    result = AnthropicEvidenceBackend(
-        "test-model", client=SimpleNamespace(messages=messages)
-    ).annotate(_image_request())
-    assert result.evidence["operation_hint"]["label"] == "insert"
-    assert messages.kwargs["tool_choice"]["name"] == TOOL_NAME
-    assert messages.kwargs["tools"][0]["strict"] is True
-    assert messages.kwargs["max_tokens"] == 1024
-
-
-def test_openai_adapter_normalizes_malformed_tool_arguments() -> None:
+def test_openai_rejects_malformed_tool_arguments() -> None:
     client = SimpleNamespace(
         responses=SimpleNamespace(
             create=lambda **_: SimpleNamespace(
-                output=[SimpleNamespace(type="function_call", name=TOOL_NAME, arguments="{")]
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name=TOOL_NAME,
+                        arguments="{",
+                    )
+                ]
             )
         )
     )
     with pytest.raises(AnnotationError, match="malformed"):
-        OpenAIEvidenceBackend("test-model", client=client).annotate(_image_request())
-
-
-def test_anthropic_adapter_rejects_extra_root_field(changed_evidence) -> None:
-    changed_evidence["extra"] = True
-    client = SimpleNamespace(
-        messages=SimpleNamespace(
-            create=lambda **_: SimpleNamespace(
-                content=[SimpleNamespace(type="tool_use", name=TOOL_NAME, input=changed_evidence)]
-            )
-        )
-    )
-    with pytest.raises(AnnotationError, match="invalid transition evidence"):
-        AnthropicEvidenceBackend("test-model", client=client).annotate(_image_request())
+        OpenAIBackend("test-model", client=client).annotate(_evidence_request())

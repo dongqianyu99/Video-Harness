@@ -8,7 +8,13 @@ from .evidence import EVIDENCE_SCHEMA_VERSION, validate_evidence_record
 from .robodojo import EpisodeRecord
 
 
-BEHAVIOR_DOCUMENT_SCHEMA_VERSION = "video-harness.behavior-document.v0.2"
+BEHAVIOR_DOCUMENT_SCHEMA_VERSION = "video-harness.behavior-document"
+
+_VIEW_ALIASES = {
+    "observation.images.cam_high": "cam_high",
+    "observation.images.cam_left_wrist": "cam_left_wrist",
+    "observation.images.cam_right_wrist": "cam_right_wrist",
+}
 
 
 @dataclass(frozen=True)
@@ -22,7 +28,7 @@ class AnnotationSlot:
     schema_version: str
     status: str
     record: dict[str, Any] | None
-    provenance: dict[str, str] | None
+    provenance: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,17 @@ def plan_document(
         for order, (start, end) in enumerate(zip(boundaries, boundaries[1:]))
     ]
     head_video = next(video for video in record.videos if video.key == "observation.images.cam_high")
+    videos = {video.key: video for video in record.videos}
+    if set(videos) != set(_VIEW_ALIASES):
+        raise ValueError("RoboDojo document source requires exactly three camera videos")
+    view_sources = {
+        alias: {
+            "camera_key": camera_key,
+            "video_path": videos[camera_key].path,
+            "video_from_timestamp": videos[camera_key].from_timestamp,
+        }
+        for camera_key, alias in _VIEW_ALIASES.items()
+    }
     return {
         "schema_version": BEHAVIOR_DOCUMENT_SCHEMA_VERSION,
         "build_id": build_id,
@@ -94,6 +111,7 @@ def plan_document(
             "camera_key": head_video.key,
             "video_path": head_video.path,
             "video_from_timestamp": head_video.from_timestamp,
+            "views": view_sources,
             "fps": fps,
         },
         "task_instruction": record.task_instruction,
@@ -149,10 +167,8 @@ def validate_document(document: Any) -> dict[str, Any]:
         if not isinstance(value[field], str) or not value[field].strip():
             raise ValueError(f"document.{field} must be a non-empty string")
 
-    source = _exact_keys(
-        value["source"],
-        "document.source",
-        {
+    source = value["source"]
+    required_source_keys = {
             "dataset",
             "episode_index",
             "episode_length",
@@ -160,9 +176,10 @@ def validate_document(document: Any) -> dict[str, Any]:
             "camera_key",
             "video_path",
             "video_from_timestamp",
+            "views",
             "fps",
-        },
-    )
+    }
+    source = _exact_keys(source, "document.source", required_source_keys)
     if source["dataset"] != "RoboDojo_lerobot_v30_video":
         raise ValueError(f"unsupported document source dataset {source['dataset']!r}")
     for field in ("episode_index", "task_index"):
@@ -186,6 +203,31 @@ def validate_document(document: Any) -> dict[str, Any]:
         "video_from_timestamp"
     ] < 0:
         raise ValueError("document.source.video_from_timestamp must be non-negative")
+    views = _exact_keys(source["views"], "document.source.views", set(_VIEW_ALIASES.values()))
+    for alias, camera_key in ((alias, key) for key, alias in _VIEW_ALIASES.items()):
+        item = _exact_keys(
+            views[alias],
+            f"document.source.views.{alias}",
+            {"camera_key", "video_path", "video_from_timestamp"},
+        )
+        if item["camera_key"] != camera_key:
+            raise ValueError(f"document source view {alias} camera key mismatch")
+        path = item["video_path"]
+        if not isinstance(path, str) or not path:
+            raise ValueError(f"document source view {alias} video_path is invalid")
+        pure_path = PurePosixPath(path)
+        if pure_path.is_absolute() or ".." in pure_path.parts:
+            raise ValueError(f"document source view {alias} path is unsafe")
+        if (
+            not isinstance(item["video_from_timestamp"], (int, float))
+            or isinstance(item["video_from_timestamp"], bool)
+            or item["video_from_timestamp"] < 0
+        ):
+            raise ValueError(f"document source view {alias} timestamp is invalid")
+    if views["cam_high"]["video_path"] != source["video_path"]:
+        raise ValueError("primary cam_high path does not match multiview source")
+    if views["cam_high"]["video_from_timestamp"] != source["video_from_timestamp"]:
+        raise ValueError("primary cam_high timestamp does not match multiview source")
 
     sampling = _exact_keys(
         value["sampling"],
@@ -247,17 +289,41 @@ def validate_document(document: Any) -> dict[str, Any]:
             continue
         validate_evidence_record(annotation["record"])
         provenance = annotation["provenance"]
-        if not isinstance(provenance, dict) or set(provenance) != {
+        if not isinstance(provenance, dict) or set(provenance) != {"call1", "call2"}:
+            raise ValueError(f"guidance_units[{order}] requires exact annotation provenance")
+        call1 = provenance["call1"]
+        call2 = provenance["call2"]
+        if not isinstance(call1, dict) or set(call1) != {
             "provider",
             "model",
             "prompt_version",
         }:
-            raise ValueError(f"guidance_units[{order}] requires exact annotation provenance")
+            raise ValueError(f"guidance_units[{order}] has invalid Call 1 provenance")
+        if not isinstance(call2, dict) or set(call2) != {
+            "provider",
+            "model",
+            "prompt_version",
+            "attempts",
+            "selected_attempt",
+        }:
+            raise ValueError(f"guidance_units[{order}] has invalid Call 2 provenance")
         if any(
-            not isinstance(provenance[field], str) or not provenance[field].strip()
+            not isinstance(scope[field], str) or not scope[field].strip()
+            for scope in (call1, call2)
             for field in ("provider", "model", "prompt_version")
         ):
             raise ValueError(f"guidance_units[{order}] provenance fields must be non-empty strings")
+        attempts = call2["attempts"]
+        selected = call2["selected_attempt"]
+        if (
+            isinstance(attempts, bool)
+            or not isinstance(attempts, int)
+            or attempts < 1
+            or isinstance(selected, bool)
+            or not isinstance(selected, int)
+            or not 1 <= selected <= attempts
+        ):
+            raise ValueError(f"guidance_units[{order}] has invalid Call 2 attempt provenance")
 
     if previous_after != length - 1:
         raise ValueError("the final guidance unit must end at the final episode frame")

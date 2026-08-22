@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/run_interactive.sh
 
 Interactive end-to-end Video Harness runner:
-  1. prepare the locked uv environment;
+  1. prepare the uv environment;
   2. download and validate RoboDojo with the official `hf` CLI;
   3. build behavior-document sidecars;
   4. select OpenAI, Anthropic Claude, or mock annotation;
@@ -263,6 +263,13 @@ case "${scale_choice}" in
     ;;
 esac
 
+echo
+echo "== Video Harness: diagnostic artifacts =="
+debug_args=()
+if confirm "Enable debug mode and retain Unit videos, frames, sheets, crops, and provider outputs?"; then
+  debug_args=(--debug)
+fi
+
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 default_output="${repository_root}/run/video-harness-${provider}-${timestamp}"
 output_root=$(prompt_default "New output directory" "${default_output}")
@@ -292,11 +299,15 @@ annotation_output="${output_root}/documents.${provider}.jsonl"
 annotation_command=(
   uv run video-harness annotate
   --provider "${provider}"
+  --dataset-root "${dataset_root}"
   --documents "${output_root}/documents.jsonl"
   --output "${annotation_output}"
 )
 if [[ "${provider}" != "mock" ]]; then
-  annotation_command+=(--model "${model}" --dataset-root "${dataset_root}")
+  annotation_command+=(--model "${model}")
+fi
+if [[ ${#debug_args[@]} -gt 0 ]]; then
+  annotation_command+=("${debug_args[@]}" --debug-root "${output_root}/debug")
 fi
 annotation_command+=("${annotation_limits[@]}")
 "${annotation_command[@]}"

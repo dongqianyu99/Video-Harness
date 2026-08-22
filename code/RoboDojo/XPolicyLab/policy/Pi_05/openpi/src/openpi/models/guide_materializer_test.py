@@ -71,7 +71,7 @@ def _make_plan() -> _GuidePlan:
         support_episode_index=3,
         task_index=4,
         task_instruction="open the cabinet",
-        profile="actuator-v0",
+        profile="actuator",
         frames=frames,
         units=units,
     )

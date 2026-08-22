@@ -22,6 +22,7 @@ uv run video-harness build \
   --episodes-per-task 3
 uv run video-harness annotate \
   --provider mock \
+  --dataset-root "${dataset_root}" \
   --documents "${output_root}/documents.jsonl" \
   --output "${output_root}/documents.mock.jsonl"
 uv run video-harness report \

@@ -30,7 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-units", type=int, required=True)
     parser.add_argument("--max-text-tokens", type=int, required=True)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--profile", default="actuator-v0")
+    parser.add_argument("--profile", default="actuator")
     parser.add_argument("--num-batches", type=int, default=1)
     return parser
 

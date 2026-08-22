@@ -6,7 +6,7 @@ from .evidence import evidence_is_trainable, validate_evidence_record
 from .sampling import validate_document
 
 
-RENDER_PROFILES = ("brief", "state-change", "instructional", "stage-card", "actuator-v0")
+RENDER_PROFILES = ("brief", "state-change", "instructional", "stage-card", "actuator")
 
 
 def render_evidence_text(record: dict[str, Any], profile: str = "brief") -> str:
@@ -15,78 +15,47 @@ def render_evidence_text(record: dict[str, Any], profile: str = "brief") -> str:
     if profile not in RENDER_PROFILES:
         raise ValueError(f"Unknown renderer profile: {profile}")
     evidence = validate_evidence_record(record)
-    observation = evidence["visual_observation"]
-    if evidence["change_status"] != "changed" or observation["change"] is None:
-        raise ValueError("Evidence does not contain a renderable visible change")
-
+    endpoint = evidence["endpoint_observation"]
+    interpretation = evidence["unit_interpretation"]
     if profile == "brief":
-        return observation["change"]
+        return interpretation["action_description"]
     if profile == "state-change":
-        return (
-            f"Before: {observation['before']} "
-            f"After: {observation['after']} "
-            f"Visible change: {observation['change']}"
-        )
-
-    operation = evidence["operation_hint"]
-    if profile == "actuator-v0":
-        entity_text = (
-            "; ".join(
-                f"{entity['role']}={entity['name']} "
-                f"[grounding={entity['grounding']}, support={entity['support']}]"
-                for entity in evidence["entities"]
-            )
-            or "none recorded"
-        )
-
-        if operation is None:
-            operation_text = (
-                "Operation inference [support=none recorded]: none recorded."
-            )
-        else:
-            operation_text = (
-                f"Operation inference [support={operation['support']}]: "
-                f"{operation['label']} — "
-                f"{operation['description'].rstrip('.')}."
-            )
-
-        visibility_text = ", ".join(evidence["visibility_limits"]) or "none recorded"
-
-        return "\n".join(
+        return " ".join(
             [
-                f"Observed before: {observation['before']}",
-                f"Observed after: {observation['after']}",
-                f"Visible change: {observation['change']}",
-                f"Relevant entities: {entity_text}",
-                operation_text,
-                f"Visible end effector: {evidence['visible_end_effector']}.",
-                f"Unobserved details: {visibility_text}.",
+                *(f"Before {view}: {endpoint['before'][view]}" for view in endpoint["before"]),
+                *(f"After {view}: {endpoint['after'][view]}" for view in endpoint["after"]),
             ]
         )
+
+    if profile == "actuator":
+        lines = [f"Motion: {evidence['motion_summary']}"]
+        lines.extend(
+            f"Before {view}: {endpoint['before'][view]}" for view in endpoint["before"]
+        )
+        lines.extend(
+            f"After {view}: {endpoint['after'][view]}" for view in endpoint["after"]
+        )
+        if evidence["detail_observation"] is not None:
+            lines.append(f"Detail: {evidence['detail_observation']}")
+        lines.extend(
+            [
+                f"Action: {interpretation['action_description']}",
+                f"Task role: {interpretation['task_role']}",
+            ]
+        )
+        return "\n".join(lines)
     if profile == "instructional":
-        if operation is None or operation["support"] != "visible_interaction":
-            return f"Visible change: {observation['change']} Visible result: {observation['after']}"
         return (
-            f"Operation hint ({operation['support']}): {operation['description']} "
-            f"Visible result: {observation['after']}"
+            f"Action: {interpretation['action_description']} "
+            f"Task role: {interpretation['task_role']}"
         )
 
-    entity_text = "; ".join(
-        f"{entity['role']}={entity['name']} ({entity['visual_description']})"
-        for entity in evidence["entities"]
-    ) or "none recorded"
-    operation_text = (
-        f"{operation['label']} / {operation['support']}: {operation['description']}"
-        if operation is not None
-        else "none recorded"
-    )
     return (
-        f"Before: {observation['before']} After: {observation['after']} "
-        f"Visible change: {observation['change']} Entities: {entity_text}. "
-        f"Operation hypothesis: {operation_text}. "
-        f"Visible end effector: {evidence['visible_end_effector']}. "
-        f"Task relevance: {evidence['task_relevance']}. "
-        f"Visibility limits: {', '.join(evidence['visibility_limits'])}."
+        f"Motion: {evidence['motion_summary']} "
+        f"Action: {interpretation['action_description']} "
+        f"Task role: {interpretation['task_role']} "
+        f"Causal validation: {evidence['causal_validation']['status']} — "
+        f"{evidence['causal_validation']['reason']}"
     )
 
 
@@ -96,7 +65,6 @@ def render_interleaved(
     *,
     profile: str = "brief",
     allow_mock: bool = False,
-    allow_ambiguous: bool = False,
 ) -> list[dict[str, Any]]:
     """Resolve a sidecar into image-text-image elements for an Actuator adapter."""
 
@@ -113,8 +81,8 @@ def render_interleaved(
         if not isinstance(annotation, dict) or annotation.get("status") not in usable_statuses:
             raise ValueError(f"Unit {unit['unit_id']} has no usable evidence annotation")
         record = annotation.get("record")
-        if not evidence_is_trainable(record, allow_ambiguous=allow_ambiguous):
-            raise ValueError(f"Unit {unit['unit_id']} has no trainable visible change")
+        if not evidence_is_trainable(record):
+            raise ValueError(f"Unit {unit['unit_id']} has no trainable transition evidence")
 
         if previous_after != before_ref:
             rendered.append(

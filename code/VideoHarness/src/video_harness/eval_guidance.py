@@ -125,8 +125,7 @@ class EvalGuidanceCatalog:
         *,
         task_index: int | None = None,
         task_instruction: str | None = None,
-        profile: str = "actuator-v0",
-        allow_ambiguous: bool = False,
+        profile: str = "actuator",
     ) -> EvalGuidePlan:
         if profile not in RENDER_PROFILES:
             raise ValueError(f"Unknown renderer profile: {profile}")
@@ -159,7 +158,7 @@ class EvalGuidanceCatalog:
             if annotation["status"] != "complete":
                 continue
             record = _thaw_json(annotation["record"])
-            if not evidence_is_trainable(record, allow_ambiguous=allow_ambiguous):
+            if not evidence_is_trainable(record):
                 continue
             units.append(
                 GuidePlanUnit(

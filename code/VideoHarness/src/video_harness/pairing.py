@@ -41,7 +41,7 @@ def build_pairs(
             for support_rank, support in enumerate(candidates[:supports_per_query]):
                 pairs.append(
                     {
-                        "schema_version": "video-harness.support-query-pair.v0.1",
+                        "schema_version": "video-harness.support-query-pair",
                         "build_id": build_id,
                         "pair_id": (
                             f"t{task_index:02d}-q{query.episode_index:07d}-"

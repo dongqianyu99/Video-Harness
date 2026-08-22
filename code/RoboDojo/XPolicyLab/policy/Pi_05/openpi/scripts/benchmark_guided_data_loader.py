@@ -118,7 +118,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup-batches", type=int, default=8)
     parser.add_argument("--measured-batches", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--profile", default="actuator-v0")
+    parser.add_argument("--profile", default="actuator")
     parser.add_argument("--output", type=Path)
     return parser
 

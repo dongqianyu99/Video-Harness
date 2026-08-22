@@ -11,8 +11,8 @@ from .evidence import evidence_is_trainable
 from .renderer import RENDER_PROFILES, render_evidence_text
 from .sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION, validate_document
 
-DATASET_SCHEMA_VERSION = "video-harness.robodojo-source.v0"
-PAIR_SCHEMA_VERSION = "video-harness.support-query-pair.v0.1"
+DATASET_SCHEMA_VERSION = "video-harness.robodojo-source"
+PAIR_SCHEMA_VERSION = "video-harness.support-query-pair"
 
 _DATASET_KEYS = frozenset(
     {
@@ -124,7 +124,7 @@ def _validate_dataset_metadata(
         or isinstance(supports_per_query, bool)
         or supports_per_query != 1
     ):
-        raise ValueError("dataset.supports_per_query must be exactly 1 for Actuator v0")
+        raise ValueError("dataset.supports_per_query must be exactly 1")
 
     return value
 
@@ -327,7 +327,7 @@ class GuidePlanUnit:
     before_slot: int
     after_slot: int
     transition_text: str
-    provenance: Mapping[str, str]
+    provenance: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -488,8 +488,7 @@ def build_guide_plan(
     bundle: GuideArtifactBundle,
     *,
     query_episode_index: int,
-    profile: str = "actuator-v0",
-    allow_ambiguous: bool = False,
+    profile: str = "actuator",
 ) -> GuidePlan:
     """Select trainable support evidence and build a token-neutral GuidePlan."""
 
@@ -550,10 +549,7 @@ def build_guide_plan(
             continue
 
         record = _thaw_json(annotation["record"])
-        if not evidence_is_trainable(
-            record,
-            allow_ambiguous=allow_ambiguous,
-        ):
+        if not evidence_is_trainable(record):
             continue
 
         before_slot = slot_for(raw_unit["before"])

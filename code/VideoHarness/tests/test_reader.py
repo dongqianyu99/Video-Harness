@@ -10,7 +10,11 @@ from typing import Any
 
 import pytest
 
-from video_harness.evidence import EVIDENCE_SCHEMA_VERSION, mock_evidence_record
+from video_harness.evidence import (
+    EVIDENCE_SCHEMA_VERSION,
+    compose_evidence_record,
+    mock_evidence_record,
+)
 from video_harness.reader import (
     GuideArtifactBundle,
     GuidePlan,
@@ -27,54 +31,35 @@ _TASK_INSTRUCTION = "Put bread into the toaster."
 
 
 def _changed_evidence() -> dict[str, Any]:
-    return {
-        "change_status": "changed",
-        "visual_observation": {
-            "before": "A bread slice rests on the table beside the toaster.",
-            "after": "The bread slice is visible inside the toaster slot.",
-            "change": "The bread slice is now inside the toaster slot.",
-            "support": "clear",
-        },
-        "entities": [
-            {
-                "name": "bread slice",
-                "visual_description": "A light-brown rectangular slice beside the toaster.",
-                "role": "manipulated_object",
-                "visible_in": "both",
-                "grounding": "visual_plus_task",
-                "support": "clear",
+    views = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+    return compose_evidence_record(
+        "The gripper transports the bread slice and releases it into the toaster.",
+        {
+            "endpoint_observation": {
+                "before": {view: "The bread slice is outside the toaster." for view in views},
+                "after": {view: "The bread slice is inside the toaster." for view in views},
             },
-            {
-                "name": "toaster slot",
-                "visual_description": "A dark slot on top of the toaster.",
-                "role": "target_receptacle",
-                "visible_in": "both",
-                "grounding": "visual_plus_task",
-                "support": "clear",
+            "detail_observation": None,
+            "unit_interpretation": {
+                "action_description": "The robot inserts the bread slice into the toaster.",
+                "task_role": "This Unit loads one bread slice into the toaster.",
             },
-        ],
-        "operation_hint": {
-            "label": "insert",
-            "description": "Insert the bread slice into the toaster slot.",
-            "support": "endpoint_plus_task_context",
+            "causal_validation": {
+                "status": "pass",
+                "reason": "The endpoint states and motion summary support the insertion.",
+            },
         },
-        "visible_end_effector": "right",
-        "task_relevance": "relevant",
-        "visibility_limits": ["motion_path", "force", "precise_pose", "grasp_contact"],
+        review_status="accepted",
+    )
+
+
+def _gripper_close_evidence() -> dict[str, Any]:
+    record = _changed_evidence()
+    record["motion_summary"] = "The gripper closes around the stationary bread slice."
+    record["unit_interpretation"] = {
+        "action_description": "The robot closes the gripper around the bread slice.",
+        "task_role": "This Unit establishes a grasp before transport.",
     }
-
-
-def _no_change_evidence() -> dict[str, Any]:
-    record = _changed_evidence()
-    record["change_status"] = "no_task_relevant_change"
-    record["visual_observation"]["change"] = None
-    record["operation_hint"] = None
-    return record
-
-
-def _ambiguous_evidence() -> dict[str, Any]:
-    record = _changed_evidence()
-    record["visual_observation"]["support"] = "ambiguous"
     return record
 
 
@@ -94,13 +79,18 @@ def _document(
         dataset_from_index=episode_index * 101,
         dataset_to_index=(episode_index + 1) * 101,
         data_path="data/chunk-000/file-000.parquet",
-        videos=(
+        videos=tuple(
             VideoSlice(
-                key="observation.images.cam_high",
-                path="videos/observation.images.cam_high/chunk-000/file-000.mp4",
+                key=key,
+                path=f"videos/{key}/chunk-000/file-000.mp4",
                 from_timestamp=0.0,
                 to_timestamp=101 / 25,
-            ),
+            )
+            for key in (
+                "observation.images.cam_high",
+                "observation.images.cam_left_wrist",
+                "observation.images.cam_right_wrist",
+            )
         ),
     )
     document = plan_document(source, build_id=build_id)
@@ -119,9 +109,18 @@ def _document(
         else:
             record = copy.deepcopy(record or _changed_evidence())
             provenance = {
-                "provider": "test-provider",
-                "model": "test-model",
-                "prompt_version": "test-prompt",
+                "call1": {
+                    "provider": "test-provider",
+                    "model": "test-motion",
+                    "prompt_version": "test-inspection",
+                },
+                "call2": {
+                    "provider": "test-provider",
+                    "model": "test-evidence",
+                    "prompt_version": "test-evidence",
+                    "attempts": 1,
+                    "selected_attempt": 1,
+                },
             }
 
         unit["annotation"] = {
@@ -152,7 +151,7 @@ def _pair(
     pair_id: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "video-harness.support-query-pair.v0.1",
+        "schema_version": "video-harness.support-query-pair",
         "build_id": build_id,
         "pair_id": pair_id or f"pair-q{query_episode_index}-s{support_episode_index}",
         "task_index": _TASK_INDEX,
@@ -167,7 +166,7 @@ def _pair(
 
 def _dataset(*, build_id: str = _BUILD_ID, supports_per_query: int = 1) -> dict[str, Any]:
     return {
-        "schema_version": "video-harness.robodojo-source.v0",
+        "schema_version": "video-harness.robodojo-source",
         "task_scope": "benchmark-34",
         "episodes": 2,
         "tasks": 1,
@@ -316,7 +315,7 @@ def test_loader_rejects_build_id_mismatch(tmp_path: Path, mismatched_artifact: s
 
 def test_loader_rejects_pair_schema_mismatch_and_unknown_keys(tmp_path: Path) -> None:
     pair = _pair()
-    pair["guide_schema_version"] = "old-guide-schema"
+    pair["guide_schema_version"] = "wrong-guide-schema"
     paths = _write_bundle(tmp_path, pairs=[pair])
 
     with pytest.raises(ValueError, match="guide_schema_version"):
@@ -434,7 +433,7 @@ def test_build_plan_selects_trainable_units_and_preserves_identity(tmp_path: Pat
         10,
         records_by_order={
             0: _changed_evidence(),
-            1: _no_change_evidence(),
+            1: _gripper_close_evidence(),
             2: _changed_evidence(),
         },
         statuses_by_order={3: "failed"},
@@ -445,18 +444,18 @@ def test_build_plan_selects_trainable_units_and_preserves_identity(tmp_path: Pat
     plan = build_guide_plan(
         bundle,
         query_episode_index=1,
-        profile="actuator-v0",
+        profile="actuator",
     )
 
     assert isinstance(plan, GuidePlan)
     assert plan.query_episode_index == 1
     assert plan.support_document_id == "robodojo/episode-0000010"
-    assert [unit.unit_id for unit in plan.units] == ["u0000", "u0002"]
-    assert [unit.order for unit in plan.units] == [0, 2]
+    assert [unit.unit_id for unit in plan.units] == ["u0000", "u0001", "u0002"]
+    assert [unit.order for unit in plan.units] == [0, 1, 2]
     assert [frame.episode_frame_index for frame in plan.frames] == [0, 25, 50, 75]
-    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [(0, 1), (2, 3)]
-    assert all(unit.transition_text.startswith("Observed before:") for unit in plan.units)
-    assert all(unit.provenance["provider"] == "test-provider" for unit in plan.units)
+    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [(0, 1), (1, 2), (2, 3)]
+    assert all(unit.transition_text.startswith("Motion:") for unit in plan.units)
+    assert all(unit.provenance["call1"]["provider"] == "test-provider" for unit in plan.units)
     assert support_document == original
 
 
@@ -487,12 +486,12 @@ def test_build_plan_does_not_invent_shared_slots_across_skipped_units(tmp_path: 
     assert len(plan.frames) == 4
 
 
-def test_build_plan_skips_pending_failed_mock_and_insufficient_units(tmp_path: Path) -> None:
+def test_build_plan_keeps_local_actions_and_skips_pending_failed_and_mock_units(tmp_path: Path) -> None:
     support_document = _document(
         10,
         records_by_order={
             0: _changed_evidence(),
-            1: _no_change_evidence(),
+            1: _gripper_close_evidence(),
             2: mock_evidence_record(),
         },
         statuses_by_order={2: "mock", 3: "pending"},
@@ -501,31 +500,13 @@ def test_build_plan_skips_pending_failed_mock_and_insufficient_units(tmp_path: P
 
     plan = build_guide_plan(bundle, query_episode_index=1)
 
-    assert [unit.unit_id for unit in plan.units] == ["u0000"]
-
-
-def test_build_plan_ambiguous_requires_explicit_opt_in(tmp_path: Path) -> None:
-    support_document = _document(
-        10,
-        records_by_order={0: _ambiguous_evidence()},
-    )
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
-
-    with pytest.raises(ValueError, match="robodojo/episode-0000010"):
-        build_guide_plan(bundle, query_episode_index=1)
-
-    plan = build_guide_plan(
-        bundle,
-        query_episode_index=1,
-        allow_ambiguous=True,
-    )
-    assert [unit.unit_id for unit in plan.units] == ["u0000"]
+    assert [unit.unit_id for unit in plan.units] == ["u0000", "u0001"]
 
 
 def test_build_plan_fails_closed_when_no_unit_is_trainable(tmp_path: Path) -> None:
     support_document = _document(
         10,
-        records_by_order={0: _no_change_evidence()},
+        records_by_order={0: mock_evidence_record()},
     )
     bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
 
