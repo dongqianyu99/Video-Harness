@@ -16,14 +16,14 @@ from video_harness.evidence import (
 )
 
 
-def test_call2_record_requires_three_descriptions_per_endpoint(call2_record) -> None:
+def test_call2_record_requires_three_descriptions_per_boundary(call2_record) -> None:
     normalized = validate_call2_record(call2_record)
-    assert set(normalized["endpoint_observation"]["before"]) == {
+    assert set(normalized["before_boundary_observation"]) == {
         "cam_high",
         "cam_left_wrist",
         "cam_right_wrist",
     }
-    del call2_record["endpoint_observation"]["after"]["cam_right_wrist"]
+    del call2_record["after_boundary_observation"]["cam_right_wrist"]
     with pytest.raises(EvidenceValidationError, match="must have exactly"):
         validate_call2_record(call2_record)
 
@@ -32,23 +32,54 @@ def test_canonical_evidence_composes_call1_and_call2(call2_record) -> None:
     evidence = compose_evidence_record(
         "The right gripper approaches the object and closes around it.",
         call2_record,
-        review_status="accepted",
+        quality_status="accepted",
     )
     assert EVIDENCE_SCHEMA_VERSION == "video-harness.evidence"
     assert evidence["motion_summary"].startswith("The right gripper")
-    assert evidence["review_status"] == "accepted"
+    assert evidence["quality_status"] == "accepted"
     assert validate_evidence_record(copy.deepcopy(evidence)) == evidence
     assert evidence_is_trainable(evidence)
 
 
-def test_review_status_must_match_causal_validation(call2_record) -> None:
+def test_shared_boundary_is_represented_once_in_adjacent_units() -> None:
+    """Adjacent units point at one boundary id; they do not duplicate state text."""
+    from video_harness.robodojo import EpisodeRecord, VideoSlice
+    from video_harness.sampling import plan_document
+
+    views = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+    source = EpisodeRecord(
+        episode_index=0,
+        task_index=0,
+        task_instruction="x",
+        task_kind="x",
+        length=51,
+        dataset_from_index=0,
+        dataset_to_index=51,
+        data_path="x",
+        videos=tuple(
+            VideoSlice(
+                key=f"observation.images.{view}",
+                path=f"{view}.mp4",
+                from_timestamp=0.0,
+                to_timestamp=2.0,
+            )
+            for view in views
+        ),
+    )
+    document = plan_document(source, build_id="test")
+    assert len(document["boundary_states"]) == len(document["evidence_units"]) + 1
+    for left, right in zip(document["evidence_units"], document["evidence_units"][1:]):
+        assert left["after_boundary_id"] == right["before_boundary_id"]
+
+
+def test_quality_status_must_match_causal_validation(call2_record) -> None:
     with pytest.raises(EvidenceValidationError, match="accepted exactly"):
         compose_evidence_record(
-            "The robot moves.", call2_record, review_status="needs_review"
+            "The robot moves.", call2_record, quality_status="quarantined"
         )
     call2_record["causal_validation"]["status"] = "retry"
     evidence = compose_evidence_record(
-        "The robot moves.", call2_record, review_status="needs_review"
+        "The robot moves.", call2_record, quality_status="quarantined"
     )
     assert not evidence_is_trainable(evidence)
 
@@ -60,7 +91,9 @@ def test_inspection_motion_summary_has_no_word_or_sentence_limit() -> None:
         "not visible, and this deliberately exceeds the former summary limit while "
         "remaining useful temporal evidence for the next call."
     )
-    assert validate_inspection_record(record)["motion_summary"] == record["motion_summary"]
+    assert (
+        validate_inspection_record(record)["motion_summary"] == record["motion_summary"]
+    )
 
 
 def test_inspection_has_no_active_end_effector_field() -> None:
@@ -80,7 +113,7 @@ def test_inspection_record_validates_detail_contract() -> None:
             "y_min": 0.25,
             "x_max": 0.40,
             "y_max": 0.80,
-            "reason": "gripper_object",
+            "reason": "fine_spatial_detail",
         },
     }
     assert validate_inspection_record(record) == record
@@ -100,9 +133,9 @@ def test_inspection_rejects_reversed_window() -> None:
         validate_inspection_record(record)
 
 
-def test_mock_records_are_valid_but_need_review() -> None:
+def test_mock_records_are_valid_but_not_trainable() -> None:
     assert validate_call2_record(mock_call2_record()) == mock_call2_record()
     evidence = mock_evidence_record()
     assert validate_evidence_record(copy.deepcopy(evidence)) == evidence
-    assert evidence["review_status"] == "needs_review"
+    assert evidence["quality_status"] == "quarantined"
     assert not evidence_is_trainable(evidence)

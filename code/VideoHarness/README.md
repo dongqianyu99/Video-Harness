@@ -6,17 +6,33 @@ frame references, source identity, and provenance. Images, videos, sheets, and
 crops are reconstructed from the source dataset at annotation time and are not
 saved unless debug mode is explicitly enabled.
 
-The compiler processes each nominal one-second guidance Unit as 26
+The compiler processes each nominal one-second Evidence Unit as 26
 consecutive frames at 25 Hz from three synchronized cameras. It uses two VLM
 calls:
 
 1. **Motion analysis** receives one 5×5 overview and one higher-resolution 2×3
-   stage sheet per camera. It is task-blind, preserves a Motion Summary, and may
+   keyframe sheet per camera. It is task-blind, preserves a Motion Summary, and may
    request one fixed `cam_high` detail crop.
 2. **Task interpretation** receives that Motion Summary, six original-resolution
-   BEFORE/AFTER endpoint images, the optional detail sheet, and finally the coarse
-   Task Instruction. It describes each camera endpoint, interprets the Unit, and
+   BEFORE/AFTER Boundary images, any accepted shared Boundary descriptions, the
+   optional detail sheet, and finally the coarse Task Instruction. It creates only
+   missing Boundary descriptions, interprets the Evidence Unit transition, and
    performs a permissive causal self-check.
+
+A document with `N` Evidence Units contains exactly `N+1` Boundary States:
+
+```text
+B0 → T0 → B1 → T1 → ... → TN-1 → BN
+```
+
+Each synchronized Boundary State and its three-view static description exist once.
+Adjacent Evidence Units reference the same Boundary ID instead of independently
+describing `previous AFTER` and `current BEFORE`.
+
+If a later Call 2 finds that an accepted shared Boundary description materially
+conflicts with the same images, it records the conflict, invalidates that Boundary
+for training, and enters automatic Targeted Reprocessing instead of silently
+overwriting or duplicating it.
 
 This is a compiler/harness boundary, not a replacement for the Actuator. The
 query policy still receives its native live observations and task prompt; a
@@ -24,14 +40,18 @@ different same-task support episode supplies the behavior document.
 
 ### Camera authority
 
-- `cam_high [FIXED_GLOBAL]` is a fixed elevated oblique view of the tabletop and
-  is authoritative for global position, pad occupancy, object count, ordering,
-  scene state, and world-relative displacement.
-- `cam_left_wrist [MOVING_LOCAL_LEFT_WRIST]` moves with the left gripper and is
+- `cam_high [FIXED_GLOBAL]` is a fixed elevated oblique view of the interaction
+  workspace and is the primary source for global scene layout, entity position,
+  spatial relations, scene state, and world-relative displacement.
+- `cam_left_wrist [WRIST_MOUNTED_LOCAL_LEFT]` is mounted behind the left gripper and is
   authoritative for local identity, left-gripper state, contact, grasp, and
   release.
-- `cam_right_wrist [MOVING_LOCAL_RIGHT_WRIST]` provides the corresponding local
+- `cam_right_wrist [WRIST_MOUNTED_LOCAL_RIGHT]` provides the corresponding local
   evidence for the right gripper.
+
+Camera authority is claim-specific evidence priority, not infallibility. A view
+may be occluded or unresolved, and an entity not visible in one view is not
+therefore absent or unchanged.
 
 All views observe the same synchronized scene. Wrist-camera pixel motion includes
 camera ego-motion and cannot by itself establish global object movement. Every
@@ -43,7 +63,8 @@ provider image label contains `EVIDENCE`, `VIEW`, and `CAMERA_ROLE` fields.
 src/video_harness/
 ├── cli.py                 # command entry points
 ├── config.py              # immutable runtime/debug contract
-├── pipeline.py            # two-call Unit state machine
+├── pipeline.py            # two-call Evidence Unit state machine
+├── reconciliation.py      # automatic Sequence Audit and document repair
 ├── temporal_media.py      # exact multiview decode and visual products
 ├── annotations.py         # OpenAI, Anthropic, and mock providers
 ├── prompts.py             # versioned prompts and strict tool schemas
@@ -230,7 +251,7 @@ uv run video-harness report \
   --documents "$VH_OUTPUT/documents.openai.jsonl"
 ```
 
-The full 1 Hz corpus contains many thousands of Units and therefore many paid
+The full 1 Hz corpus contains many thousands of Evidence Units and therefore many paid
 API calls. Always run a bounded pilot first.
 
 ## Debug mode
@@ -251,22 +272,22 @@ uv run video-harness annotate \
   --debug-root "$VH_OUTPUT/debug"
 ```
 
-Each debug Unit contains:
+Each debug Evidence Unit contains:
 
 ```text
 debug/<document>/<unit>/
 ├── call1.json
-├── call2-attempt-01.json       # or attempt-scoped error
-├── call2-attempt-02.json       # only when Call 2 requests retry
-├── call2-attempt-03.json       # maximum third attempt
-├── final.json                  # selected attempt and canonical evidence
+├── call2.json                  # or call2-error.json
+├── repair-attempt-01.json      # only after a detected issue
+├── repair-attempt-02.json      # bounded second repair attempt
+├── final.json                  # canonical evidence and repair decision
 ├── manifest.json
 ├── videos/{cam_high,cam_left_wrist,cam_right_wrist}.mp4
 ├── frames/<view>/frame-00.jpg ... frame-25.jpg
 ├── sheets/<view>-overview.png
-├── sheets/<view>-stage.png
+├── sheets/<view>-keyframes.png
 ├── sheets/cam_high-detail.png  # only when requested
-└── endpoints/*.jpg
+└── boundaries/*.jpg
 ```
 
 Debug media is diagnostic only. It is not canonical data and must not be used as
@@ -274,24 +295,37 @@ the Actuator training source.
 
 ## Evidence contract
 
-The two calls are composed into `video-harness.evidence`:
+Canonical annotations are separated into two records:
+
+- `video-harness.boundary-state` stores one synchronized three-view static
+  observation and its quality status;
+- `video-harness.evidence` stores one transition between adjacent Boundary
+  States.
+
+Transition evidence contains:
 
 - the task-blind `motion_summary` from Call 1;
-- separate BEFORE and AFTER descriptions for all three camera views;
 - an optional `detail_observation`;
+- any detected conflict with an already accepted shared Boundary;
 - `action_description` and `task_role` from Call 2;
 - Call 2 `causal_validation`;
-- `review_status: accepted | needs_review`.
+- `quality_status: accepted | quarantined`.
 
-Every Guidance Unit is treated as an interval of robot execution. The VLM does
-not classify Units as changed/no-change/insufficient or decide whether to discard
+Every Evidence Unit is treated as an interval of robot execution. The VLM does
+not classify Evidence Units as changed/no-change/insufficient or decide whether to discard
 them. Even when global object placement appears stable, local action such as
 gripper closure, contact, grasp, release, or transport must be recorded.
 
-Call 2 can run at most three times. It requests retry only for a clear basic
-causal or physical contradiction. If all three schema-valid interpretations ask
-for retry, the final result is retained as `needs_review` and excluded from
-training by default.
+The normal Call 2 runs once by default. A detected inconsistency enters bounded
+Targeted Reprocessing with the full temporal evidence. Every complete document
+then receives a Sequence Audit; remaining issues are repaired by unit and audited
+again. A document whose automatic budget is exhausted becomes `quarantined` and
+is excluded from every default Reader and training path. Human inspection is
+sampled QA, not a production dependency.
+
+Default automatic budgets are one normal Call 2, up to two targeted repair
+attempts, up to two Sequence Audit attempts, and up to two document repair rounds.
+They can be adjusted with the corresponding `annotate` CLI flags.
 
 ## Generated artifacts
 
@@ -308,9 +342,13 @@ Canonical artifacts contain no copied source media or raw API response. All
 files from one build carry the same `build_id`; downstream readers must reject
 mismatched build IDs or schema versions.
 
+Artifacts produced before Boundary State normalization are intentionally rejected.
+They must be regenerated because conflicting duplicated endpoint descriptions
+cannot be migrated safely by choosing one copy automatically.
+
 ## Formal training split
 
-After annotation quality review:
+After the automatic document quality gate:
 
 ```bash
 uv run video-harness make-training-split \

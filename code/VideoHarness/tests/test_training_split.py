@@ -4,6 +4,8 @@ import copy
 import json
 
 import pytest
+from _support import annotate_boundaries, set_document_quality
+
 from video_harness.cli import _make_training_split
 from video_harness.evidence import EVIDENCE_SCHEMA_VERSION
 from video_harness.robodojo import EpisodeRecord, VideoSlice
@@ -46,7 +48,8 @@ def _record(episode: int, task: int, *, length: int | None = None) -> EpisodeRec
 
 def _annotated_document(record: EpisodeRecord, evidence: dict) -> dict:
     document = plan_document(record, build_id="test-build", sample_hz=1)
-    for unit in document["guidance_units"]:
+    annotate_boundaries(document)
+    for unit in document["evidence_units"]:
         unit["annotation"] = {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "status": "complete",
@@ -61,20 +64,18 @@ def _annotated_document(record: EpisodeRecord, evidence: dict) -> dict:
                     "provider": "test",
                     "model": "test-evidence",
                     "prompt_version": "test-evidence",
-                    "attempts": 1,
-                    "selected_attempt": 1,
                 },
+                "repair": None,
             },
         }
     document["status"] = "annotated"
+    set_document_quality(document, "accepted")
     return document
 
 
 def _corpus(changed_evidence):
     records = [
-        _record(task * 100 + offset, task)
-        for task in range(2)
-        for offset in range(8)
+        _record(task * 100 + offset, task) for task in range(2) for offset in range(8)
     ]
     documents = [_annotated_document(record, changed_evidence) for record in records]
     return records, documents
@@ -136,7 +137,7 @@ def test_split_is_role_disjoint_balanced_and_deterministic(changed_evidence):
 def test_split_uses_only_trainable_documents_for_support_and_heldout(changed_evidence):
     records, documents = _corpus(changed_evidence)
     for document in documents[:2]:
-        for unit in document["guidance_units"]:
+        for unit in document["evidence_units"]:
             unit["annotation"] = {
                 "schema_version": EVIDENCE_SCHEMA_VERSION,
                 "status": "pending",
@@ -144,6 +145,8 @@ def test_split_uses_only_trainable_documents_for_support_and_heldout(changed_evi
                 "provenance": None,
             }
         document["status"] = "planned"
+        annotate_boundaries(document, status="pending")
+        set_document_quality(document, "pending")
 
     manifest, _ = build_training_split(
         records,
@@ -162,6 +165,33 @@ def test_split_uses_only_trainable_documents_for_support_and_heldout(changed_evi
     }
     assert documents[0]["document_id"] not in selected_documents
     assert documents[1]["document_id"] not in selected_documents
+
+
+def test_split_excludes_quarantined_document_as_a_whole(changed_evidence):
+    records, documents = _corpus(changed_evidence)
+    set_document_quality(documents[0], "quarantined")
+    documents[0]["evidence_units"][0]["annotation"]["record"]["quality_status"] = (
+        "quarantined"
+    )
+    documents[0]["evidence_units"][0]["annotation"]["record"]["causal_validation"] = {
+        "status": "retry",
+        "reason": "Automatic repair was unresolved.",
+    }
+    manifest, _ = build_training_split(
+        records,
+        documents,
+        build_id="test-build",
+        support_documents_per_task=2,
+        heldout_documents_per_task=1,
+        seed=2,
+    )
+    selected_documents = {
+        entry["document_id"]
+        for task in manifest["tasks"]
+        for role in ("train_support_documents", "heldout_documents")
+        for entry in task[role]
+    }
+    assert documents[0]["document_id"] not in selected_documents
 
 
 def test_split_can_limit_queries_without_reusing_unused_episodes(changed_evidence):
@@ -231,7 +261,9 @@ def test_split_marks_exact_34_task_corpus_as_formal_all_task_scope(changed_evide
     assert len(pairs) == 68
 
 
-def test_training_split_cli_writes_manifest_and_derived_pairs(tmp_path, changed_evidence):
+def test_training_split_cli_writes_manifest_and_derived_pairs(
+    tmp_path, changed_evidence
+):
     records, documents = _corpus(changed_evidence)
     dataset_path = tmp_path / "dataset.json"
     episodes_path = tmp_path / "episodes.jsonl"
@@ -265,5 +297,8 @@ def test_training_split_cli_writes_manifest_and_derived_pairs(tmp_path, changed_
     assert _make_training_split(args) == 0
 
     manifest = load_training_split_manifest(output_root / "training-split.json")
-    pairs = [json.loads(line) for line in (output_root / "train-pairs.jsonl").read_text().splitlines()]
+    pairs = [
+        json.loads(line)
+        for line in (output_root / "train-pairs.jsonl").read_text().splitlines()
+    ]
     assert manifest["totals"]["train_pairs"] == len(pairs) == 10

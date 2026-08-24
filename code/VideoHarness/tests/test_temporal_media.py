@@ -1,33 +1,33 @@
 from __future__ import annotations
 
+import subprocess
 from io import BytesIO
 from pathlib import Path
-import subprocess
 from types import SimpleNamespace
 
 import numpy as np
-from PIL import Image
 import pytest
+from PIL import Image
 
 from video_harness.media import FrameDecodeError
 from video_harness.temporal_media import (
-    STAGE_INDICES,
-    UNIT_FRAME_COUNT,
+    EVIDENCE_UNIT_FRAME_COUNT,
+    KEYFRAME_INDICES,
     VIEWS,
     DetailRequest,
+    EvidenceUnitFrames,
     TemporalMediaBuilder,
-    UnitFrames,
     VideoSource,
+    boundary_image_payloads,
     decode_unit_frames,
     detail_payload,
-    endpoint_payloads,
+    keyframe_sheet_payload,
     overview_payload,
-    stage_payload,
     validate_detail_request,
 )
 
 
-def _unit(*, frame_count: int = UNIT_FRAME_COUNT) -> UnitFrames:
+def _unit(*, frame_count: int = EVIDENCE_UNIT_FRAME_COUNT) -> EvidenceUnitFrames:
     frames: dict[str, np.ndarray] = {}
     for view_index, view in enumerate(VIEWS):
         values = np.empty((frame_count, 24, 32, 3), dtype=np.uint8)
@@ -36,7 +36,7 @@ def _unit(*, frame_count: int = UNIT_FRAME_COUNT) -> UnitFrames:
             values[frame_index, :, :, 1] = frame_index
             values[frame_index, :, :, 2] = 255 - frame_index
         frames[view] = values
-    return UnitFrames(
+    return EvidenceUnitFrames(
         frames=frames,
         fps=25,
         episode_start_frame=100,
@@ -99,7 +99,9 @@ def test_decode_unit_frames_fails_closed_on_short_decode() -> None:
         )
 
 
-def test_exact_decode_selects_source_frame_indices_with_real_ffmpeg(tmp_path: Path) -> None:
+def test_exact_decode_selects_source_frame_indices_with_real_ffmpeg(
+    tmp_path: Path,
+) -> None:
     frames = np.zeros((60, 24, 32, 3), dtype=np.uint8)
     for index in range(60):
         frames[index, :, :, 1] = index
@@ -144,37 +146,43 @@ def test_exact_decode_selects_source_frame_indices_with_real_ffmpeg(tmp_path: Pa
     assert unit.frames["cam_high"][:, 0, 0, 1].tolist() == list(range(30, 56))
 
 
-def test_all_views_get_overview_and_stage_sheets() -> None:
+def test_all_views_get_overview_and_keyframe_sheets() -> None:
     unit = _unit()
     overviews = [overview_payload(unit, view) for view in VIEWS]
-    stages = [stage_payload(unit, view) for view in VIEWS]
+    keyframe_sheets = [keyframe_sheet_payload(unit, view) for view in VIEWS]
 
-    assert [f"EVIDENCE=OVERVIEW | VIEW={view}" in payload.label for view, payload in zip(VIEWS, overviews, strict=True)] == [True, True, True]
+    assert [
+        f"EVIDENCE=OVERVIEW | VIEW={view}" in payload.label
+        for view, payload in zip(VIEWS, overviews, strict=True)
+    ] == [True, True, True]
     assert "CAMERA_ROLE=FIXED_GLOBAL" in overviews[0].label
-    assert "CAMERA_ROLE=MOVING_LOCAL_LEFT_WRIST" in overviews[1].label
-    assert "CAMERA_ROLE=MOVING_LOCAL_RIGHT_WRIST" in overviews[2].label
+    assert "CAMERA_ROLE=WRIST_MOUNTED_LOCAL_LEFT" in overviews[1].label
+    assert "CAMERA_ROLE=WRIST_MOUNTED_LOCAL_RIGHT" in overviews[2].label
     assert all(payload.media_type == "image/png" for payload in overviews)
     assert all(_open(payload.data).width > 1500 for payload in overviews)
     assert all(
-        f"EVIDENCE=STAGE | VIEW={view}" in payload.label
-        for view, payload in zip(VIEWS, stages, strict=True)
+        f"EVIDENCE=KEYFRAME_SHEET | VIEW={view}" in payload.label
+        for view, payload in zip(VIEWS, keyframe_sheets, strict=True)
     )
-    assert all(",".join(str(index) for index in STAGE_INDICES) in payload.label for payload in stages)
-    assert all(_open(payload.data).width > 1500 for payload in stages)
+    assert all(
+        ",".join(str(index) for index in KEYFRAME_INDICES) in payload.label
+        for payload in keyframe_sheets
+    )
+    assert all(_open(payload.data).width > 1500 for payload in keyframe_sheets)
 
 
-def test_endpoints_are_six_labeled_jpegs_in_before_then_after_order() -> None:
-    endpoints = endpoint_payloads(_unit())
-    assert [payload.label.split(" | ", 1)[0] for payload in endpoints] == [
-        "EVIDENCE=ENDPOINT_BEFORE",
-        "EVIDENCE=ENDPOINT_BEFORE",
-        "EVIDENCE=ENDPOINT_BEFORE",
-        "EVIDENCE=ENDPOINT_AFTER",
-        "EVIDENCE=ENDPOINT_AFTER",
-        "EVIDENCE=ENDPOINT_AFTER",
+def test_boundary_images_are_six_labeled_jpegs_in_before_then_after_order() -> None:
+    boundary_images = boundary_image_payloads(_unit())
+    assert [payload.label.split(" | ", 1)[0] for payload in boundary_images] == [
+        "EVIDENCE=BOUNDARY_BEFORE",
+        "EVIDENCE=BOUNDARY_BEFORE",
+        "EVIDENCE=BOUNDARY_BEFORE",
+        "EVIDENCE=BOUNDARY_AFTER",
+        "EVIDENCE=BOUNDARY_AFTER",
+        "EVIDENCE=BOUNDARY_AFTER",
     ]
-    assert all(payload.media_type == "image/jpeg" for payload in endpoints)
-    assert all(_open(payload.data).size == (32, 24) for payload in endpoints)
+    assert all(payload.media_type == "image/jpeg" for payload in boundary_images)
+    assert all(_open(payload.data).size == (32, 24) for payload in boundary_images)
 
 
 def test_detail_request_expands_valid_roi_and_uses_cam_high_only() -> None:
@@ -186,7 +194,7 @@ def test_detail_request_expands_valid_roi_and_uses_cam_high_only() -> None:
             "y_min": 0.25,
             "x_max": 0.75,
             "y_max": 0.75,
-            "reason": "gripper_object",
+            "reason": "fine_spatial_detail",
         },
     }
     request = validate_detail_request(inspection)
@@ -236,17 +244,17 @@ def test_detail_request_is_optional_and_invalid_requests_fail_closed() -> None:
 def test_partial_final_unit_still_produces_chronological_sheets() -> None:
     unit = _unit(frame_count=8)
     overview = overview_payload(unit, "cam_high")
-    stage = stage_payload(unit, "cam_high")
+    keyframe_sheet = keyframe_sheet_payload(unit, "cam_high")
     assert "UNIT_FRAMES=0..6" in overview.label
-    assert stage.label.startswith("EVIDENCE=STAGE | VIEW=cam_high")
+    assert keyframe_sheet.label.startswith("EVIDENCE=KEYFRAME_SHEET | VIEW=cam_high")
     assert _open(overview.data).width > 1500
-    assert _open(stage.data).width > 1500
+    assert _open(keyframe_sheet.data).width > 1500
 
 
 def test_unit_contract_requires_uint8_arrays_for_exact_three_views() -> None:
     unit = _unit()
     with pytest.raises(ValueError, match="exactly"):
-        UnitFrames(
+        EvidenceUnitFrames(
             frames={"cam_high": unit.frames["cam_high"]},
             fps=25,
             episode_start_frame=0,
@@ -255,7 +263,7 @@ def test_unit_contract_requires_uint8_arrays_for_exact_three_views() -> None:
     wrong = dict(unit.frames)
     wrong["cam_high"] = wrong["cam_high"].astype(np.float32)
     with pytest.raises(ValueError, match="uint8"):
-        UnitFrames(
+        EvidenceUnitFrames(
             frames=wrong,
             fps=25,
             episode_start_frame=0,
@@ -268,8 +276,8 @@ def test_debug_media_contains_only_expected_multiview_artifacts() -> None:
     base = SimpleNamespace(
         unit_frames=unit,
         overviews=tuple(overview_payload(unit, view) for view in VIEWS),
-        stages=tuple(stage_payload(unit, view) for view in VIEWS),
-        endpoints=endpoint_payloads(unit),
+        keyframe_sheets=tuple(keyframe_sheet_payload(unit, view) for view in VIEWS),
+        boundary_images=boundary_image_payloads(unit),
     )
     builder = TemporalMediaBuilder(Path("/unused"), image_shape=(24, 32, 3))
     detail = detail_payload(unit, DetailRequest((0.1, 0.1, 0.5, 0.5), 2, 5))
@@ -277,8 +285,8 @@ def test_debug_media_contains_only_expected_multiview_artifacts() -> None:
 
     assert {f"videos/{view}.mp4" for view in VIEWS} <= set(artifacts)
     assert {f"sheets/{view}-overview.png" for view in VIEWS} <= set(artifacts)
-    assert {f"sheets/{view}-stage.png" for view in VIEWS} <= set(artifacts)
+    assert {f"sheets/{view}-keyframes.png" for view in VIEWS} <= set(artifacts)
     assert "sheets/cam_high-detail.png" in artifacts
     assert len([name for name in artifacts if name.startswith("frames/")]) == 78
-    assert len([name for name in artifacts if name.startswith("endpoints/")]) == 6
+    assert len([name for name in artifacts if name.startswith("boundaries/")]) == 6
     assert not any("wrist-detail" in name for name in artifacts)

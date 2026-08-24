@@ -18,7 +18,11 @@ def _record(episode: int, task: int) -> EpisodeRecord:
 
 
 def test_pairs_are_same_task_and_episode_disjoint() -> None:
-    records = [_record(episode, task) for task in range(2) for episode in range(task * 3, task * 3 + 3)]
+    records = [
+        _record(episode, task)
+        for task in range(2)
+        for episode in range(task * 3, task * 3 + 3)
+    ]
     pairs = build_pairs(records, build_id="test-build", supports_per_query=2, seed=4)
     by_episode = {record.episode_index: record for record in records}
     assert len(pairs) == 12

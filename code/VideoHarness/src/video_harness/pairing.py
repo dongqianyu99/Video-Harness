@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .robodojo import EpisodeRecord
 from .sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION
@@ -36,8 +37,16 @@ def build_pairs(
                 f"{supports_per_query} distinct supports per query"
             )
         for query in task_records:
-            candidates = [record for record in task_records if record.episode_index != query.episode_index]
-            candidates.sort(key=lambda support: _rank(seed, query.episode_index, support.episode_index))
+            candidates = [
+                record
+                for record in task_records
+                if record.episode_index != query.episode_index
+            ]
+            candidates.sort(
+                key=lambda support: _rank(
+                    seed, query.episode_index, support.episode_index
+                )
+            )
             for support_rank, support in enumerate(candidates[:supports_per_query]):
                 pairs.append(
                     {

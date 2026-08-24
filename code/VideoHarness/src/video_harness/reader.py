@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Mapping as MappingABC
 import json
+from collections.abc import Mapping
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
-from .evidence import evidence_is_trainable
+from .quality import accepted_transition_chain
 from .renderer import RENDER_PROFILES, render_evidence_text
 from .sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION, validate_document
 
@@ -89,16 +90,6 @@ def _freeze_json(value: Any) -> Any:
         )
     if isinstance(value, list):
         return tuple(_freeze_json(item) for item in value)
-    return value
-
-
-def _thaw_json(value: Any) -> Any:
-    """Make a temporary mutable copy for existing evidence validators/renderers."""
-
-    if isinstance(value, MappingABC):
-        return {key: _thaw_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw_json(item) for item in value]
     return value
 
 
@@ -232,7 +223,7 @@ def _read_json(path: Path) -> dict[str, Any]:
         ) from exc
 
     if not isinstance(value, dict):
-        raise ValueError(f"{path} must contain a JSON object")
+        raise TypeError(f"{path} must contain a JSON object")
 
     return value
 
@@ -246,7 +237,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             if not raw_line.strip():
-                raise ValueError(
+                raise TypeError(
                     f"Invalid JSONL in {path} at line {line_number}: empty line"
                 )
 
@@ -259,7 +250,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
                 ) from exc
 
             if not isinstance(value, dict):
-                raise ValueError(
+                raise TypeError(
                     f"JSONL record in {path} at line {line_number} "
                     "must be a JSON object"
                 )
@@ -443,9 +434,7 @@ def _validate_binding_relationships(
             )
 
         if support.task_instruction != binding.task_instruction:
-            raise ValueError(
-                f"pair {binding.pair_id} task instruction mismatch"
-            )
+            raise ValueError(f"pair {binding.pair_id} task instruction mismatch")
 
 
 def load_guide_artifact_bundle(
@@ -543,17 +532,17 @@ def build_guide_plan(
         return frame_slots[key]
 
     document = source.document
-    for raw_unit in document["guidance_units"]:
+    for (
+        raw_unit,
+        before_boundary,
+        after_boundary,
+        record,
+        _before_record,
+        _after_record,
+    ) in accepted_transition_chain(document):
         annotation = raw_unit["annotation"]
-        if annotation["status"] != "complete":
-            continue
-
-        record = _thaw_json(annotation["record"])
-        if not evidence_is_trainable(record):
-            continue
-
-        before_slot = slot_for(raw_unit["before"])
-        after_slot = slot_for(raw_unit["after"])
+        before_slot = slot_for(before_boundary["frame"])
+        after_slot = slot_for(after_boundary["frame"])
         units.append(
             GuidePlanUnit(
                 unit_id=raw_unit["unit_id"],

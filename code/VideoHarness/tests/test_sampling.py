@@ -1,11 +1,28 @@
+import copy
+
+import pytest
+
+from video_harness.evidence import (
+    BOUNDARY_STATE_SCHEMA_VERSION,
+    EVIDENCE_SCHEMA_VERSION,
+)
 from video_harness.robodojo import EpisodeRecord, VideoSlice
-from video_harness.evidence import EVIDENCE_SCHEMA_VERSION
-from video_harness.sampling import boundary_frames, media_timestamp, plan_document
+from video_harness.sampling import (
+    boundary_frames,
+    media_timestamp,
+    plan_document,
+    validate_document,
+)
 
 
 def _record(length: int = 579) -> EpisodeRecord:
     videos = tuple(
-        VideoSlice(key=key, path=f"videos/{key}/file-000.mp4", from_timestamp=23.16, to_timestamp=46.32)
+        VideoSlice(
+            key=key,
+            path=f"videos/{key}/file-000.mp4",
+            from_timestamp=23.16,
+            to_timestamp=46.32,
+        )
         for key in (
             "observation.images.cam_high",
             "observation.images.cam_left_wrist",
@@ -35,15 +52,33 @@ def test_boundary_frames_include_first_and_last_without_duplicates() -> None:
 
 def test_document_interleaves_shared_boundaries() -> None:
     document = plan_document(_record(), build_id="test-build")
-    units = document["guidance_units"]
-    assert units[0]["after"] == units[1]["before"]
+    units = document["evidence_units"]
+    boundaries = document["boundary_states"]
+    assert units[0]["after_boundary_id"] == units[1]["before_boundary_id"]
+    assert len(boundaries) == len(units) + 1
+    assert (
+        boundaries[0]["annotation"]["schema_version"] == BOUNDARY_STATE_SCHEMA_VERSION
+    )
     assert units[0]["annotation"] == {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "status": "pending",
         "record": None,
         "provenance": None,
     }
-    assert document["sampling"]["kind"] == "uniform_guidance_unit"
+    assert document["sampling"]["kind"] == "uniform_evidence_unit"
     assert document["source"]["episode_length"] == 579
-    assert "before_media" not in units[0]
+    assert "before" not in units[0] and "after" not in units[0]
     assert media_timestamp(document, 25) == 24.16
+
+
+def test_document_rejects_missing_or_dangling_boundary_state() -> None:
+    document = plan_document(_record(length=51), build_id="test-build")
+    missing = copy.deepcopy(document)
+    missing["boundary_states"].pop(1)
+    with pytest.raises(ValueError, match="one more Boundary State"):
+        validate_document(missing)
+
+    dangling = copy.deepcopy(document)
+    dangling["evidence_units"][0]["after_boundary_id"] = "b9999"
+    with pytest.raises(ValueError, match="adjacent Boundary States"):
+        validate_document(dangling)

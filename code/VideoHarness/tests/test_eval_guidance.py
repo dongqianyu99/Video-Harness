@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 
 import pytest
+from _support import annotate_boundaries, set_document_quality
+
 from video_harness.eval_guidance import (
     build_eval_guidance_catalog,
     load_eval_guidance_catalog,
@@ -46,30 +48,36 @@ def _document(
         ),
     )
     document = plan_document(record, build_id=build_id)
-    document["status"] = "partially-annotated"
-    document["guidance_units"][0]["annotation"] = {
-        "schema_version": EVIDENCE_SCHEMA_VERSION,
-        "status": "complete",
-        "record": copy.deepcopy(changed_evidence),
-        "provenance": {
-            "call1": {
-                "provider": "test",
-                "model": "test-motion",
-                "prompt_version": "test-inspection",
+    annotate_boundaries(document)
+    document["status"] = "annotated"
+    for unit in document["evidence_units"]:
+        unit["annotation"] = {
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
+            "status": "complete",
+            "record": copy.deepcopy(changed_evidence),
+            "provenance": {
+                "call1": {
+                    "provider": "test",
+                    "model": "test-motion",
+                    "prompt_version": "test-inspection",
+                },
+                "call2": {
+                    "provider": "test",
+                    "model": "test-evidence",
+                    "prompt_version": "test-evidence",
+                },
+                "repair": None,
             },
-            "call2": {
-                "provider": "test",
-                "model": "test-evidence",
-                "prompt_version": "test-evidence",
-                "attempts": 1,
-                "selected_attempt": 1,
-            },
-        },
-    }
+        }
+    set_document_quality(document, "accepted")
     return document
 
 
-def _episode(episode_index: int, task_index: int = 3, instruction: str = "Put bread into the toaster.") -> dict:
+def _episode(
+    episode_index: int,
+    task_index: int = 3,
+    instruction: str = "Put bread into the toaster.",
+) -> dict:
     return {
         "episode_index": episode_index,
         "task_index": task_index,
@@ -96,14 +104,16 @@ def test_catalog_selects_dataset_first_episode_and_reuses_it(changed_evidence):
     assert catalog.resolve(task_index=3) is by_index
 
 
-def test_plan_skips_pending_units_and_deduplicates_frames(changed_evidence):
-    catalog = build_eval_guidance_catalog([_document(10, changed_evidence=changed_evidence)])
+def test_plan_uses_complete_document_and_deduplicates_frames(changed_evidence):
+    catalog = build_eval_guidance_catalog(
+        [_document(10, changed_evidence=changed_evidence)]
+    )
 
     plan = catalog.build_plan(task_index=3)
 
     assert plan.support_episode_index == 10
-    assert [frame.episode_frame_index for frame in plan.frames] == [0, 25]
-    assert len(plan.units) == 1
+    assert [frame.episode_frame_index for frame in plan.frames] == [0, 25, 50]
+    assert len(plan.units) == 2
     assert plan.units[0].before_slot == 0
     assert plan.units[0].after_slot == 1
     assert "Action:" in plan.units[0].transition_text
@@ -124,29 +134,42 @@ def test_catalog_rejects_duplicate_and_build_mismatch(changed_evidence):
     with pytest.raises(ValueError, match="Duplicate"):
         build_eval_guidance_catalog([document, copy.deepcopy(document)])
 
-    other_build = _document(11, build_id="other-build", changed_evidence=changed_evidence)
+    other_build = _document(
+        11, build_id="other-build", changed_evidence=changed_evidence
+    )
     with pytest.raises(ValueError, match="build_id"):
         build_eval_guidance_catalog([document, other_build])
 
 
 def test_plan_requires_at_least_one_trainable_unit(changed_evidence):
     document = _document(10, changed_evidence=changed_evidence)
-    document["guidance_units"][0]["annotation"] = {
+    document["evidence_units"][0]["annotation"] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "status": "pending",
         "record": None,
         "provenance": None,
     }
     document["status"] = "planned"
+    annotate_boundaries(document, status="pending")
+    for unit in document["evidence_units"]:
+        unit["annotation"] = {
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
+            "status": "pending",
+            "record": None,
+            "provenance": None,
+        }
+    set_document_quality(document, "pending")
     catalog = build_eval_guidance_catalog([document])
 
-    with pytest.raises(ValueError, match="no trainable"):
+    with pytest.raises(ValueError, match="quality-accepted"):
         catalog.build_plan(task_index=3)
 
 
 def test_loader_accepts_single_json(tmp_path: Path, changed_evidence):
     path = tmp_path / "annotated-document.json"
-    path.write_text(json.dumps(_document(10, changed_evidence=changed_evidence)), encoding="utf-8")
+    path.write_text(
+        json.dumps(_document(10, changed_evidence=changed_evidence)), encoding="utf-8"
+    )
 
     catalog = load_eval_guidance_catalog(path)
 

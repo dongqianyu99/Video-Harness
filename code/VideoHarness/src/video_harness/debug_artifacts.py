@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
 
 
@@ -15,7 +15,7 @@ def _slug(value: str) -> str:
 
 
 class DebugArtifactStore:
-    """Optional per-Unit filesystem sink; disabled mode performs no writes."""
+    """Optional per-Evidence-Unit filesystem sink; disabled mode performs no writes."""
 
     def __init__(
         self,
@@ -36,7 +36,9 @@ class DebugArtifactStore:
             raise ValueError("enabled debug store requires an explicit root")
         unit_root = Path(root) / _slug(document_id) / _slug(unit_id)
         if unit_root.exists() and any(unit_root.iterdir()):
-            raise FileExistsError(f"debug Unit directory is not empty: {unit_root}")
+            raise FileExistsError(
+                f"debug Evidence Unit directory is not empty: {unit_root}"
+            )
         unit_root.mkdir(parents=True, exist_ok=True)
         self.root = unit_root
 

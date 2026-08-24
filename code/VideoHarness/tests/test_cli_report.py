@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+from _support import annotate_boundaries, set_document_quality
+
 from video_harness.cli import _report, _require_new_or_empty_directory
 from video_harness.evidence import EVIDENCE_SCHEMA_VERSION
 from video_harness.robodojo import EpisodeRecord, VideoSlice
@@ -32,8 +34,9 @@ def _document(record: dict) -> dict:
         ),
     )
     document = plan_document(source, build_id="test-build")
+    annotate_boundaries(document)
     document["status"] = "annotated"
-    document["guidance_units"][0]["annotation"] = {
+    document["evidence_units"][0]["annotation"] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "status": "complete",
         "record": record,
@@ -47,28 +50,32 @@ def _document(record: dict) -> dict:
                 "provider": "test",
                 "model": "test-evidence",
                 "prompt_version": "test-evidence",
-                "attempts": 1,
-                "selected_attempt": 1,
             },
+            "repair": None,
         },
     }
+    set_document_quality(document, "accepted")
     return document
 
 
-def test_report_counts_trainable_structured_evidence(tmp_path, capsys, changed_evidence) -> None:
+def test_report_counts_trainable_structured_evidence(
+    tmp_path, capsys, changed_evidence
+) -> None:
     path = tmp_path / "documents.jsonl"
     path.write_text(json.dumps(_document(changed_evidence)) + "\n")
     assert _report(SimpleNamespace(documents=path)) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["trainable_units_default"] == 1
-    assert report["review_status"] == {"accepted": 1}
+    assert report["quality_status"] == {"accepted": 1}
     assert report["causal_validation"] == {"pass": 1}
     assert report["detail_observation"] == {"present": 1}
 
 
-def test_report_fails_closed_on_unknown_annotation_field(tmp_path, capsys, changed_evidence) -> None:
+def test_report_fails_closed_on_unknown_annotation_field(
+    tmp_path, capsys, changed_evidence
+) -> None:
     document = _document(changed_evidence)
-    document["guidance_units"][0]["annotation"]["extra"] = True
+    document["evidence_units"][0]["annotation"]["extra"] = True
     path = tmp_path / "documents.jsonl"
     path.write_text(json.dumps(document) + "\n")
     assert _report(SimpleNamespace(documents=path)) == 1
@@ -81,7 +88,7 @@ def test_report_validates_pending_annotation_contract(tmp_path, capsys) -> None:
 
     document = _document(mock_evidence_record())
     document["status"] = "planned"
-    annotation = document["guidance_units"][0]["annotation"]
+    annotation = document["evidence_units"][0]["annotation"]
     annotation.update(
         {
             "schema_version": "wrong-schema",
@@ -90,6 +97,8 @@ def test_report_validates_pending_annotation_contract(tmp_path, capsys) -> None:
             "provenance": None,
         }
     )
+    annotate_boundaries(document, status="pending")
+    set_document_quality(document, "pending")
     path = tmp_path / "documents.jsonl"
     path.write_text(json.dumps(document) + "\n")
     assert _report(SimpleNamespace(documents=path)) == 1

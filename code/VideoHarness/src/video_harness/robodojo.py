@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 CAMERA_KEYS = (
     "observation.images.cam_high",
@@ -44,7 +44,7 @@ class EpisodeRecord:
 
 def _load_pyarrow_parquet():
     try:
-        import pyarrow.parquet as parquet
+        from pyarrow import parquet
     except ImportError as exc:  # pragma: no cover - exercised in a minimal env
         raise RuntimeError(
             "Reading LeRobot metadata requires pyarrow. Install this package with "
@@ -94,7 +94,10 @@ def validate_info(info: dict[str, Any]) -> None:
         video_info = feature.get("info", {})
         if feature.get("dtype") != "video" or feature.get("shape") != [3, 480, 640]:
             errors.append(f"{key}: expected RGB video [3, 480, 640]")
-        if video_info.get("video.fps") != 25 or video_info.get("video.is_depth_map") is not False:
+        if (
+            video_info.get("video.fps") != 25
+            or video_info.get("video.is_depth_map") is not False
+        ):
             errors.append(f"{key}: expected non-depth video at 25 FPS")
 
     for key in ("episode_index", "frame_index", "task_index", "timestamp"):
@@ -102,7 +105,9 @@ def validate_info(info: dict[str, Any]) -> None:
             errors.append(f"missing routing feature {key!r}")
 
     if errors:
-        raise SourceContractError("RoboDojo Pi_05 source contract failed:\n- " + "\n- ".join(errors))
+        raise SourceContractError(
+            "RoboDojo Pi_05 source contract failed:\n- " + "\n- ".join(errors)
+        )
 
 
 def read_tasks(dataset_root: Path) -> dict[str, int]:
@@ -116,12 +121,17 @@ def read_tasks(dataset_root: Path) -> dict[str, int]:
         raise SourceContractError("tasks.parquet has no task_index column")
 
     text_column = next(
-        (candidate for candidate in ("task", "task_instruction", "__index_level_0__") if candidate in columns),
+        (
+            candidate
+            for candidate in ("task", "task_instruction", "__index_level_0__")
+            if candidate in columns
+        ),
         None,
     )
     if text_column is None:
         raise SourceContractError(
-            "tasks.parquet has no supported task-text column; found " + ", ".join(sorted(columns))
+            "tasks.parquet has no supported task-text column; found "
+            + ", ".join(sorted(columns))
         )
 
     mapping: dict[str, int] = {}
@@ -142,7 +152,9 @@ def _format_route(template: str, **values: Any) -> str:
     try:
         return template.format(**values)
     except (KeyError, ValueError) as exc:
-        raise SourceContractError(f"Cannot format LeRobot route {template!r}: {exc}") from exc
+        raise SourceContractError(
+            f"Cannot format LeRobot route {template!r}: {exc}"
+        ) from exc
 
 
 def read_episodes(dataset_root: Path) -> list[EpisodeRecord]:
@@ -269,5 +281,7 @@ def summarize(records: Iterable[EpisodeRecord]) -> dict[str, Any]:
         "tasks": len(counts),
         "frames": sum(record.length for record in records),
         "fps": 25,
-        "episode_counts_by_task_index": {str(key): counts[key] for key in sorted(counts)},
+        "episode_counts_by_task_index": {
+            str(key): counts[key] for key in sorted(counts)
+        },
     }

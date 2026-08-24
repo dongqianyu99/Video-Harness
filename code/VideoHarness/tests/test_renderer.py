@@ -1,6 +1,7 @@
 import copy
 
 import pytest
+from _support import annotate_boundaries, set_document_quality
 
 from video_harness.evidence import EVIDENCE_SCHEMA_VERSION, mock_evidence_record
 from video_harness.renderer import (
@@ -38,8 +39,9 @@ def _document(records: list[dict], *, status: str = "complete") -> dict:
         ),
     )
     document = plan_document(source, build_id="test-build")
-    assert len(document["guidance_units"]) == len(records)
-    for unit, record in zip(document["guidance_units"], records):
+    annotate_boundaries(document, status=status)
+    assert len(document["evidence_units"]) == len(records)
+    for unit, record in zip(document["evidence_units"], records):
         unit["annotation"] = {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "status": status,
@@ -54,36 +56,44 @@ def _document(records: list[dict], *, status: str = "complete") -> dict:
                     "provider": "test",
                     "model": "test-evidence",
                     "prompt_version": "test-evidence",
-                    "attempts": 1,
-                    "selected_attempt": 1,
                 },
+                "repair": None,
             },
         }
     document["status"] = "mock-annotated" if status == "mock" else "annotated"
+    set_document_quality(
+        document,
+        "quarantined" if status == "mock" else "accepted",
+    )
     return document
 
 
 def test_all_profiles_are_derived_without_mutating_evidence(changed_evidence) -> None:
     original = copy.deepcopy(changed_evidence)
-    outputs = {profile: render_evidence_text(changed_evidence, profile) for profile in RENDER_PROFILES}
-    assert outputs["brief"] == "The robot inserts the bread slice into the toaster slot."
+    outputs = {
+        profile: render_evidence_text(changed_evidence, profile)
+        for profile in RENDER_PROFILES
+    }
+    assert (
+        outputs["brief"] == "The robot inserts the bread slice into the toaster slot."
+    )
     assert "Action:" in outputs["instructional"]
     assert "Task role:" in outputs["instructional"]
-    assert "Causal validation: pass" in outputs["stage-card"]
+    assert "Causal validation: pass" in outputs["evidence-card"]
     assert changed_evidence == original
 
 
 def test_renderer_reuses_shared_boundary_image(changed_evidence) -> None:
     second = copy.deepcopy(changed_evidence)
     second["motion_summary"] = "The gripper approaches and lowers the toaster lever."
-    second["endpoint_observation"]["after"]["cam_high"] = (
-        "The toaster lever is visibly lowered beside the bread slice."
-    )
     second["unit_interpretation"] = {
         "action_description": "The robot presses the toaster lever downward.",
-        "task_role": "This Unit starts the toaster after loading the bread.",
+        "task_role": "This Evidence Unit starts the toaster after loading the bread.",
     }
     document = _document([changed_evidence, second])
+    document["boundary_states"][-1]["annotation"]["record"]["observation"][
+        "cam_high"
+    ] = "The final state is visible from the fixed global view."
     calls: list[int] = []
 
     def load(_document, frame_ref):
@@ -91,44 +101,59 @@ def test_renderer_reuses_shared_boundary_image(changed_evidence) -> None:
         return f"frame-{frame_ref['episode_frame_index']}"
 
     rendered = render_interleaved(document, load, profile="state-change")
-    assert [item["type"] for item in rendered] == ["image", "text", "image", "text", "image"]
+    assert [item["type"] for item in rendered] == [
+        "image",
+        "text",
+        "text",
+        "image",
+        "text",
+        "text",
+        "image",
+        "text",
+    ]
     assert calls == [0, 25, 50]
 
 
 def test_renderer_rejects_mock_by_default_but_can_opt_in(changed_evidence) -> None:
     document = _document([changed_evidence], status="mock")
-    with pytest.raises(ValueError, match="no usable evidence"):
+    with pytest.raises(ValueError, match="quality-accepted"):
         render_interleaved(document, lambda *_: b"frame")
     assert render_interleaved(document, lambda *_: b"frame", allow_mock=True)
 
 
 def test_renderer_rejects_unknown_operation_by_default(changed_evidence) -> None:
     unknown = _document([mock_evidence_record()])
-    with pytest.raises(ValueError, match="no trainable transition evidence"):
+    set_document_quality(unknown, "quarantined")
+    with pytest.raises(ValueError, match="quality-accepted"):
         render_interleaved(unknown, lambda *_: b"frame")
 
 
-def test_renderer_fails_closed_on_document_and_annotation_schema(changed_evidence) -> None:
+def test_renderer_fails_closed_on_document_and_annotation_schema(
+    changed_evidence,
+) -> None:
     document = _document([changed_evidence])
     document["schema_version"] = "wrong-document-schema"
     with pytest.raises(ValueError, match="unexpected behavior document schema"):
         render_interleaved(document, lambda *_: b"frame")
 
     document["schema_version"] = BEHAVIOR_DOCUMENT_SCHEMA_VERSION
-    document["guidance_units"][0]["annotation"]["schema_version"] = "wrong-evidence-schema"
+    document["evidence_units"][0]["annotation"]["schema_version"] = (
+        "wrong-evidence-schema"
+    )
     with pytest.raises(ValueError, match="unexpected evidence schema"):
         render_interleaved(document, lambda *_: b"frame")
 
 
-def test_actuator_profile_separates_visual_facts_from_operation_inference(changed_evidence) -> None:
+def test_actuator_profile_separates_visual_facts_from_operation_inference(
+    changed_evidence,
+) -> None:
     assert "actuator" in RENDER_PROFILES
 
     output = render_evidence_text(changed_evidence, "actuator")
 
     assert output.startswith("Motion:")
-    assert "Before cam_high:" in output
-    assert "Before cam_left_wrist:" in output
-    assert "After cam_right_wrist:" in output
+    assert "Before cam_high:" not in output
+    assert "After cam_right_wrist:" not in output
     assert "Detail:" in output
     assert "Action: The robot inserts" in output
     assert "Task role:" in output

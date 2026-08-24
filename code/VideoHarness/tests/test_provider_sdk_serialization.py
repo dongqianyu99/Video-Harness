@@ -6,14 +6,14 @@ openai = pytest.importorskip("openai")
 anthropic = pytest.importorskip("anthropic")
 httpx = pytest.importorskip("httpx")
 
-from video_harness.annotations import (  # noqa: E402
+from video_harness.annotations import (
     AnthropicBackend,
     EvidenceRequest,
     ImagePayload,
     InspectionRequest,
     OpenAIBackend,
 )
-from video_harness.camera_contract import image_label  # noqa: E402
+from video_harness.camera_contract import image_label
 
 
 def _image(label: str) -> ImagePayload:
@@ -34,7 +34,7 @@ def _inspection_request() -> InspectionRequest:
         episode_start_frame=0,
         episode_end_frame=25,
         overviews=tuple(_camera_image("OVERVIEW", view) for view in views),
-        stages=tuple(_camera_image("STAGE", view) for view in views),
+        keyframe_sheets=tuple(_camera_image("KEYFRAME_SHEET", view) for view in views),
     )
 
 
@@ -45,15 +45,17 @@ def _evidence_request() -> EvidenceRequest:
         episode_start_frame=0,
         episode_end_frame=25,
         motion_summary="The gripper approaches the bread and closes around it.",
+        before_boundary_observation=None,
+        after_boundary_observation=None,
         task_instruction="Put bread into the toaster.",
         detail=None,
-        endpoints=(
-            _camera_image("ENDPOINT_BEFORE", "cam_high"),
-            _camera_image("ENDPOINT_BEFORE", "cam_left_wrist"),
-            _camera_image("ENDPOINT_BEFORE", "cam_right_wrist"),
-            _camera_image("ENDPOINT_AFTER", "cam_high"),
-            _camera_image("ENDPOINT_AFTER", "cam_left_wrist"),
-            _camera_image("ENDPOINT_AFTER", "cam_right_wrist"),
+        boundary_images=(
+            _camera_image("BOUNDARY_BEFORE", "cam_high"),
+            _camera_image("BOUNDARY_BEFORE", "cam_left_wrist"),
+            _camera_image("BOUNDARY_BEFORE", "cam_right_wrist"),
+            _camera_image("BOUNDARY_AFTER", "cam_high"),
+            _camera_image("BOUNDARY_AFTER", "cam_left_wrist"),
+            _camera_image("BOUNDARY_AFTER", "cam_right_wrist"),
         ),
     )
 
@@ -84,9 +86,9 @@ def test_openai_sdk_serializes_inspection_images_without_task() -> None:
         OpenAIBackend("test-model", client=client).inspect(_inspection_request())
     body = bodies[0]
     assert body["tools"][0]["strict"] is True
-    assert sum(
-        item["type"] == "input_image" for item in body["input"][0]["content"]
-    ) == 6
+    assert (
+        sum(item["type"] == "input_image" for item in body["input"][0]["content"]) == 6
+    )
     assert "Put bread" not in json.dumps(body)
 
 

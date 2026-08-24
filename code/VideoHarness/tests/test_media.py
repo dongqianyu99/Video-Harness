@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
 from video_harness import media as _media
 from video_harness.media import FFmpegFrameLoader, FrameDecodeError
 
@@ -35,7 +36,9 @@ def test_loader_rejects_frame_outside_episode(tmp_path) -> None:
         )
 
 
-def test_load_rgb_requests_raw_rgb24_and_restores_hwc_uint8(tmp_path, monkeypatch) -> None:
+def test_load_rgb_requests_raw_rgb24_and_restores_hwc_uint8(
+    tmp_path, monkeypatch
+) -> None:
     video_path = tmp_path / "videos" / "cam" / "file-000.mp4"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video-placeholder")
@@ -84,7 +87,9 @@ def test_load_rgb_rejects_unexpected_frame_size(tmp_path, monkeypatch) -> None:
         )
 
 
-def test_load_rgb_many_decodes_unique_frames_once_and_preserves_input_order(tmp_path, monkeypatch) -> None:
+def test_load_rgb_many_decodes_unique_frames_once_and_preserves_input_order(
+    tmp_path, monkeypatch
+) -> None:
     video_path = tmp_path / "videos" / "cam" / "file-000.mp4"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video-placeholder")
@@ -124,7 +129,9 @@ def test_load_rgb_many_decodes_unique_frames_once_and_preserves_input_order(tmp_
     assert "eq(n\\,25)" in command[command.index("-vf") + 1]
 
 
-def test_load_rgb_many_rejects_empty_or_short_batch_payload(tmp_path, monkeypatch) -> None:
+def test_load_rgb_many_rejects_empty_or_short_batch_payload(
+    tmp_path, monkeypatch
+) -> None:
     video_path = tmp_path / "videos" / "cam" / "file-000.mp4"
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video-placeholder")

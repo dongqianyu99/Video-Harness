@@ -10,22 +10,28 @@ from typing import Any
 from .annotations import make_backends
 from .config import HarnessConfig
 from .evidence import (
+    BOUNDARY_STATE_SCHEMA_VERSION,
     EVIDENCE_SCHEMA_VERSION,
+    boundary_state_is_usable,
     evidence_is_trainable,
+    validate_boundary_state_record,
     validate_evidence_record,
 )
 from .media import FFmpegFrameLoader
 from .pairing import build_pairs
-from .pipeline import UnitPipeline
+from .pipeline import EvidenceUnitPipeline
+from .reconciliation import reconcile_document, sequence_projection_sha256
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
-from .sampling import plan_document, validate_document
+from .sampling import plan_document, unit_boundary_states, validate_document
 from .temporal_media import TemporalMediaBuilder
 from .training_split import build_training_split, episode_record_from_dict
 
 
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
 
 def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
@@ -49,7 +55,9 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
                 try:
                     values.append(json.loads(line))
                 except json.JSONDecodeError as exc:
-                    raise ValueError(f"Invalid JSON at {path}:{line_number}: {exc}") from exc
+                    raise ValueError(
+                        f"Invalid JSON at {path}:{line_number}: {exc}"
+                    ) from exc
     return values
 
 
@@ -91,7 +99,9 @@ def _select_records(
         task_records = sorted(by_task[task_index], key=lambda item: item.episode_index)
         if episodes_per_task is not None:
             if episodes_per_task < 2:
-                raise ValueError("--episodes-per-task must be at least two for support/query pairing")
+                raise ValueError(
+                    "--episodes-per-task must be at least two for support/query pairing"
+                )
             task_records = task_records[:episodes_per_task]
         selected.extend(task_records)
     return selected
@@ -124,7 +134,9 @@ def _build(args: argparse.Namespace) -> int:
         }
     )
     _write_json(args.output_root / "dataset.json", summary)
-    _write_jsonl(args.output_root / "episodes.jsonl", [record.to_dict() for record in records])
+    _write_jsonl(
+        args.output_root / "episodes.jsonl", [record.to_dict() for record in records]
+    )
     documents = [
         plan_document(record, build_id=build_id, sample_hz=args.sample_hz)
         for record in records
@@ -139,7 +151,11 @@ def _build(args: argparse.Namespace) -> int:
         seed=args.seed,
     )
     _write_jsonl(args.output_root / "pairs.jsonl", pairs)
-    print(json.dumps({**summary, "documents": len(documents), "pairs": len(pairs)}, indent=2))
+    print(
+        json.dumps(
+            {**summary, "documents": len(documents), "pairs": len(pairs)}, indent=2
+        )
+    )
     return 0
 
 
@@ -147,25 +163,38 @@ def _annotate(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise FileExistsError(f"Annotation output already exists: {args.output}")
     documents = _read_jsonl(args.documents)
-    inspection_backend, evidence_backend = make_backends(args.provider, args.model)
+    inspection_backend, evidence_backend, repair_backend = make_backends(
+        args.provider,
+        args.model,
+    )
     debug_root = None
     if args.debug:
-        debug_root = args.debug_root or args.output.with_suffix(args.output.suffix + ".debug")
+        debug_root = args.debug_root or args.output.with_suffix(
+            args.output.suffix + ".debug"
+        )
     config = HarnessConfig(
         debug=args.debug,
         debug_root=debug_root,
         inspection_retries=args.inspection_retries,
-        call2_max_attempts=args.call2_max_attempts,
+        repair_max_attempts=getattr(args, "repair_max_attempts", 2),
+        sequence_audit_max_attempts=getattr(
+            args,
+            "sequence_audit_max_attempts",
+            2,
+        ),
+        sequence_repair_rounds=getattr(args, "sequence_repair_rounds", 2),
     )
-    pipeline = UnitPipeline(
+    pipeline = EvidenceUnitPipeline(
         inspection_backend=inspection_backend,
         evidence_backend=evidence_backend,
         media_builder=TemporalMediaBuilder(args.dataset_root),
         config=config,
+        repair_backend=repair_backend,
     )
     annotated_units = 0
     annotated_documents = 0
     failed_units = 0
+    document_quality_counts: Counter[str] = Counter()
     failures: list[dict[str, str]] = []
 
     for document_index, original in enumerate(documents):
@@ -175,19 +204,30 @@ def _annotate(args: argparse.Namespace) -> int:
         document = copy.deepcopy(original)
         unit_budget = args.limit_units_per_document
         document_annotations = 0
-        for unit in document["guidance_units"]:
+        for unit in document["evidence_units"]:
             if unit_budget is not None and document_annotations >= unit_budget:
                 break
             annotation = unit["annotation"]
-            if annotation.get("status") in {"complete", "mock"} and annotation.get("record"):
+            if annotation.get("status") in {"complete", "mock"} and annotation.get(
+                "record"
+            ):
                 continue
             try:
                 result = pipeline.run(document, unit)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate one failed Unit
                 annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
                 annotation["status"] = "failed"
                 annotation["record"] = None
                 annotation["provenance"] = None
+                for boundary in unit_boundary_states(document, unit):
+                    boundary_annotation = boundary["annotation"]
+                    if boundary_annotation.get("status") not in {"complete", "mock"}:
+                        boundary_annotation["schema_version"] = (
+                            BOUNDARY_STATE_SCHEMA_VERSION
+                        )
+                        boundary_annotation["status"] = "failed"
+                        boundary_annotation["record"] = None
+                        boundary_annotation["provenance"] = None
                 document_annotations += 1
                 failed_units += 1
                 failures.append(
@@ -198,11 +238,19 @@ def _annotate(args: argparse.Namespace) -> int:
                     }
                 )
                 continue
+            output_status = "mock" if result.evidence.provider == "mock" else "complete"
             annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
-            annotation["status"] = (
-                "mock" if result.evidence.provider == "mock" else "complete"
-            )
+            annotation["status"] = output_status
             annotation["record"] = result.evidence.evidence
+            call2_model = (
+                result.initial_evidence.trace.response_model
+                or result.initial_evidence.requested_model
+            )
+            call2_provenance = {
+                "provider": result.initial_evidence.provider,
+                "model": call2_model,
+                "prompt_version": result.initial_evidence.prompt_version,
+            }
             annotation["provenance"] = {
                 "call1": {
                     "provider": result.inspection.provider,
@@ -212,21 +260,78 @@ def _annotate(args: argparse.Namespace) -> int:
                     ),
                     "prompt_version": result.inspection.prompt_version,
                 },
-                "call2": {
-                    "provider": result.evidence.provider,
-                    "model": (
-                        result.evidence.trace.response_model
-                        or result.evidence.requested_model
-                    ),
-                    "prompt_version": result.evidence.prompt_version,
-                    "attempts": result.call2_attempts,
-                    "selected_attempt": result.selected_call2_attempt,
-                },
+                "call2": call2_provenance,
+                "repair": (
+                    None
+                    if result.repair is None
+                    else {
+                        "provider": result.repair.provider,
+                        "model": (
+                            result.repair.trace.response_model
+                            or result.repair.requested_model
+                        ),
+                        "prompt_version": result.repair.prompt_version,
+                        "attempts": result.repair_attempts,
+                        "reason": result.repair.repair["reason"],
+                    }
+                ),
             }
+            before_boundary, after_boundary = unit_boundary_states(document, unit)
+            boundary_provenance_base = call2_provenance
+            if (
+                result.repair is not None
+                and result.repair.repair["evidence_sufficient"]
+            ):
+                boundary_provenance_base = {
+                    "provider": result.repair.provider,
+                    "model": (
+                        result.repair.trace.response_model
+                        or result.repair.requested_model
+                    ),
+                    "prompt_version": result.repair.prompt_version,
+                }
+            generated_boundaries = (
+                (
+                    before_boundary,
+                    "before",
+                    result.before_boundary_record,
+                ),
+                (
+                    after_boundary,
+                    "after",
+                    result.after_boundary_record,
+                ),
+            )
+            for boundary, role, record in generated_boundaries:
+                if record is None:
+                    continue
+                boundary["annotation"] = {
+                    "schema_version": BOUNDARY_STATE_SCHEMA_VERSION,
+                    "status": output_status,
+                    "record": record,
+                    "provenance": {
+                        **boundary_provenance_base,
+                        "source_unit_id": unit["unit_id"],
+                        "boundary_role": role,
+                    },
+                }
+            boundary_by_role = {
+                "before": before_boundary,
+                "after": after_boundary,
+            }
+            for role in result.conflicted_boundary_roles:
+                boundary_annotation = boundary_by_role[role]["annotation"]
+                boundary_record = boundary_annotation.get("record")
+                if isinstance(boundary_record, dict):
+                    boundary_record["quality_status"] = "quarantined"
             document_annotations += 1
             annotated_units += 1
 
-        statuses = {unit["annotation"]["status"] for unit in document["guidance_units"]}
+        statuses = {
+            item["annotation"]["status"]
+            for key in ("boundary_states", "evidence_units")
+            for item in document[key]
+        }
         if statuses == {"pending"}:
             document["status"] = "planned"
         elif statuses == {"complete"}:
@@ -235,8 +340,41 @@ def _annotate(args: argparse.Namespace) -> int:
             document["status"] = "mock-annotated"
         else:
             document["status"] = "partially-annotated"
+        document["quality_status"] = "pending"
+        document["quality_provenance"] = None
+        if document["status"] in {"annotated", "mock-annotated"}:
+            reconciliation = reconcile_document(
+                document,
+                backend=repair_backend,
+                pipeline=pipeline,
+                config=config,
+            )
+            document = reconciliation.document
+        elif any(
+            unit["annotation"]["status"] == "failed"
+            for unit in document["evidence_units"]
+        ):
+            failed_issue_list = [
+                {
+                    "unit_id": unit["unit_id"],
+                    "reason": "Evidence Unit provider or schema processing failed.",
+                }
+                for unit in document["evidence_units"]
+                if unit["annotation"]["status"] == "failed"
+            ]
+            document["quality_status"] = "quarantined"
+            document["quality_provenance"] = {
+                "provider": repair_backend.provider,
+                "model": repair_backend.model,
+                "prompt_version": "video-harness.sequence-audit",
+                "audit_attempts": 0,
+                "repair_rounds": 0,
+                "sequence_sha256": sequence_projection_sha256(document),
+                "issues": failed_issue_list,
+            }
         documents[document_index] = document
         validate_document(document)
+        document_quality_counts[document["quality_status"]] += 1
         annotated_documents += 1
 
     for document in documents:
@@ -250,6 +388,9 @@ def _annotate(args: argparse.Namespace) -> int:
                 "documents_touched": annotated_documents,
                 "units_annotated": annotated_units,
                 "units_failed": failed_units,
+                "document_quality_status": dict(
+                    sorted(document_quality_counts.items())
+                ),
                 "failure_examples": failures[:20],
                 "debug_root": None if debug_root is None else str(debug_root),
                 "output": str(args.output),
@@ -269,10 +410,7 @@ def _make_training_split(args: argparse.Namespace) -> int:
     if not isinstance(build_id, str) or not build_id.strip():
         raise ValueError("dataset artifact has no valid build_id")
 
-    records = [
-        episode_record_from_dict(value)
-        for value in _read_jsonl(args.episodes)
-    ]
+    records = [episode_record_from_dict(value) for value in _read_jsonl(args.episodes)]
     documents = _read_jsonl(args.documents)
     manifest, pairs = build_training_split(
         records,
@@ -301,13 +439,18 @@ def _make_training_split(args: argparse.Namespace) -> int:
 
 def _report(args: argparse.Namespace) -> int:
     documents = _read_jsonl(args.documents)
+    document_quality_status: Counter[str] = Counter()
+    boundary_annotation_status: Counter[str] = Counter()
+    boundary_quality_status: Counter[str] = Counter()
     annotation_status: Counter[str] = Counter()
-    review_status: Counter[str] = Counter()
+    quality_status: Counter[str] = Counter()
     causal_validation: Counter[str] = Counter()
     detail_observation: Counter[str] = Counter()
     trainable_units = 0
+    trainable_documents = 0
     invalid: list[dict[str, str]] = []
     total_units = 0
+    total_boundaries = 0
 
     for document in documents:
         try:
@@ -323,7 +466,18 @@ def _report(args: argparse.Namespace) -> int:
                 }
             )
             continue
-        for unit in document.get("guidance_units", []):
+        document_quality_status[document["quality_status"]] += 1
+        if document["quality_status"] == "accepted":
+            trainable_documents += 1
+        for boundary in document["boundary_states"]:
+            total_boundaries += 1
+            annotation = boundary["annotation"]
+            status = str(annotation["status"])
+            boundary_annotation_status[status] += 1
+            if status in {"complete", "mock"}:
+                boundary = validate_boundary_state_record(annotation["record"])
+                boundary_quality_status[boundary["quality_status"]] += 1
+        for unit in document.get("evidence_units", []):
             total_units += 1
             annotation = unit.get("annotation")
             if not isinstance(annotation, dict):
@@ -349,7 +503,9 @@ def _report(args: argparse.Namespace) -> int:
             record = annotation.get("record")
             try:
                 if annotation.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
-                    raise ValueError(f"unexpected evidence schema {annotation.get('schema_version')!r}")
+                    raise ValueError(
+                        f"unexpected evidence schema {annotation.get('schema_version')!r}"
+                    )
                 if status in {"pending", "failed"}:
                     if record is not None or annotation.get("provenance") is not None:
                         raise ValueError(
@@ -373,19 +529,35 @@ def _report(args: argparse.Namespace) -> int:
                 )
                 continue
 
-            review_status[evidence["review_status"]] += 1
+            quality_status[evidence["quality_status"]] += 1
             causal_validation[evidence["causal_validation"]["status"]] += 1
             detail_observation[
                 "present" if evidence["detail_observation"] is not None else "absent"
             ] += 1
-            if status == "complete" and evidence_is_trainable(evidence):
+            boundaries = unit_boundary_states(document, unit)
+            usable_boundaries = all(
+                boundary["annotation"]["status"] == "complete"
+                and boundary_state_is_usable(boundary["annotation"]["record"])
+                for boundary in boundaries
+            )
+            if (
+                status == "complete"
+                and evidence_is_trainable(evidence)
+                and usable_boundaries
+                and document["quality_status"] == "accepted"
+            ):
                 trainable_units += 1
 
     report = {
         "documents": len(documents),
+        "document_quality_status": dict(sorted(document_quality_status.items())),
+        "trainable_documents_default": trainable_documents,
+        "boundary_states": total_boundaries,
+        "boundary_annotation_status": dict(sorted(boundary_annotation_status.items())),
+        "boundary_quality_status": dict(sorted(boundary_quality_status.items())),
         "units": total_units,
         "annotation_status": dict(sorted(annotation_status.items())),
-        "review_status": dict(sorted(review_status.items())),
+        "quality_status": dict(sorted(quality_status.items())),
         "causal_validation": dict(sorted(causal_validation.items())),
         "detail_observation": dict(sorted(detail_observation.items())),
         "trainable_units_default": trainable_units,
@@ -403,38 +575,43 @@ def _decode_smoke(args: argparse.Namespace) -> int:
     seen: set[tuple[str, int]] = set()
     for document in documents:
         validate_document(document)
-        for unit in document["guidance_units"]:
-            for role in ("before", "after"):
-                frame_ref = unit[role]
-                key = (document["document_id"], int(frame_ref["episode_frame_index"]))
-                if key in seen:
-                    continue
-                seen.add(key)
-                image = loader.load(document, frame_ref)
-                decoded.append(
-                    {
-                        "document_id": document["document_id"],
-                        "role": role,
-                        "episode_frame_index": frame_ref["episode_frame_index"],
-                        "jpeg_bytes": len(image),
-                    }
-                )
-                if len(decoded) >= args.limit_frames:
-                    print(json.dumps({"decoded": decoded}, indent=2))
-                    return 0
+        for boundary in document["boundary_states"]:
+            frame_ref = boundary["frame"]
+            key = (document["document_id"], int(frame_ref["episode_frame_index"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            image = loader.load(document, frame_ref)
+            decoded.append(
+                {
+                    "document_id": document["document_id"],
+                    "boundary_id": boundary["boundary_id"],
+                    "episode_frame_index": frame_ref["episode_frame_index"],
+                    "jpeg_bytes": len(image),
+                }
+            )
+            if len(decoded) >= args.limit_frames:
+                print(json.dumps({"decoded": decoded}, indent=2))
+                return 0
     print(json.dumps({"decoded": decoded}, indent=2))
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Multiview temporal Video Harness compiler")
+    parser = argparse.ArgumentParser(
+        description="Multiview temporal Video Harness compiler"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    inspect = subparsers.add_parser("inspect", help="validate the public RoboDojo Pi_05 source")
+    inspect = subparsers.add_parser(
+        "inspect", help="validate the public RoboDojo Pi_05 source"
+    )
     inspect.add_argument("--dataset-root", type=Path, required=True)
     inspect.set_defaults(handler=_inspect)
 
-    build = subparsers.add_parser("build", help="build inventory, draft documents, and pairs")
+    build = subparsers.add_parser(
+        "build", help="build inventory, draft documents, and pairs"
+    )
     build.add_argument("--dataset-root", type=Path, required=True)
     build.add_argument("--output-root", type=Path, required=True)
     build.add_argument("--sample-hz", type=float, default=1.0)
@@ -445,19 +622,24 @@ def build_parser() -> argparse.ArgumentParser:
     build.set_defaults(handler=_build)
 
     annotate = subparsers.add_parser(
-        "annotate", help="compile structured transition evidence with a mock or VLM provider"
+        "annotate",
+        help="compile structured transition evidence with a mock or VLM provider",
     )
     annotate.add_argument("--documents", type=Path, required=True)
     annotate.add_argument("--output", type=Path, required=True)
     annotate.add_argument("--dataset-root", type=Path, required=True)
-    annotate.add_argument("--provider", choices=("mock", "openai", "anthropic"), required=True)
+    annotate.add_argument(
+        "--provider", choices=("mock", "openai", "anthropic"), required=True
+    )
     annotate.add_argument("--model")
     annotate.add_argument("--limit-documents", type=int)
     annotate.add_argument("--limit-units-per-document", type=int)
     annotate.add_argument("--debug", action="store_true")
     annotate.add_argument("--debug-root", type=Path)
     annotate.add_argument("--inspection-retries", type=int, default=1)
-    annotate.add_argument("--call2-max-attempts", type=int, default=3)
+    annotate.add_argument("--repair-max-attempts", type=int, default=2)
+    annotate.add_argument("--sequence-audit-max-attempts", type=int, default=2)
+    annotate.add_argument("--sequence-repair-rounds", type=int, default=2)
     annotate.set_defaults(handler=_annotate)
 
     split = subparsers.add_parser(
@@ -481,7 +663,9 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--documents", type=Path, required=True)
     report.set_defaults(handler=_report)
 
-    decode = subparsers.add_parser("decode-smoke", help="decode referenced frames without saving images")
+    decode = subparsers.add_parser(
+        "decode-smoke", help="decode referenced frames without saving images"
+    )
     decode.add_argument("--documents", type=Path, required=True)
     decode.add_argument("--dataset-root", type=Path, required=True)
     decode.add_argument("--limit-frames", type=int, default=2)

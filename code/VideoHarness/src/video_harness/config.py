@@ -10,7 +10,9 @@ class HarnessConfig:
     debug: bool = False
     debug_root: Path | None = None
     inspection_retries: int = 1
-    call2_max_attempts: int = 3
+    repair_max_attempts: int = 2
+    sequence_audit_max_attempts: int = 2
+    sequence_repair_rounds: int = 2
     fps: int = 25
     unit_frame_count: int = 26
     preprocessing_version: str = "video-harness.temporal-pack"
@@ -20,9 +22,16 @@ class HarnessConfig:
             raise ValueError("debug_root is required when debug mode is enabled")
         if not self.debug and self.debug_root is not None:
             raise ValueError("debug_root must be omitted when debug mode is disabled")
-        for field in ("inspection_retries", "call2_max_attempts"):
+        for field in (
+            "inspection_retries",
+            "repair_max_attempts",
+            "sequence_audit_max_attempts",
+            "sequence_repair_rounds",
+        ):
             value = getattr(self, field)
-            minimum = 0 if field == "inspection_retries" else 1
+            minimum = (
+                0 if field in {"inspection_retries", "sequence_repair_rounds"} else 1
+            )
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"{field} must be an integer >= {minimum}")
         if self.fps != 25 or self.unit_frame_count != 26:

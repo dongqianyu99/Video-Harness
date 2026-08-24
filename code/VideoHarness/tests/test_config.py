@@ -28,10 +28,18 @@ def test_inspection_retries_are_nonnegative() -> None:
         HarnessConfig(**{field: True})
 
 
-def test_call2_attempts_are_positive() -> None:
-    with pytest.raises(ValueError, match="call2_max_attempts"):
-        HarnessConfig(call2_max_attempts=0)
-    assert HarnessConfig().call2_max_attempts == 3
+@pytest.mark.parametrize(
+    "field",
+    ["repair_max_attempts", "sequence_audit_max_attempts"],
+)
+def test_automatic_processing_attempts_are_positive(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        HarnessConfig(**{field: 0})
+
+
+def test_sequence_repair_rounds_are_bounded_nonnegative() -> None:
+    with pytest.raises(ValueError, match="sequence_repair_rounds"):
+        HarnessConfig(sequence_repair_rounds=-1)
 
 
 def test_timing_contract_is_explicit() -> None:

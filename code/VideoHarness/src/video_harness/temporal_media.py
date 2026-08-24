@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-import subprocess
 from typing import Any
 
 import numpy as np
@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 from .camera_contract import CAMERA_VIEWS, image_label
 from .media import FrameDecodeError
 from .protocol import ImagePayload
-
+from .sampling import unit_boundary_states
 
 VIEWS = CAMERA_VIEWS
 VIEW_TO_DATASET_KEY = {
@@ -21,8 +21,8 @@ VIEW_TO_DATASET_KEY = {
     "cam_left_wrist": "observation.images.cam_left_wrist",
     "cam_right_wrist": "observation.images.cam_right_wrist",
 }
-STAGE_INDICES = (0, 5, 10, 15, 20, 25)
-UNIT_FRAME_COUNT = 26
+KEYFRAME_INDICES = (0, 5, 10, 15, 20, 25)
+EVIDENCE_UNIT_FRAME_COUNT = 26
 
 
 class TemporalMediaError(RuntimeError):
@@ -40,7 +40,7 @@ class VideoSource:
 
 
 @dataclass(frozen=True)
-class UnitFrames:
+class EvidenceUnitFrames:
     frames: Mapping[str, np.ndarray]
     fps: int
     episode_start_frame: int
@@ -50,14 +50,16 @@ class UnitFrames:
         if self.fps <= 0:
             raise ValueError("fps must be positive")
         frame_count = self.episode_end_frame - self.episode_start_frame + 1
-        if not 2 <= frame_count <= UNIT_FRAME_COUNT:
-            raise ValueError("Unit must contain 2..26 consecutive episode frames")
+        if not 2 <= frame_count <= EVIDENCE_UNIT_FRAME_COUNT:
+            raise ValueError(
+                "Evidence Unit must contain 2..26 consecutive episode frames"
+            )
         if set(self.frames) != set(VIEWS):
             raise ValueError(f"frames must contain exactly {VIEWS}")
         shapes: set[tuple[int, ...]] = set()
         for view, array in self.frames.items():
             if not isinstance(array, np.ndarray):
-                raise ValueError(f"{view} frames must be a numpy array")
+                raise TypeError(f"{view} frames must be a numpy array")
             if array.ndim != 4 or array.shape[0] != frame_count or array.shape[-1] != 3:
                 raise ValueError(
                     f"{view} must have shape [{frame_count},H,W,3], got {array.shape}"
@@ -87,7 +89,7 @@ class DetailRequest:
         x_min, y_min, x_max, y_max = self.roi
         if not (0 <= x_min < x_max <= 1 and 0 <= y_min < y_max <= 1):
             raise ValueError("ROI must be normalized and non-empty")
-        if not 0 <= self.start_frame <= self.end_frame < UNIT_FRAME_COUNT:
+        if not 0 <= self.start_frame <= self.end_frame < EVIDENCE_UNIT_FRAME_COUNT:
             raise ValueError("detail frame range must be within [0,25]")
 
     @property
@@ -97,10 +99,10 @@ class DetailRequest:
 
 @dataclass(frozen=True)
 class BaseMedia:
-    unit_frames: UnitFrames
+    unit_frames: EvidenceUnitFrames
     overviews: tuple[ImagePayload, ...]
-    stages: tuple[ImagePayload, ...]
-    endpoints: tuple[ImagePayload, ...]
+    keyframe_sheets: tuple[ImagePayload, ...]
+    boundary_images: tuple[ImagePayload, ...]
 
 
 Runner = Callable[..., Any]
@@ -133,12 +135,12 @@ def decode_unit_frames(
     image_shape: tuple[int, int, int] = (480, 640, 3),
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
-) -> UnitFrames:
+) -> EvidenceUnitFrames:
     if set(sources) != set(VIEWS):
         raise ValueError(f"sources must contain exactly {VIEWS}")
     frame_count = episode_end_frame - episode_start_frame + 1
-    if not 2 <= frame_count <= UNIT_FRAME_COUNT:
-        raise ValueError("Unit must contain 2..26 consecutive episode frames")
+    if not 2 <= frame_count <= EVIDENCE_UNIT_FRAME_COUNT:
+        raise ValueError("Evidence Unit must contain 2..26 consecutive episode frames")
     height, width, channels = image_shape
     if min(height, width) <= 0 or channels != 3:
         raise ValueError("image_shape must be positive H,W,3")
@@ -148,7 +150,7 @@ def decode_unit_frames(
     for view in VIEWS:
         source = sources[view]
         source_start_float = source.from_timestamp * fps
-        source_start = int(round(source_start_float))
+        source_start = round(source_start_float)
         if abs(source_start_float - source_start) > 1e-4:
             raise ValueError(
                 f"{view} video_from_timestamp is not aligned to the {fps} Hz frame grid"
@@ -187,7 +189,7 @@ def decode_unit_frames(
             channels,
         )
         decoded[view] = np.array(array, copy=True)
-    return UnitFrames(
+    return EvidenceUnitFrames(
         frames=decoded,
         fps=fps,
         episode_start_frame=episode_start_frame,
@@ -302,7 +304,7 @@ def render_sheet(
     )
 
 
-def _frame_label(unit: UnitFrames, view: str, unit_frame: int) -> str:
+def _frame_label(unit: EvidenceUnitFrames, view: str, unit_frame: int) -> str:
     episode_frame = unit.episode_start_frame + unit_frame
     return (
         f"{view} | u={unit_frame:02d} | e={episode_frame} | "
@@ -311,7 +313,7 @@ def _frame_label(unit: UnitFrames, view: str, unit_frame: int) -> str:
 
 
 def overview_payload(
-    unit: UnitFrames,
+    unit: EvidenceUnitFrames,
     view: str,
     *,
     ffmpeg: str = "ffmpeg",
@@ -342,8 +344,8 @@ def overview_payload(
     )
 
 
-def stage_payload(
-    unit: UnitFrames,
+def keyframe_sheet_payload(
+    unit: EvidenceUnitFrames,
     view: str,
     *,
     ffmpeg: str = "ffmpeg",
@@ -351,16 +353,11 @@ def stage_payload(
 ) -> ImagePayload:
     if view not in VIEWS:
         raise ValueError(f"unknown view {view!r}")
-    if unit.frame_count == UNIT_FRAME_COUNT:
-        indices = STAGE_INDICES
+    if unit.frame_count == EVIDENCE_UNIT_FRAME_COUNT:
+        indices = KEYFRAME_INDICES
     else:
         indices = tuple(
-            sorted(
-                {
-                    int(round(value))
-                    for value in np.linspace(0, unit.frame_count - 1, 6)
-                }
-            )
+            sorted({round(value) for value in np.linspace(0, unit.frame_count - 1, 6)})
         )
     data = render_sheet(
         [unit.frames[view][index] for index in indices],
@@ -372,7 +369,7 @@ def stage_payload(
     )
     return ImagePayload(
         label=image_label(
-            evidence_role="STAGE",
+            evidence_role="KEYFRAME_SHEET",
             view=view,
             metadata=(
                 "UNIT_FRAMES="
@@ -391,7 +388,7 @@ def _jpeg(frame: np.ndarray) -> bytes:
     return output.getvalue()
 
 
-def endpoint_payloads(unit: UnitFrames) -> tuple[ImagePayload, ...]:
+def boundary_image_payloads(unit: EvidenceUnitFrames) -> tuple[ImagePayload, ...]:
     payloads: list[ImagePayload] = []
     for role, unit_frame in (("BEFORE", 0), ("AFTER", unit.frame_count - 1)):
         episode_frame = unit.episode_start_frame + unit_frame
@@ -399,11 +396,10 @@ def endpoint_payloads(unit: UnitFrames) -> tuple[ImagePayload, ...]:
             payloads.append(
                 ImagePayload(
                     label=image_label(
-                        evidence_role=f"ENDPOINT_{role}",
+                        evidence_role=f"BOUNDARY_{role}",
                         view=view,
                         metadata=(
-                            f"UNIT_FRAME={unit_frame} | "
-                            f"EPISODE_FRAME={episode_frame}"
+                            f"UNIT_FRAME={unit_frame} | EPISODE_FRAME={episode_frame}"
                         ),
                     ),
                     data=_jpeg(unit.frames[view][unit_frame]),
@@ -426,7 +422,7 @@ def validate_detail_request(
     detail = inspection.get("detail_request")
     window = inspection.get("interaction_window")
     if not isinstance(detail, Mapping) or not isinstance(window, Mapping):
-        raise ValueError("inspection detail request/window is missing")
+        raise TypeError("inspection detail request/window is missing")
     roi = tuple(float(detail[key]) for key in ("x_min", "y_min", "x_max", "y_max"))
     x_min, y_min, x_max, y_max = roi
     area = (x_max - x_min) * (y_max - y_min)
@@ -455,20 +451,20 @@ def validate_detail_request(
 
 
 def detail_payload(
-    unit: UnitFrames,
+    unit: EvidenceUnitFrames,
     request: DetailRequest,
     *,
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
 ) -> ImagePayload:
     if request.end_frame >= unit.frame_count:
-        raise ValueError("detail request exceeds decoded Unit frame count")
+        raise ValueError("detail request exceeds decoded Evidence Unit frame count")
     height, width, _ = unit.image_shape
     x_min, y_min, x_max, y_max = request.roi
-    left = max(0, min(width - 1, int(round(x_min * width))))
-    top = max(0, min(height - 1, int(round(y_min * height))))
-    right = max(left + 1, min(width, int(round(x_max * width))))
-    bottom = max(top + 1, min(height, int(round(y_max * height))))
+    left = max(0, min(width - 1, round(x_min * width)))
+    top = max(0, min(height - 1, round(y_min * height)))
+    right = max(left + 1, min(width, round(x_max * width)))
+    bottom = max(top + 1, min(height, round(y_max * height)))
     frames = [
         unit.frames["cam_high"][index][top:bottom, left:right]
         for index in request.indices
@@ -557,12 +553,12 @@ class TemporalMediaBuilder:
         source = document["source"]
         views = source.get("views")
         if not isinstance(views, Mapping):
-            raise ValueError("behavior document source has no multiview source map")
+            raise TypeError("behavior document source has no multiview source map")
         result: dict[str, VideoSource] = {}
         for view in VIEWS:
             item = views.get(view)
             if not isinstance(item, Mapping):
-                raise ValueError(f"behavior document is missing source view {view}")
+                raise TypeError(f"behavior document is missing source view {view}")
             relative = Path(str(item["video_path"]))
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError(f"unsafe source path for {view}: {relative}")
@@ -577,8 +573,9 @@ class TemporalMediaBuilder:
         document: Mapping[str, Any],
         unit: Mapping[str, Any],
     ) -> BaseMedia:
-        start = int(unit["before"]["episode_frame_index"])
-        end = int(unit["after"]["episode_frame_index"])
+        before_boundary, after_boundary = unit_boundary_states(document, unit)
+        start = int(before_boundary["frame"]["episode_frame_index"])
+        end = int(after_boundary["frame"]["episode_frame_index"])
         fps = int(document["source"]["fps"])
         frames = decode_unit_frames(
             self._sources(document),
@@ -598,8 +595,8 @@ class TemporalMediaBuilder:
             )
             for view in VIEWS
         )
-        stages = tuple(
-            stage_payload(
+        keyframe_sheets = tuple(
+            keyframe_sheet_payload(
                 frames,
                 view,
                 ffmpeg=self.ffmpeg,
@@ -610,8 +607,8 @@ class TemporalMediaBuilder:
         return BaseMedia(
             unit_frames=frames,
             overviews=overviews,
-            stages=stages,
-            endpoints=endpoint_payloads(frames),
+            keyframe_sheets=keyframe_sheets,
+            boundary_images=boundary_image_payloads(frames),
         )
 
     def build_detail(self, base: BaseMedia, request: DetailRequest) -> ImagePayload:
@@ -641,14 +638,14 @@ class TemporalMediaBuilder:
         for payload in base.overviews:
             view = next(view for view in VIEWS if f"VIEW={view}" in payload.label)
             artifacts[f"sheets/{view}-overview.png"] = payload.data
-        for payload in base.stages:
+        for payload in base.keyframe_sheets:
             view = next(view for view in VIEWS if f"VIEW={view}" in payload.label)
-            artifacts[f"sheets/{view}-stage.png"] = payload.data
-        for payload in base.endpoints:
-            role = "before" if "EVIDENCE=ENDPOINT_BEFORE" in payload.label else "after"
+            artifacts[f"sheets/{view}-keyframes.png"] = payload.data
+        for payload in base.boundary_images:
+            role = "before" if "EVIDENCE=BOUNDARY_BEFORE" in payload.label else "after"
             view = next(view for view in VIEWS if f"VIEW={view}" in payload.label)
             slug = f"{role}-{view}"
-            artifacts[f"endpoints/{slug}.jpg"] = payload.data
+            artifacts[f"boundaries/{slug}.jpg"] = payload.data
         if detail is not None:
             artifacts["sheets/cam_high-detail.png"] = detail.data
         return artifacts

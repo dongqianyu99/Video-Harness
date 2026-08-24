@@ -16,36 +16,37 @@ CAMERA_SPECS = (
         view_id="cam_high",
         role_id="FIXED_GLOBAL",
         physical_view=(
-            "a fixed, elevated, oblique view looking down toward the tabletop; "
+            "a fixed, elevated, oblique view looking down toward the interaction "
+            "workspace; "
             "it does not move with either robot arm"
         ),
         evidence_authority=(
-            "global object position, pad occupancy, object count, ordering, scene "
-            "state, and world-relative displacement"
+            "global scene layout, entity positions, spatial relations, scene state, "
+            "and world-relative displacement"
         ),
     ),
     CameraSpec(
         view_id="cam_left_wrist",
-        role_id="MOVING_LOCAL_LEFT_WRIST",
+        role_id="WRIST_MOUNTED_LOCAL_LEFT",
         physical_view=(
             "an egocentric camera rigidly mounted behind the left gripper; it moves "
-            "with the left arm and the left gripper remains visible in the image"
+            "with the left arm and the left gripper is normally visible in the image"
         ),
         evidence_authority=(
-            "local object identity, left-gripper opening or closing, local contact, "
-            "grasp, and release"
+            "local entity appearance and identity, left-gripper configuration, "
+            "proximity, contact, and local interaction state"
         ),
     ),
     CameraSpec(
         view_id="cam_right_wrist",
-        role_id="MOVING_LOCAL_RIGHT_WRIST",
+        role_id="WRIST_MOUNTED_LOCAL_RIGHT",
         physical_view=(
             "an egocentric camera rigidly mounted behind the right gripper; it moves "
-            "with the right arm and the right gripper remains visible in the image"
+            "with the right arm and the right gripper is normally visible in the image"
         ),
         evidence_authority=(
-            "local object identity, right-gripper opening or closing, local contact, "
-            "grasp, and release"
+            "local entity appearance and identity, right-gripper configuration, "
+            "proximity, contact, and local interaction state"
         ),
     ),
 )
@@ -96,4 +97,4 @@ def system_prompt_camera_contract() -> str:
     return f"""Camera contract:
 {definitions}
 
-All three cameras observe the same synchronized physical scene, but they do not have equal authority for every claim. Use cam_high for global world-state and displacement claims. Use the corresponding wrist camera for local identity, gripper state, and contact evidence. Wrist-camera pixel motion includes camera ego-motion: never infer global object movement, cross-arm transfer, or changed pad occupancy solely because an object changes position, scale, or visibility in a moving wrist view. Do not compare pixel coordinates across cameras. Use the views to corroborate one another while keeping per-view observations separate when evidence conflicts or remains occluded."""
+All three cameras observe the same synchronized physical scene, but they do not have equal authority for every claim. Treat camera authority as claim-specific evidence priority, not as infallibility: any view may be occluded, cropped, or unresolved. Use cam_high primarily for global world-state, spatial-relation, and displacement claims. Use the corresponding wrist camera primarily for local identity, end-effector configuration, proximity, contact, and local interaction evidence. Wrist-camera pixel motion includes camera ego-motion: never infer global entity movement, transfer between end effectors, or a changed global scene configuration solely because an entity changes position, scale, or visibility in a moving wrist view. Not visible is not the same as absent or unchanged. Images with the same episode-frame label are synchronized observations of one moment. Do not treat pixel coordinates from different cameras as a shared coordinate system; instead, corroborate views qualitatively using synchronized time, entity identity, and end-effector association. Keep per-view observations separate and preserve uncertainty when evidence conflicts or remains occluded."""

@@ -12,7 +12,7 @@ NUM_ROLES = 3
 
 @struct.dataclass
 class UnitTokenBatch:
-    """Assembled [Before, Text, After] tokens for every Guide unit."""
+    """Assembled [Before, Text, After] tokens for every Evidence Unit."""
 
     tokens: jax.Array
     token_mask: jax.Array
@@ -212,7 +212,7 @@ def assemble_unit_tokens(
     before_slot: jax.Array,
     after_slot: jax.Array,
 ) -> UnitTokenBatch:
-    """Assemble [Before, Text, After] tokens for every guidance unit."""
+    """Assemble [Before, Text, After] tokens for every Evidence Unit."""
 
     _validate_inputs(
         frame_tokens,

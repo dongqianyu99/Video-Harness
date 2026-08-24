@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .evidence import evidence_is_trainable
+from .quality import accepted_transition_chain
 from .robodojo import EpisodeRecord, VideoSlice
 from .sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION, validate_document
 
@@ -23,7 +23,12 @@ def _require_nonnegative_int(value: Any, *, name: str) -> int:
 
 def _rank(seed: int, namespace: str, task_index: int, *episode_indices: int) -> bytes:
     payload = ":".join(
-        [str(seed), namespace, str(task_index), *(str(value) for value in episode_indices)]
+        [
+            str(seed),
+            namespace,
+            str(task_index),
+            *(str(value) for value in episode_indices),
+        ]
     ).encode()
     return hashlib.sha256(payload).digest()
 
@@ -47,16 +52,10 @@ def episode_record_from_dict(value: Mapping[str, Any]) -> EpisodeRecord:
 
 
 def _trainable_units(document: Mapping[str, Any]) -> int:
-    count = 0
-    for unit in document["guidance_units"]:
-        annotation = unit["annotation"]
-        if (
-            annotation["status"] == "complete"
-            and annotation["record"] is not None
-            and evidence_is_trainable(annotation["record"])
-        ):
-            count += 1
-    return count
+    try:
+        return sum(1 for _ in accepted_transition_chain(document))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _index_documents(
@@ -83,7 +82,9 @@ def _index_documents(
     return result
 
 
-def _validate_records(records: Sequence[EpisodeRecord]) -> dict[int, list[EpisodeRecord]]:
+def _validate_records(
+    records: Sequence[EpisodeRecord],
+) -> dict[int, list[EpisodeRecord]]:
     if not records:
         raise ValueError("records must not be empty")
     by_task: dict[int, list[EpisodeRecord]] = {}
@@ -244,9 +245,7 @@ def build_training_split(
             heldout_documents_per_task : heldout_documents_per_task
             + support_documents_per_task
         ]
-        reserved_episodes = {
-            item[0].episode_index for item in (*heldout, *supports)
-        }
+        reserved_episodes = {item[0].episode_index for item in (*heldout, *supports)}
         query_candidates = [
             record
             for record in task_records
@@ -374,7 +373,11 @@ def build_training_split(
         for task in task_manifests
         for entry in task["train_queries"]
     }
-    if all_supports & all_heldout or all_supports & all_queries or all_heldout & all_queries:
+    if (
+        all_supports & all_heldout
+        or all_supports & all_queries
+        or all_heldout & all_queries
+    ):
         raise AssertionError("training split roles overlap")
 
     manifest = {
@@ -443,11 +446,14 @@ def validate_training_split_manifest(manifest: Mapping[str, Any]) -> None:
         "query_episodes_per_task",
         "min_trainable_units",
     }
-    if not isinstance(manifest["config"], Mapping) or set(manifest["config"]) != expected_config:
+    if (
+        not isinstance(manifest["config"], Mapping)
+        or set(manifest["config"]) != expected_config
+    ):
         raise ValueError("training split config has unexpected fields")
-    if not isinstance(manifest["artifacts"], Mapping) or dict(manifest["artifacts"]) != {
-        "train_pairs_file": "train-pairs.jsonl"
-    }:
+    if not isinstance(manifest["artifacts"], Mapping) or dict(
+        manifest["artifacts"]
+    ) != {"train_pairs_file": "train-pairs.jsonl"}:
         raise ValueError("training split must reference train-pairs.jsonl")
     for field in ("split_id", "build_id"):
         if not isinstance(manifest[field], str) or not manifest[field].strip():
@@ -498,18 +504,31 @@ def validate_training_split_manifest(manifest: Mapping[str, Any]) -> None:
             "support_episode_index",
             "support_document_id",
         }
-        if any(not isinstance(entry, Mapping) or set(entry) != support_fields for entry in supports):
+        if any(
+            not isinstance(entry, Mapping) or set(entry) != support_fields
+            for entry in supports
+        ):
             raise ValueError("training support entry has unexpected fields")
-        if any(not isinstance(entry, Mapping) or set(entry) != heldout_fields for entry in heldout):
+        if any(
+            not isinstance(entry, Mapping) or set(entry) != heldout_fields
+            for entry in heldout
+        ):
             raise ValueError("held-out document entry has unexpected fields")
-        if any(not isinstance(entry, Mapping) or set(entry) != query_fields for entry in queries):
+        if any(
+            not isinstance(entry, Mapping) or set(entry) != query_fields
+            for entry in queries
+        ):
             raise ValueError("training query entry has unexpected fields")
         task_supports = {
-            _require_nonnegative_int(entry["episode_index"], name="support episode_index")
+            _require_nonnegative_int(
+                entry["episode_index"], name="support episode_index"
+            )
             for entry in supports
         }
         task_heldout = {
-            _require_nonnegative_int(entry["episode_index"], name="heldout episode_index")
+            _require_nonnegative_int(
+                entry["episode_index"], name="heldout episode_index"
+            )
             for entry in heldout
         }
         task_queries = {
@@ -528,10 +547,14 @@ def validate_training_split_manifest(manifest: Mapping[str, Any]) -> None:
         ):
             raise ValueError(f"task_index={task_index} split roles overlap")
         if (
-            task_supports & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
-            or task_heldout & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
-            or task_queries & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
-            or task_unused & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
+            task_supports
+            & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
+            or task_heldout
+            & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
+            or task_queries
+            & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
+            or task_unused
+            & (support_episodes | heldout_episodes | query_episodes | unused_episodes)
         ):
             raise ValueError("episode index appears in multiple task manifests")
         support_documents = {
@@ -547,7 +570,9 @@ def validate_training_split_manifest(manifest: Mapping[str, Any]) -> None:
                 raise ValueError("query assignment references a non-support episode")
             if query["support_document_id"] != support_documents[support_episode]:
                 raise ValueError("query assignment support episode/document mismatch")
-            query_length = _require_nonnegative_int(query["length"], name="query length")
+            query_length = _require_nonnegative_int(
+                query["length"], name="query length"
+            )
             if query_length < 1:
                 raise ValueError("query length must be positive")
             observed_query_counts[support_episode] += 1
@@ -558,9 +583,17 @@ def validate_training_split_manifest(manifest: Mapping[str, Any]) -> None:
             pair_ids.add(pair_id)
         for support in supports:
             support_episode = support["episode_index"]
-            if support["assigned_query_episodes"] != observed_query_counts[support_episode]:
-                raise ValueError("support assigned_query_episodes does not match queries")
-            if support["assigned_query_frames"] != observed_frame_counts[support_episode]:
+            if (
+                support["assigned_query_episodes"]
+                != observed_query_counts[support_episode]
+            ):
+                raise ValueError(
+                    "support assigned_query_episodes does not match queries"
+                )
+            if (
+                support["assigned_query_frames"]
+                != observed_frame_counts[support_episode]
+            ):
                 raise ValueError("support assigned_query_frames does not match queries")
         query_loads = [observed_query_counts[episode] for episode in task_supports]
         expected_summary = {

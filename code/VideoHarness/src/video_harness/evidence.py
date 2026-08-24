@@ -5,17 +5,15 @@ from typing import Any
 
 from .camera_contract import CAMERA_VIEWS
 
-
 EVIDENCE_SCHEMA_VERSION = "video-harness.evidence"
 INSPECTION_SCHEMA_VERSION = "video-harness.inspection"
+BOUNDARY_STATE_SCHEMA_VERSION = "video-harness.boundary-state"
 
 CAUSAL_VALIDATION_STATUSES = ("pass", "retry")
-REVIEW_STATUSES = ("accepted", "needs_review")
+QUALITY_STATUSES = ("accepted", "quarantined")
 DETAIL_REASONS = (
-    "gripper_object",
-    "insertion",
-    "button_contact",
-    "release",
+    "fine_spatial_detail",
+    "temporal_disambiguation",
     "occlusion",
     "other",
 )
@@ -71,10 +69,39 @@ def _text(value: Any, field: str) -> str:
 
 def _view_descriptions(value: Any, field: str) -> dict[str, str]:
     descriptions = _exact_object(value, field, set(CAMERA_VIEWS))
+    return {view: _text(descriptions[view], f"{field}.{view}") for view in CAMERA_VIEWS}
+
+
+def compose_boundary_state_record(
+    observation: Any,
+    *,
+    quality_status: str,
+) -> dict[str, Any]:
     return {
-        view: _text(descriptions[view], f"{field}.{view}")
-        for view in CAMERA_VIEWS
+        "observation": _view_descriptions(observation, "boundary_state.observation"),
+        "quality_status": _enum(
+            quality_status,
+            "boundary_state.quality_status",
+            QUALITY_STATUSES,
+        ),
     }
+
+
+def validate_boundary_state_record(value: Any) -> dict[str, Any]:
+    record = _exact_object(
+        value,
+        "boundary_state",
+        {"observation", "quality_status"},
+    )
+    return compose_boundary_state_record(
+        record["observation"],
+        quality_status=record["quality_status"],
+    )
+
+
+def boundary_state_is_usable(record: Any) -> bool:
+    normalized = validate_boundary_state_record(copy.deepcopy(record))
+    return normalized["quality_status"] == "accepted"
 
 
 def validate_inspection_record(value: Any) -> dict[str, Any]:
@@ -158,59 +185,87 @@ def validate_call2_record(value: Any) -> dict[str, Any]:
         value,
         "call2",
         {
-            "endpoint_observation",
+            "before_boundary_observation",
+            "after_boundary_observation",
+            "boundary_conflicts",
             "detail_observation",
             "unit_interpretation",
             "causal_validation",
         },
     )
-    endpoint = _exact_object(
-        record["endpoint_observation"],
-        "call2.endpoint_observation",
-        {"before", "after"},
+    before_boundary = record["before_boundary_observation"]
+    if before_boundary is not None:
+        before_boundary = _view_descriptions(
+            before_boundary,
+            "call2.before_boundary_observation",
+        )
+    after_boundary = record["after_boundary_observation"]
+    if after_boundary is not None:
+        after_boundary = _view_descriptions(
+            after_boundary,
+            "call2.after_boundary_observation",
+        )
+    conflicts = _normalize_boundary_conflicts(
+        record["boundary_conflicts"],
+        "call2.boundary_conflicts",
     )
+    transition = _normalize_transition_fields(record, "call2")
+    return {
+        "before_boundary_observation": before_boundary,
+        "after_boundary_observation": after_boundary,
+        "boundary_conflicts": conflicts,
+        **transition,
+    }
+
+
+def _normalize_boundary_conflicts(value: Any, field: str) -> dict[str, str | None]:
+    conflicts = _exact_object(value, field, {"before", "after"})
+    return {
+        role: (
+            None
+            if conflicts[role] is None
+            else _text(conflicts[role], f"{field}.{role}")
+        )
+        for role in ("before", "after")
+    }
+
+
+def _normalize_transition_fields(
+    record: dict[str, Any],
+    field: str,
+) -> dict[str, Any]:
     detail = record["detail_observation"]
     if detail is not None:
-        detail = _text(detail, "call2.detail_observation")
+        detail = _text(detail, f"{field}.detail_observation")
     interpretation = _exact_object(
         record["unit_interpretation"],
-        "call2.unit_interpretation",
+        f"{field}.unit_interpretation",
         {"action_description", "task_role"},
     )
     validation = _exact_object(
         record["causal_validation"],
-        "call2.causal_validation",
+        f"{field}.causal_validation",
         {"status", "reason"},
     )
     return {
-        "endpoint_observation": {
-            "before": _view_descriptions(
-                endpoint["before"], "call2.endpoint_observation.before"
-            ),
-            "after": _view_descriptions(
-                endpoint["after"], "call2.endpoint_observation.after"
-            ),
-        },
         "detail_observation": detail,
         "unit_interpretation": {
             "action_description": _text(
                 interpretation["action_description"],
-                "call2.unit_interpretation.action_description",
+                f"{field}.unit_interpretation.action_description",
             ),
             "task_role": _text(
                 interpretation["task_role"],
-                "call2.unit_interpretation.task_role",
+                f"{field}.unit_interpretation.task_role",
             ),
         },
         "causal_validation": {
             "status": _enum(
                 validation["status"],
-                "call2.causal_validation.status",
+                f"{field}.causal_validation.status",
                 CAUSAL_VALIDATION_STATUSES,
             ),
-            "reason": _text(
-                validation["reason"], "call2.causal_validation.reason"
-            ),
+            "reason": _text(validation["reason"], f"{field}.causal_validation.reason"),
         },
     }
 
@@ -219,19 +274,28 @@ def compose_evidence_record(
     motion_summary: str,
     call2_record: Any,
     *,
-    review_status: str,
+    quality_status: str,
+    resolved_motion_summary: str | None = None,
 ) -> dict[str, Any]:
     call2 = validate_call2_record(copy.deepcopy(call2_record))
-    status = _enum(review_status, "review_status", REVIEW_STATUSES)
+    status = _enum(quality_status, "quality_status", QUALITY_STATUSES)
     causal_status = call2["causal_validation"]["status"]
     if (status == "accepted") != (causal_status == "pass"):
         raise EvidenceValidationError(
-            "review_status must be accepted exactly when causal_validation passes"
+            "quality_status must be accepted exactly when causal_validation passes"
         )
     return {
         "motion_summary": _text(motion_summary, "motion_summary"),
-        **call2,
-        "review_status": status,
+        "resolved_motion_summary": (
+            None
+            if resolved_motion_summary is None
+            else _text(resolved_motion_summary, "resolved_motion_summary")
+        ),
+        "detail_observation": call2["detail_observation"],
+        "boundary_conflicts": call2["boundary_conflicts"],
+        "unit_interpretation": call2["unit_interpretation"],
+        "causal_validation": call2["causal_validation"],
+        "quality_status": status,
     }
 
 
@@ -241,40 +305,63 @@ def validate_evidence_record(value: Any) -> dict[str, Any]:
         "evidence",
         {
             "motion_summary",
-            "endpoint_observation",
+            "resolved_motion_summary",
+            "boundary_conflicts",
             "detail_observation",
             "unit_interpretation",
             "causal_validation",
-            "review_status",
+            "quality_status",
         },
     )
-    call2 = {
-        field: record[field]
-        for field in (
-            "endpoint_observation",
-            "detail_observation",
-            "unit_interpretation",
-            "causal_validation",
+    transition = _normalize_transition_fields(record, "evidence")
+    conflicts = _normalize_boundary_conflicts(
+        record["boundary_conflicts"],
+        "evidence.boundary_conflicts",
+    )
+    status = _enum(record["quality_status"], "quality_status", QUALITY_STATUSES)
+    causal_status = transition["causal_validation"]["status"]
+    if (status == "accepted") != (causal_status == "pass"):
+        raise EvidenceValidationError(
+            "quality_status must be accepted exactly when causal_validation passes"
         )
-    }
-    return compose_evidence_record(
-        record["motion_summary"],
-        call2,
-        review_status=record["review_status"],
-    )
-
-
-def mock_call2_record() -> dict[str, Any]:
-    unavailable = "The mock backend does not interpret this camera endpoint."
     return {
-        "endpoint_observation": {
-            "before": {view: unavailable for view in CAMERA_VIEWS},
-            "after": {view: unavailable for view in CAMERA_VIEWS},
-        },
+        "motion_summary": _text(record["motion_summary"], "motion_summary"),
+        "resolved_motion_summary": (
+            None
+            if record["resolved_motion_summary"] is None
+            else _text(
+                record["resolved_motion_summary"],
+                "resolved_motion_summary",
+            )
+        ),
+        "boundary_conflicts": conflicts,
+        **transition,
+        "quality_status": status,
+    }
+
+
+def mock_call2_record(
+    *,
+    include_before_boundary: bool = True,
+    include_after_boundary: bool = True,
+) -> dict[str, Any]:
+    unavailable = "The mock backend does not interpret this Boundary State."
+    return {
+        "before_boundary_observation": (
+            {view: unavailable for view in CAMERA_VIEWS}
+            if include_before_boundary
+            else None
+        ),
+        "after_boundary_observation": (
+            {view: unavailable for view in CAMERA_VIEWS}
+            if include_after_boundary
+            else None
+        ),
+        "boundary_conflicts": {"before": None, "after": None},
         "detail_observation": None,
         "unit_interpretation": {
             "action_description": "The mock backend does not infer the demonstrated action.",
-            "task_role": "The mock backend does not infer this Unit's task role.",
+            "task_role": "The mock backend does not infer this Evidence Unit's task role.",
         },
         "causal_validation": {
             "status": "retry",
@@ -287,7 +374,7 @@ def mock_evidence_record() -> dict[str, Any]:
     return compose_evidence_record(
         "The mock backend does not summarize the demonstrated motion.",
         mock_call2_record(),
-        review_status="needs_review",
+        quality_status="quarantined",
     )
 
 
@@ -302,4 +389,4 @@ def mock_inspection_record() -> dict[str, Any]:
 
 def evidence_is_trainable(record: Any) -> bool:
     normalized = validate_evidence_record(copy.deepcopy(record))
-    return normalized["review_status"] == "accepted"
+    return normalized["quality_status"] == "accepted"

@@ -10,7 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .evidence import evidence_is_trainable
+from .quality import accepted_transition_chain
 from .reader import GuideFrameRef, GuidePlanUnit
 from .renderer import RENDER_PROFILES, render_evidence_text
 from .sampling import validate_document
@@ -18,17 +18,11 @@ from .sampling import validate_document
 
 def _freeze_json(value: Any) -> Any:
     if isinstance(value, dict):
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+        return MappingProxyType(
+            {key: _freeze_json(item) for key, item in value.items()}
+        )
     if isinstance(value, list):
         return tuple(_freeze_json(item) for item in value)
-    return value
-
-
-def _thaw_json(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _thaw_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_thaw_json(item) for item in value]
     return value
 
 
@@ -41,13 +35,19 @@ def _read_json_records(path: Path) -> list[dict[str, Any]]:
         with path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if not line.strip():
-                    raise ValueError(f"Empty JSONL line in {path} at line {line_number}")
+                    raise ValueError(
+                        f"Empty JSONL line in {path} at line {line_number}"
+                    )
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
-                    raise ValueError(f"Invalid JSONL in {path} at line {line_number}: {exc.msg}") from exc
+                    raise ValueError(
+                        f"Invalid JSONL in {path} at line {line_number}: {exc.msg}"
+                    ) from exc
                 if not isinstance(record, dict):
-                    raise TypeError(f"JSONL record in {path} at line {line_number} must be an object")
+                    raise TypeError(
+                        f"JSONL record in {path} at line {line_number} must be an object"
+                    )
                 records.append(record)
         return records
 
@@ -57,7 +57,9 @@ def _read_json_records(path: Path) -> list[dict[str, Any]]:
         return [value]
     if isinstance(value, list) and all(isinstance(item, dict) for item in value):
         return value
-    raise ValueError(f"JSON artifact {path} must contain one object or a list of objects")
+    raise ValueError(
+        f"JSON artifact {path} must contain one object or a list of objects"
+    )
 
 
 def _require_nonnegative_int(value: Any, field: str) -> int:
@@ -117,7 +119,9 @@ class EvalGuidanceCatalog:
             result = self._by_instruction.get(task_instruction)
         if result is None:
             identity = task_index if task_index is not None else task_instruction
-            raise ValueError(f"No evaluation guidance is available for task {identity!r}")
+            raise ValueError(
+                f"No evaluation guidance is available for task {identity!r}"
+            )
         return result
 
     def build_plan(
@@ -129,14 +133,17 @@ class EvalGuidanceCatalog:
     ) -> EvalGuidePlan:
         if profile not in RENDER_PROFILES:
             raise ValueError(f"Unknown renderer profile: {profile}")
-        guidance = self.resolve(task_index=task_index, task_instruction=task_instruction)
-
+        guidance = self.resolve(
+            task_index=task_index, task_instruction=task_instruction
+        )
         frames: list[GuideFrameRef] = []
         frame_slots: dict[tuple[int, float], int] = {}
         units: list[GuidePlanUnit] = []
 
         def frame_slot(frame: Mapping[str, Any]) -> int:
-            frame_index = _require_nonnegative_int(frame.get("episode_frame_index"), "episode_frame_index")
+            frame_index = _require_nonnegative_int(
+                frame.get("episode_frame_index"), "episode_frame_index"
+            )
             timestamp = frame.get("timestamp_s")
             if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
                 raise TypeError("timestamp_s must be numeric")
@@ -153,26 +160,33 @@ class EvalGuidanceCatalog:
                 )
             return frame_slots[key]
 
-        for raw_unit in guidance.document["guidance_units"]:
+        for (
+            raw_unit,
+            before_boundary,
+            after_boundary,
+            record,
+            _before_record,
+            _after_record,
+        ) in accepted_transition_chain(guidance.document):
             annotation = raw_unit["annotation"]
-            if annotation["status"] != "complete":
-                continue
-            record = _thaw_json(annotation["record"])
-            if not evidence_is_trainable(record):
-                continue
             units.append(
                 GuidePlanUnit(
                     unit_id=raw_unit["unit_id"],
                     order=raw_unit["order"],
-                    before_slot=frame_slot(raw_unit["before"]),
-                    after_slot=frame_slot(raw_unit["after"]),
-                    transition_text=render_evidence_text(record, profile),
+                    before_slot=frame_slot(before_boundary["frame"]),
+                    after_slot=frame_slot(after_boundary["frame"]),
+                    transition_text=render_evidence_text(
+                        record,
+                        profile,
+                    ),
                     provenance=annotation["provenance"],
                 )
             )
 
         if not units:
-            raise ValueError(f"Evaluation document {guidance.document_id!r} has no trainable guidance units")
+            raise ValueError(
+                f"Evaluation document {guidance.document_id!r} has no trainable evidence units"
+            )
         return EvalGuidePlan(
             support_document_id=guidance.document_id,
             support_episode_index=guidance.source_episode_index,
@@ -184,18 +198,26 @@ class EvalGuidanceCatalog:
         )
 
 
-def _dataset_first_episode_by_task(episodes: Iterable[Mapping[str, Any]]) -> dict[int, tuple[int, str]]:
+def _dataset_first_episode_by_task(
+    episodes: Iterable[Mapping[str, Any]],
+) -> dict[int, tuple[int, str]]:
     first: dict[int, tuple[int, str]] = {}
     instructions: dict[int, str] = {}
     seen_episodes: set[int] = set()
     for record in episodes:
-        task_index = _require_nonnegative_int(record.get("task_index"), "episodes.task_index")
-        episode_index = _require_nonnegative_int(record.get("episode_index"), "episodes.episode_index")
+        task_index = _require_nonnegative_int(
+            record.get("task_index"), "episodes.task_index"
+        )
+        episode_index = _require_nonnegative_int(
+            record.get("episode_index"), "episodes.episode_index"
+        )
         instruction = record.get("task_instruction")
         if not isinstance(instruction, str) or not instruction.strip():
             raise ValueError("episodes.task_instruction must be a non-empty string")
         if episode_index in seen_episodes:
-            raise ValueError(f"Duplicate episode_index in episodes artifact: {episode_index}")
+            raise ValueError(
+                f"Duplicate episode_index in episodes artifact: {episode_index}"
+            )
         seen_episodes.add(episode_index)
         known_instruction = instructions.setdefault(task_index, instruction)
         if known_instruction != instruction:
@@ -222,7 +244,9 @@ def build_eval_guidance_catalog(
         elif document["build_id"] != build_id:
             raise ValueError("Evaluation documents must share one build_id")
         if document["document_id"] in seen_document_ids:
-            raise ValueError(f"Duplicate evaluation document_id: {document['document_id']!r}")
+            raise ValueError(
+                f"Duplicate evaluation document_id: {document['document_id']!r}"
+            )
         seen_document_ids.add(document["document_id"])
         key = (document["source"]["task_index"], document["source"]["episode_index"])
         if key in seen_task_episodes:
@@ -234,31 +258,46 @@ def build_eval_guidance_catalog(
         raise ValueError("Evaluation guidance requires at least one document")
     documents_by_task: dict[int, list[dict[str, Any]]] = {}
     for document in validated:
-        documents_by_task.setdefault(document["source"]["task_index"], []).append(document)
+        documents_by_task.setdefault(document["source"]["task_index"], []).append(
+            document
+        )
 
-    expected_first = _dataset_first_episode_by_task(episodes) if episodes is not None else None
+    expected_first = (
+        _dataset_first_episode_by_task(episodes) if episodes is not None else None
+    )
     entries: list[EvalGuidance] = []
     seen_instructions: set[str] = set()
     for task_index in sorted(documents_by_task):
-        task_documents = sorted(documents_by_task[task_index], key=lambda item: item["source"]["episode_index"])
+        task_documents = sorted(
+            documents_by_task[task_index],
+            key=lambda item: item["source"]["episode_index"],
+        )
         selected = task_documents[0]
         instruction = selected["task_instruction"]
-        if any(document["task_instruction"] != instruction for document in task_documents):
+        if any(
+            document["task_instruction"] != instruction for document in task_documents
+        ):
             raise ValueError(f"Task {task_index} has inconsistent task instructions")
         if instruction in seen_instructions:
-            raise ValueError(f"Task instruction is ambiguous across tasks: {instruction!r}")
+            raise ValueError(
+                f"Task instruction is ambiguous across tasks: {instruction!r}"
+            )
         seen_instructions.add(instruction)
         if expected_first is not None:
             expected = expected_first.get(task_index)
             if expected is None:
-                raise ValueError(f"Task {task_index} is absent from the episodes artifact")
+                raise ValueError(
+                    f"Task {task_index} is absent from the episodes artifact"
+                )
             if selected["source"]["episode_index"] != expected[0]:
                 raise ValueError(
                     f"Task {task_index} guidance episode {selected['source']['episode_index']} "
                     f"is not the dataset-first episode {expected[0]}"
                 )
             if instruction != expected[1]:
-                raise ValueError(f"Task {task_index} instruction disagrees with the episodes artifact")
+                raise ValueError(
+                    f"Task {task_index} instruction disagrees with the episodes artifact"
+                )
         entries.append(
             EvalGuidance(
                 build_id=build_id,
@@ -275,7 +314,9 @@ def build_eval_guidance_catalog(
         build_id=build_id,
         entries=entries_tuple,
         _by_task=MappingProxyType({entry.task_index: entry for entry in entries_tuple}),
-        _by_instruction=MappingProxyType({entry.task_instruction: entry for entry in entries_tuple}),
+        _by_instruction=MappingProxyType(
+            {entry.task_instruction: entry for entry in entries_tuple}
+        ),
     )
 
 

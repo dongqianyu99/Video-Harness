@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _support import annotate_boundaries, set_document_quality
 
 from video_harness.evidence import (
     EVIDENCE_SCHEMA_VERSION,
@@ -24,7 +25,6 @@ from video_harness.reader import (
 from video_harness.robodojo import EpisodeRecord, VideoSlice
 from video_harness.sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION, plan_document
 
-
 _BUILD_ID = "build-m4a-test"
 _TASK_INDEX = 3
 _TASK_INSTRUCTION = "Put bread into the toaster."
@@ -35,21 +35,24 @@ def _changed_evidence() -> dict[str, Any]:
     return compose_evidence_record(
         "The gripper transports the bread slice and releases it into the toaster.",
         {
-            "endpoint_observation": {
-                "before": {view: "The bread slice is outside the toaster." for view in views},
-                "after": {view: "The bread slice is inside the toaster." for view in views},
+            "before_boundary_observation": {
+                view: "The bread slice is outside the toaster." for view in views
             },
+            "after_boundary_observation": {
+                view: "The bread slice is inside the toaster." for view in views
+            },
+            "boundary_conflicts": {"before": None, "after": None},
             "detail_observation": None,
             "unit_interpretation": {
                 "action_description": "The robot inserts the bread slice into the toaster.",
-                "task_role": "This Unit loads one bread slice into the toaster.",
+                "task_role": "This Evidence Unit loads one bread slice into the toaster.",
             },
             "causal_validation": {
                 "status": "pass",
-                "reason": "The endpoint states and motion summary support the insertion.",
+                "reason": "The Boundary states and motion summary support the insertion.",
             },
         },
-        review_status="accepted",
+        quality_status="accepted",
     )
 
 
@@ -58,7 +61,7 @@ def _gripper_close_evidence() -> dict[str, Any]:
     record["motion_summary"] = "The gripper closes around the stationary bread slice."
     record["unit_interpretation"] = {
         "action_description": "The robot closes the gripper around the bread slice.",
-        "task_role": "This Unit establishes a grasp before transport.",
+        "task_role": "This Evidence Unit establishes a grasp before transport.",
     }
     return record
 
@@ -97,7 +100,7 @@ def _document(
     records_by_order = records_by_order or {}
     statuses_by_order = statuses_by_order or {}
 
-    for order, unit in enumerate(document["guidance_units"]):
+    for order, unit in enumerate(document["evidence_units"]):
         status = statuses_by_order.get(order)
         record = records_by_order.get(order)
         if status is None:
@@ -118,9 +121,8 @@ def _document(
                     "provider": "test-provider",
                     "model": "test-evidence",
                     "prompt_version": "test-evidence",
-                    "attempts": 1,
-                    "selected_attempt": 1,
                 },
+                "repair": None,
             }
 
         unit["annotation"] = {
@@ -130,7 +132,18 @@ def _document(
             "provenance": provenance,
         }
 
-    statuses = {unit["annotation"]["status"] for unit in document["guidance_units"]}
+    unit_statuses = {
+        unit["annotation"]["status"] for unit in document["evidence_units"]
+    }
+    if unit_statuses == {"pending"}:
+        annotate_boundaries(document, status="pending")
+    elif unit_statuses == {"mock"}:
+        annotate_boundaries(document, status="mock")
+    else:
+        annotate_boundaries(document, status="complete")
+    statuses = unit_statuses | {
+        boundary["annotation"]["status"] for boundary in document["boundary_states"]
+    }
     document["status"] = (
         "planned"
         if statuses == {"pending"}
@@ -139,6 +152,14 @@ def _document(
         else "mock-annotated"
         if statuses == {"mock"}
         else "partially-annotated"
+    )
+    set_document_quality(
+        document,
+        "accepted"
+        if document["status"] == "annotated"
+        else "quarantined"
+        if document["status"] == "mock-annotated"
+        else "pending",
     )
     return document
 
@@ -164,7 +185,9 @@ def _pair(
     }
 
 
-def _dataset(*, build_id: str = _BUILD_ID, supports_per_query: int = 1) -> dict[str, Any]:
+def _dataset(
+    *, build_id: str = _BUILD_ID, supports_per_query: int = 1
+) -> dict[str, Any]:
     return {
         "schema_version": "video-harness.robodojo-source",
         "task_scope": "benchmark-34",
@@ -293,7 +316,9 @@ def test_loader_rejects_duplicate_pair_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("mismatched_artifact", ["dataset", "document", "pair"])
-def test_loader_rejects_build_id_mismatch(tmp_path: Path, mismatched_artifact: str) -> None:
+def test_loader_rejects_build_id_mismatch(
+    tmp_path: Path, mismatched_artifact: str
+) -> None:
     documents = [_document(1), _document(10)]
     dataset = _dataset()
     pairs = [_pair()]
@@ -428,15 +453,17 @@ def _bundle_for_plan(
     return bundle, support_document
 
 
-def test_build_plan_selects_trainable_units_and_preserves_identity(tmp_path: Path) -> None:
+def test_build_plan_selects_trainable_units_and_preserves_identity(
+    tmp_path: Path,
+) -> None:
     support_document = _document(
         10,
         records_by_order={
             0: _changed_evidence(),
             1: _gripper_close_evidence(),
             2: _changed_evidence(),
+            3: _changed_evidence(),
         },
-        statuses_by_order={3: "failed"},
     )
     original = copy.deepcopy(support_document)
     bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
@@ -450,43 +477,59 @@ def test_build_plan_selects_trainable_units_and_preserves_identity(tmp_path: Pat
     assert isinstance(plan, GuidePlan)
     assert plan.query_episode_index == 1
     assert plan.support_document_id == "robodojo/episode-0000010"
-    assert [unit.unit_id for unit in plan.units] == ["u0000", "u0001", "u0002"]
-    assert [unit.order for unit in plan.units] == [0, 1, 2]
-    assert [frame.episode_frame_index for frame in plan.frames] == [0, 25, 50, 75]
-    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [(0, 1), (1, 2), (2, 3)]
+    assert [unit.unit_id for unit in plan.units] == [
+        "u0000",
+        "u0001",
+        "u0002",
+        "u0003",
+    ]
+    assert [unit.order for unit in plan.units] == [0, 1, 2, 3]
+    assert [frame.episode_frame_index for frame in plan.frames] == [0, 25, 50, 75, 100]
+    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+    ]
     assert all(unit.transition_text.startswith("Motion:") for unit in plan.units)
-    assert all(unit.provenance["call1"]["provider"] == "test-provider" for unit in plan.units)
+    assert all(
+        unit.provenance["call1"]["provider"] == "test-provider" for unit in plan.units
+    )
     assert support_document == original
 
 
-def test_build_plan_reuses_shared_slots_for_adjacent_selected_units(tmp_path: Path) -> None:
+def test_build_plan_reuses_shared_slots_for_adjacent_selected_units(
+    tmp_path: Path,
+) -> None:
     support_document = _document(
         10,
-        records_by_order={0: _changed_evidence(), 1: _changed_evidence()},
+        records_by_order={order: _changed_evidence() for order in range(4)},
     )
     bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
 
     plan = build_guide_plan(bundle, query_episode_index=1)
 
-    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [(0, 1), (1, 2)]
+    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+    ]
     assert plan.units[0].after_slot == plan.units[1].before_slot
 
 
-def test_build_plan_does_not_invent_shared_slots_across_skipped_units(tmp_path: Path) -> None:
+def test_build_plan_rejects_skipped_units(tmp_path: Path) -> None:
     support_document = _document(
         10,
         records_by_order={0: _changed_evidence(), 2: _changed_evidence()},
     )
     bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
 
-    plan = build_guide_plan(bundle, query_episode_index=1)
-
-    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [(0, 1), (2, 3)]
-    assert plan.units[0].after_slot != plan.units[1].before_slot
-    assert len(plan.frames) == 4
+    with pytest.raises(ValueError, match="quality-accepted"):
+        build_guide_plan(bundle, query_episode_index=1)
 
 
-def test_build_plan_keeps_local_actions_and_skips_pending_failed_and_mock_units(tmp_path: Path) -> None:
+def test_build_plan_rejects_pending_failed_or_mock_units(tmp_path: Path) -> None:
     support_document = _document(
         10,
         records_by_order={
@@ -498,9 +541,40 @@ def test_build_plan_keeps_local_actions_and_skips_pending_failed_and_mock_units(
     )
     bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
 
-    plan = build_guide_plan(bundle, query_episode_index=1)
+    with pytest.raises(ValueError, match="quality-accepted"):
+        build_guide_plan(bundle, query_episode_index=1)
 
-    assert [unit.unit_id for unit in plan.units] == ["u0000", "u0001"]
+
+@pytest.mark.parametrize("quarantine_target", ["unit", "boundary", "document"])
+def test_build_plan_fails_closed_instead_of_building_partial_guide(
+    tmp_path: Path, quarantine_target: str
+) -> None:
+    support_document = _document(
+        10,
+        records_by_order={order: _changed_evidence() for order in range(4)},
+    )
+    if quarantine_target == "document":
+        set_document_quality(support_document, "quarantined")
+    if quarantine_target == "unit":
+        support_document["evidence_units"][1]["annotation"]["record"][
+            "quality_status"
+        ] = "quarantined"
+        support_document["evidence_units"][1]["annotation"]["record"][
+            "causal_validation"
+        ] = {
+            "status": "retry",
+            "reason": "Automatic repair was unresolved.",
+        }
+        set_document_quality(support_document, "quarantined")
+    elif quarantine_target == "boundary":
+        support_document["boundary_states"][2]["annotation"]["record"][
+            "quality_status"
+        ] = "quarantined"
+        set_document_quality(support_document, "quarantined")
+    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
+
+    with pytest.raises(ValueError, match="episode-0000010"):
+        build_guide_plan(bundle, query_episode_index=1)
 
 
 def test_build_plan_fails_closed_when_no_unit_is_trainable(tmp_path: Path) -> None:
@@ -517,7 +591,7 @@ def test_build_plan_fails_closed_when_no_unit_is_trainable(tmp_path: Path) -> No
 def test_guide_plan_is_token_neutral_and_has_no_image_payload(tmp_path: Path) -> None:
     support_document = _document(
         10,
-        records_by_order={0: _changed_evidence()},
+        records_by_order={order: _changed_evidence() for order in range(4)},
     )
     bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
 

@@ -32,7 +32,9 @@ def _camera_image(role: str, view: str) -> ImagePayload:
     )
 
 
-def _inspection_request() -> InspectionRequest:
+def _inspection_request(
+    *, previous_motion_summary: str | None = None
+) -> InspectionRequest:
     views = ("cam_high", "cam_left_wrist", "cam_right_wrist")
     return InspectionRequest(
         document_id="doc",
@@ -40,25 +42,27 @@ def _inspection_request() -> InspectionRequest:
         episode_start_frame=100,
         episode_end_frame=125,
         overviews=tuple(_camera_image("OVERVIEW", view) for view in views),
-        stages=tuple(_camera_image("STAGE", view) for view in views),
+        keyframe_sheets=tuple(_camera_image("KEYFRAME_SHEET", view) for view in views),
+        previous_motion_summary=previous_motion_summary,
     )
 
 
-def _evidence_request(*, detail: bool = False, previous_attempt=None) -> EvidenceRequest:
+def _evidence_request(*, detail: bool = False) -> EvidenceRequest:
     return EvidenceRequest(
         document_id="doc",
         unit_id="u0000",
         episode_start_frame=100,
         episode_end_frame=125,
         motion_summary="The right gripper approaches the bread slice and closes around it.",
+        before_boundary_observation=None,
+        after_boundary_observation=None,
         task_instruction="Put bread into the toaster.",
         detail=_camera_image("DETAIL", "cam_high") if detail else None,
-        endpoints=tuple(
-            _camera_image(f"ENDPOINT_{role}", view)
+        boundary_images=tuple(
+            _camera_image(f"BOUNDARY_{role}", view)
             for role in ("BEFORE", "AFTER")
             for view in ("cam_high", "cam_left_wrist", "cam_right_wrist")
         ),
-        previous_attempt=previous_attempt,
     )
 
 
@@ -74,10 +78,10 @@ def test_mock_backends_are_explicit_and_schema_valid() -> None:
 def test_prompt_and_schema_define_progressive_calls() -> None:
     normalized = " ".join(SYSTEM_PROMPT.split()).lower()
     assert "task-blind motion_summary from call 1" in normalized
-    assert "static state visible in every camera endpoint" in normalized
+    assert "describe each boundary state once" in normalized
     assert "status=retry only for a clear violation" in normalized
     assert "active_end_effector" not in INSPECTION_SCHEMA["properties"]
-    before = EVIDENCE_SCHEMA["properties"]["endpoint_observation"]["properties"]["before"]
+    before = EVIDENCE_SCHEMA["properties"]["before_boundary_observation"]["anyOf"][0]
     assert set(before["required"]) == {
         "cam_high",
         "cam_left_wrist",
@@ -85,28 +89,32 @@ def test_prompt_and_schema_define_progressive_calls() -> None:
     }
 
 
-def test_request_requires_three_overviews_three_stages_and_six_endpoints() -> None:
+def test_request_requires_three_overviews_three_keyframe_sheets_and_six_boundary_images() -> (
+    None
+):
     inspection = _inspection_request()
-    with pytest.raises(ValueError, match="three stage"):
+    with pytest.raises(ValueError, match="three keyframe-sheet"):
         InspectionRequest(
             document_id="doc",
             unit_id="u0000",
             episode_start_frame=0,
             episode_end_frame=25,
             overviews=inspection.overviews,
-            stages=inspection.stages[:2],
+            keyframe_sheets=inspection.keyframe_sheets[:2],
         )
     request = _evidence_request()
-    with pytest.raises(ValueError, match="six endpoint"):
+    with pytest.raises(ValueError, match="six Boundary"):
         EvidenceRequest(
             document_id=request.document_id,
             unit_id=request.unit_id,
             episode_start_frame=0,
             episode_end_frame=25,
             motion_summary=request.motion_summary,
+            before_boundary_observation=None,
+            after_boundary_observation=None,
             task_instruction=request.task_instruction,
             detail=None,
-            endpoints=request.endpoints[:5],
+            boundary_images=request.boundary_images[:5],
         )
 
 
@@ -142,14 +150,53 @@ def test_openai_inspection_uses_six_images_without_task_text() -> None:
     ).inspect(_inspection_request())
     body = responses.kwargs
     assert body["tools"][0]["strict"] is True
-    assert sum(
-        item["type"] == "input_image" for item in body["input"][0]["content"]
-    ) == 6
+    assert (
+        sum(item["type"] == "input_image" for item in body["input"][0]["content"]) == 6
+    )
     assert "Put bread" not in json.dumps(body)
     assert result.trace.request_id == "req-inspect"
 
 
-def test_openai_call2_uses_endpoints_detail_motion_and_task_last(call2_record) -> None:
+def test_openai_inspection_passes_only_one_step_task_blind_context() -> None:
+    inspection = {
+        "motion_summary": "The interaction continues across the shared boundary.",
+        "interaction_window": {"start_frame": 0, "end_frame": 8},
+        "needs_detail": False,
+        "detail_request": None,
+    }
+
+    class Responses:
+        kwargs = None
+
+        def create(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(
+                output=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name="locate_temporal_detail",
+                        arguments=json.dumps(inspection),
+                    )
+                ]
+            )
+
+    responses = Responses()
+    OpenAIBackend(
+        "requested-model", client=SimpleNamespace(responses=responses)
+    ).inspect(
+        _inspection_request(
+            previous_motion_summary=(
+                "The gripper remains in a visually supported interaction at the final frame."
+            )
+        )
+    )
+    user_text = responses.kwargs["input"][0]["content"][0]["text"]
+    assert "Previous Evidence Unit context" in user_text
+    assert "task-blind and fallible" in user_text
+    assert "remains in a visually supported interaction" in user_text
+
+
+def test_openai_call2_uses_boundaries_detail_motion_and_task_last(call2_record) -> None:
     class Responses:
         kwargs = None
 
@@ -178,29 +225,6 @@ def test_openai_call2_uses_endpoints_detail_motion_and_task_last(call2_record) -
     assert "Task instruction" in content[-1]["text"]
     assert sum(item["type"] == "input_image" for item in content) == 7
     assert result.evidence["unit_interpretation"]["action_description"]
-
-
-def test_retry_context_is_passed_to_call2(call2_record) -> None:
-    class Responses:
-        kwargs = None
-
-        def create(self, **kwargs):
-            self.kwargs = kwargs
-            return SimpleNamespace(
-                output=[
-                    SimpleNamespace(
-                        type="function_call",
-                        name=TOOL_NAME,
-                        arguments=json.dumps(call2_record),
-                    )
-                ]
-            )
-
-    responses = Responses()
-    OpenAIBackend(
-        "requested-model", client=SimpleNamespace(responses=responses)
-    ).annotate(_evidence_request(previous_attempt=call2_record))
-    assert "Previous Call 2 interpretation was marked retry" in responses.kwargs["input"][0]["content"][-1]["text"]
 
 
 def test_openai_rejects_malformed_tool_arguments() -> None:

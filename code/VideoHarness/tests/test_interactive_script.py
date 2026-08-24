@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
-
+from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,6 +23,7 @@ def test_interactive_runner_refuses_noninteractive_execution() -> None:
         input="",
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 2
     assert "requires an interactive terminal" in result.stderr
@@ -37,7 +37,7 @@ def test_interactive_runner_keeps_api_tokens_out_of_arguments() -> None:
     assert "cleanup_secrets" in script
     assert "source profile" not in script
     assert "official-pi05" not in script
-    assert '--profile' not in script
+    assert "--profile" not in script
 
 
 def test_interactive_runner_keeps_outputs_local_without_upload_credentials() -> None:
@@ -63,7 +63,7 @@ def test_all_guidance_build_entrypoints_exclude_dlc() -> None:
     cli = (PROJECT_ROOT / "src" / "video_harness" / "cli.py").read_text()
     robodojo = (PROJECT_ROOT / "src" / "video_harness" / "robodojo.py").read_text()
     assert "official-pi05" not in interactive + smoke + cli
-    assert '--profile' not in interactive + smoke + cli
+    assert "--profile" not in interactive + smoke + cli
     assert 'if task_kind == "dlc":' in robodojo
 
 

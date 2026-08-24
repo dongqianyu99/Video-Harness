@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from .evidence import EVIDENCE_SCHEMA_VERSION, validate_evidence_record
+from .evidence import (
+    BOUNDARY_STATE_SCHEMA_VERSION,
+    EVIDENCE_SCHEMA_VERSION,
+    validate_boundary_state_record,
+    validate_evidence_record,
+)
 from .robodojo import EpisodeRecord
-
 
 BEHAVIOR_DOCUMENT_SCHEMA_VERSION = "video-harness.behavior-document"
 
@@ -32,12 +37,20 @@ class AnnotationSlot:
 
 
 @dataclass(frozen=True)
-class GuidanceUnit:
+class BoundaryState:
+    boundary_id: str
+    order: int
+    frame: FrameRef
+    annotation: AnnotationSlot
+
+
+@dataclass(frozen=True)
+class EvidenceUnit:
     unit_id: str
     order: int
-    before: FrameRef
+    before_boundary_id: str
     annotation: AnnotationSlot
-    after: FrameRef
+    after_boundary_id: str
 
 
 def boundary_frames(length: int, fps: int, sample_hz: float) -> list[int]:
@@ -52,7 +65,7 @@ def boundary_frames(length: int, fps: int, sample_hz: float) -> list[int]:
     frames = [0]
     sample_index = 1
     while True:
-        frame = min(length - 1, int(round(sample_index * step)))
+        frame = min(length - 1, round(sample_index * step))
         if frame >= length - 1:
             break
         if frame > frames[-1]:
@@ -71,25 +84,46 @@ def plan_document(
     sample_hz: float = 1.0,
 ) -> dict[str, Any]:
     boundaries = boundary_frames(record.length, fps, sample_hz)
+    boundary_states = [
+        BoundaryState(
+            boundary_id=f"b{order:04d}",
+            order=order,
+            frame=FrameRef(
+                episode_frame_index=frame,
+                timestamp_s=frame / fps,
+            ),
+            annotation=AnnotationSlot(
+                schema_version=BOUNDARY_STATE_SCHEMA_VERSION,
+                status="pending",
+                record=None,
+                provenance=None,
+            ),
+        )
+        for order, frame in enumerate(boundaries)
+    ]
     units = [
-        GuidanceUnit(
+        EvidenceUnit(
             unit_id=f"u{order:04d}",
             order=order,
-            before=FrameRef(episode_frame_index=start, timestamp_s=start / fps),
+            before_boundary_id=f"b{order:04d}",
             annotation=AnnotationSlot(
                 schema_version=EVIDENCE_SCHEMA_VERSION,
                 status="pending",
                 record=None,
                 provenance=None,
             ),
-            after=FrameRef(episode_frame_index=end, timestamp_s=end / fps),
+            after_boundary_id=f"b{order + 1:04d}",
         )
-        for order, (start, end) in enumerate(zip(boundaries, boundaries[1:]))
+        for order in range(len(boundaries) - 1)
     ]
-    head_video = next(video for video in record.videos if video.key == "observation.images.cam_high")
+    head_video = next(
+        video for video in record.videos if video.key == "observation.images.cam_high"
+    )
     videos = {video.key: video for video in record.videos}
     if set(videos) != set(_VIEW_ALIASES):
-        raise ValueError("RoboDojo document source requires exactly three camera videos")
+        raise ValueError(
+            "RoboDojo document source requires exactly three camera videos"
+        )
     view_sources = {
         alias: {
             "camera_key": camera_key,
@@ -102,6 +136,8 @@ def plan_document(
         "schema_version": BEHAVIOR_DOCUMENT_SCHEMA_VERSION,
         "build_id": build_id,
         "status": "planned",
+        "quality_status": "pending",
+        "quality_provenance": None,
         "document_id": f"robodojo/episode-{record.episode_index:07d}",
         "source": {
             "dataset": "RoboDojo_lerobot_v30_video",
@@ -116,11 +152,12 @@ def plan_document(
         },
         "task_instruction": record.task_instruction,
         "sampling": {
-            "kind": "uniform_guidance_unit",
+            "kind": "uniform_evidence_unit",
             "sample_hz": sample_hz,
             "source_fps": fps,
         },
-        "guidance_units": [asdict(unit) for unit in units],
+        "boundary_states": [asdict(boundary) for boundary in boundary_states],
+        "evidence_units": [asdict(unit) for unit in units],
     }
 
 
@@ -138,9 +175,11 @@ def _validate_frame_ref(value: Any, field: str, *, length: int, fps: int) -> int
         raise ValueError(f"{field}.episode_frame_index is outside [0, {length})")
     timestamp = frame["timestamp_s"]
     if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
-        raise ValueError(f"{field}.timestamp_s must be numeric")
+        raise TypeError(f"{field}.timestamp_s must be numeric")
     if abs(float(timestamp) - index / fps) > 1e-6:
-        raise ValueError(f"{field}.timestamp_s does not match episode_frame_index / fps")
+        raise ValueError(
+            f"{field}.timestamp_s does not match episode_frame_index / fps"
+        )
     return index
 
 
@@ -154,36 +193,45 @@ def validate_document(document: Any) -> dict[str, Any]:
             "schema_version",
             "build_id",
             "status",
+            "quality_status",
+            "quality_provenance",
             "document_id",
             "source",
             "task_instruction",
             "sampling",
-            "guidance_units",
+            "boundary_states",
+            "evidence_units",
         },
     )
     if value["schema_version"] != BEHAVIOR_DOCUMENT_SCHEMA_VERSION:
-        raise ValueError(f"unexpected behavior document schema {value['schema_version']!r}")
+        raise ValueError(
+            f"unexpected behavior document schema {value['schema_version']!r}"
+        )
     for field in ("build_id", "document_id", "task_instruction"):
         if not isinstance(value[field], str) or not value[field].strip():
             raise ValueError(f"document.{field} must be a non-empty string")
 
     source = value["source"]
     required_source_keys = {
-            "dataset",
-            "episode_index",
-            "episode_length",
-            "task_index",
-            "camera_key",
-            "video_path",
-            "video_from_timestamp",
-            "views",
-            "fps",
+        "dataset",
+        "episode_index",
+        "episode_length",
+        "task_index",
+        "camera_key",
+        "video_path",
+        "video_from_timestamp",
+        "views",
+        "fps",
     }
     source = _exact_keys(source, "document.source", required_source_keys)
     if source["dataset"] != "RoboDojo_lerobot_v30_video":
         raise ValueError(f"unsupported document source dataset {source['dataset']!r}")
     for field in ("episode_index", "task_index"):
-        if not isinstance(source[field], int) or isinstance(source[field], bool) or source[field] < 0:
+        if (
+            not isinstance(source[field], int)
+            or isinstance(source[field], bool)
+            or source[field] < 0
+        ):
             raise ValueError(f"document.source.{field} must be a non-negative integer")
     length = source["episode_length"]
     fps = source["fps"]
@@ -199,11 +247,14 @@ def validate_document(document: Any) -> dict[str, Any]:
     pure_video_path = PurePosixPath(video_path)
     if pure_video_path.is_absolute() or ".." in pure_video_path.parts:
         raise ValueError("document.source.video_path must stay within the dataset root")
-    if not isinstance(source["video_from_timestamp"], (int, float)) or source[
-        "video_from_timestamp"
-    ] < 0:
+    if (
+        not isinstance(source["video_from_timestamp"], (int, float))
+        or source["video_from_timestamp"] < 0
+    ):
         raise ValueError("document.source.video_from_timestamp must be non-negative")
-    views = _exact_keys(source["views"], "document.source.views", set(_VIEW_ALIASES.values()))
+    views = _exact_keys(
+        source["views"], "document.source.views", set(_VIEW_ALIASES.values())
+    )
     for alias, camera_key in ((alias, key) for key, alias in _VIEW_ALIASES.items()):
         item = _exact_keys(
             views[alias],
@@ -234,7 +285,7 @@ def validate_document(document: Any) -> dict[str, Any]:
         "document.sampling",
         {"kind", "sample_hz", "source_fps"},
     )
-    if sampling["kind"] != "uniform_guidance_unit":
+    if sampling["kind"] != "uniform_evidence_unit":
         raise ValueError(f"unsupported sampling kind {sampling['kind']!r}")
     sample_hz = sampling["sample_hz"]
     if (
@@ -246,88 +297,218 @@ def validate_document(document: Any) -> dict[str, Any]:
     if sampling["source_fps"] != fps:
         raise ValueError("document sampling/source FPS mismatch")
 
-    units = value["guidance_units"]
+    boundaries = value["boundary_states"]
+    units = value["evidence_units"]
+    if not isinstance(boundaries, list) or len(boundaries) < 2:
+        raise ValueError("document.boundary_states must contain at least two entries")
     if not isinstance(units, list) or not units:
-        raise ValueError("document.guidance_units must be a non-empty list")
-    statuses: list[str] = []
-    previous_after: int | None = None
-    for order, raw_unit in enumerate(units):
-        unit = _exact_keys(
-            raw_unit,
-            f"guidance_units[{order}]",
-            {"unit_id", "order", "before", "annotation", "after"},
+        raise ValueError("document.evidence_units must be a non-empty list")
+    if len(boundaries) != len(units) + 1:
+        raise ValueError(
+            "document must contain exactly one more Boundary State than Evidence Units"
         )
-        if unit["unit_id"] != f"u{order:04d}" or unit["order"] != order:
-            raise ValueError(f"guidance_units[{order}] has inconsistent unit identity/order")
-        before = _validate_frame_ref(unit["before"], f"guidance_units[{order}].before", length=length, fps=fps)
-        after = _validate_frame_ref(unit["after"], f"guidance_units[{order}].after", length=length, fps=fps)
-        if before >= after:
-            raise ValueError(f"guidance_units[{order}] must advance in time")
-        if order == 0 and before != 0:
-            raise ValueError("the first guidance unit must start at episode frame 0")
-        if previous_after is not None and before != previous_after:
-            raise ValueError(f"guidance_units[{order}] does not share the previous boundary")
-        previous_after = after
+
+    boundary_statuses: list[str] = []
+    boundary_frames: list[int] = []
+    for order, raw_boundary in enumerate(boundaries):
+        boundary = _exact_keys(
+            raw_boundary,
+            f"boundary_states[{order}]",
+            {"boundary_id", "order", "frame", "annotation"},
+        )
+        if boundary["boundary_id"] != f"b{order:04d}" or boundary["order"] != order:
+            raise ValueError(
+                f"boundary_states[{order}] has inconsistent boundary identity/order"
+            )
+        frame = _validate_frame_ref(
+            boundary["frame"],
+            f"boundary_states[{order}].frame",
+            length=length,
+            fps=fps,
+        )
+        if boundary_frames and frame <= boundary_frames[-1]:
+            raise ValueError("Boundary State frames must advance strictly")
+        boundary_frames.append(frame)
 
         annotation = _exact_keys(
-            unit["annotation"],
-            f"guidance_units[{order}].annotation",
+            boundary["annotation"],
+            f"boundary_states[{order}].annotation",
             {"schema_version", "status", "record", "provenance"},
         )
-        if annotation["schema_version"] != EVIDENCE_SCHEMA_VERSION:
+        if annotation["schema_version"] != BOUNDARY_STATE_SCHEMA_VERSION:
             raise ValueError(
-                f"guidance_units[{order}] has unexpected evidence schema "
+                f"boundary_states[{order}] has unexpected schema "
                 f"{annotation['schema_version']!r}"
             )
         status = annotation["status"]
         if status not in {"pending", "complete", "mock", "failed"}:
-            raise ValueError(f"guidance_units[{order}] has unsupported status {status!r}")
-        statuses.append(status)
+            raise ValueError(
+                f"boundary_states[{order}] has unsupported status {status!r}"
+            )
+        boundary_statuses.append(status)
         if status in {"pending", "failed"}:
             if annotation["record"] is not None or annotation["provenance"] is not None:
-                raise ValueError(f"guidance_units[{order}] {status} annotation must be empty")
+                raise ValueError(
+                    f"boundary_states[{order}] {status} annotation must be empty"
+                )
             continue
+        validate_boundary_state_record(annotation["record"])
+        provenance = annotation["provenance"]
+        required = {
+            "provider",
+            "model",
+            "prompt_version",
+            "source_unit_id",
+            "boundary_role",
+        }
+        if not isinstance(provenance, dict) or set(provenance) != required:
+            raise ValueError(
+                f"boundary_states[{order}] has invalid annotation provenance"
+            )
+        if provenance["boundary_role"] not in {"before", "after"}:
+            raise ValueError(
+                f"boundary_states[{order}] provenance boundary_role is invalid"
+            )
+        if (provenance["boundary_role"] == "before" and order >= len(units)) or (
+            provenance["boundary_role"] == "after" and order == 0
+        ):
+            raise ValueError(
+                f"boundary_states[{order}] provenance role cannot reference an Evidence Unit"
+            )
+        expected_source_order = (
+            order if provenance["boundary_role"] == "before" else order - 1
+        )
+        if provenance["source_unit_id"] != f"u{expected_source_order:04d}":
+            raise ValueError(
+                f"boundary_states[{order}] provenance source unit is inconsistent"
+            )
+        if any(
+            not isinstance(provenance[field], str) or not provenance[field].strip()
+            for field in ("provider", "model", "prompt_version")
+        ):
+            raise ValueError(
+                f"boundary_states[{order}] provenance fields must be non-empty strings"
+            )
+
+    if boundary_frames[0] != 0 or boundary_frames[-1] != length - 1:
+        raise ValueError("Boundary States must cover the first and final episode frame")
+
+    unit_statuses: list[str] = []
+    for order, raw_unit in enumerate(units):
+        unit = _exact_keys(
+            raw_unit,
+            f"evidence_units[{order}]",
+            {
+                "unit_id",
+                "order",
+                "before_boundary_id",
+                "annotation",
+                "after_boundary_id",
+            },
+        )
+        if unit["unit_id"] != f"u{order:04d}" or unit["order"] != order:
+            raise ValueError(
+                f"evidence_units[{order}] has inconsistent unit identity/order"
+            )
+        if (
+            unit["before_boundary_id"] != f"b{order:04d}"
+            or unit["after_boundary_id"] != f"b{order + 1:04d}"
+        ):
+            raise ValueError(
+                f"evidence_units[{order}] must reference its adjacent Boundary States"
+            )
+
+        annotation = _exact_keys(
+            unit["annotation"],
+            f"evidence_units[{order}].annotation",
+            {"schema_version", "status", "record", "provenance"},
+        )
+        if annotation["schema_version"] != EVIDENCE_SCHEMA_VERSION:
+            raise ValueError(
+                f"evidence_units[{order}] has unexpected evidence schema "
+                f"{annotation['schema_version']!r}"
+            )
+        status = annotation["status"]
+        if status not in {"pending", "complete", "mock", "failed"}:
+            raise ValueError(
+                f"evidence_units[{order}] has unsupported status {status!r}"
+            )
+        unit_statuses.append(status)
+        if status in {"pending", "failed"}:
+            if annotation["record"] is not None or annotation["provenance"] is not None:
+                raise ValueError(
+                    f"evidence_units[{order}] {status} annotation must be empty"
+                )
+            continue
+        for boundary_index in (order, order + 1):
+            allowed_boundary_statuses = (
+                {"complete"} if status == "complete" else {"complete", "mock"}
+            )
+            if boundary_statuses[boundary_index] not in allowed_boundary_statuses:
+                raise ValueError(
+                    f"evidence_units[{order}] {status} annotation requires "
+                    "usable adjacent Boundary States"
+                )
         validate_evidence_record(annotation["record"])
         provenance = annotation["provenance"]
-        if not isinstance(provenance, dict) or set(provenance) != {"call1", "call2"}:
-            raise ValueError(f"guidance_units[{order}] requires exact annotation provenance")
+        if not isinstance(provenance, dict) or set(provenance) != {
+            "call1",
+            "call2",
+            "repair",
+        }:
+            raise ValueError(
+                f"evidence_units[{order}] requires exact annotation provenance"
+            )
         call1 = provenance["call1"]
         call2 = provenance["call2"]
+        repair = provenance["repair"]
         if not isinstance(call1, dict) or set(call1) != {
             "provider",
             "model",
             "prompt_version",
         }:
-            raise ValueError(f"guidance_units[{order}] has invalid Call 1 provenance")
+            raise ValueError(f"evidence_units[{order}] has invalid Call 1 provenance")
         if not isinstance(call2, dict) or set(call2) != {
             "provider",
             "model",
             "prompt_version",
-            "attempts",
-            "selected_attempt",
         }:
-            raise ValueError(f"guidance_units[{order}] has invalid Call 2 provenance")
+            raise ValueError(f"evidence_units[{order}] has invalid Call 2 provenance")
+        if repair is not None:
+            if not isinstance(repair, dict) or set(repair) != {
+                "provider",
+                "model",
+                "prompt_version",
+                "attempts",
+                "reason",
+            }:
+                raise ValueError(
+                    f"evidence_units[{order}] has invalid repair provenance"
+                )
+            if any(
+                not isinstance(repair[field], str) or not repair[field].strip()
+                for field in ("provider", "model", "prompt_version", "reason")
+            ):
+                raise ValueError(
+                    f"evidence_units[{order}] repair provenance fields must be non-empty"
+                )
+            if (
+                isinstance(repair["attempts"], bool)
+                or not isinstance(repair["attempts"], int)
+                or repair["attempts"] < 1
+            ):
+                raise ValueError(
+                    f"evidence_units[{order}] repair attempts must be positive"
+                )
         if any(
             not isinstance(scope[field], str) or not scope[field].strip()
             for scope in (call1, call2)
             for field in ("provider", "model", "prompt_version")
         ):
-            raise ValueError(f"guidance_units[{order}] provenance fields must be non-empty strings")
-        attempts = call2["attempts"]
-        selected = call2["selected_attempt"]
-        if (
-            isinstance(attempts, bool)
-            or not isinstance(attempts, int)
-            or attempts < 1
-            or isinstance(selected, bool)
-            or not isinstance(selected, int)
-            or not 1 <= selected <= attempts
-        ):
-            raise ValueError(f"guidance_units[{order}] has invalid Call 2 attempt provenance")
-
-    if previous_after != length - 1:
-        raise ValueError("the final guidance unit must end at the final episode frame")
-    status_set = set(statuses)
+            raise ValueError(
+                f"evidence_units[{order}] provenance fields must be non-empty strings"
+            )
+    status_set = set(boundary_statuses + unit_statuses)
     expected_document_status = (
         "planned"
         if status_set == {"pending"}
@@ -339,10 +520,97 @@ def validate_document(document: Any) -> dict[str, Any]:
     )
     if value["status"] != expected_document_status:
         raise ValueError(
-            f"document status {value['status']!r} does not match unit statuses; "
+            f"document status {value['status']!r} does not match boundary/unit statuses; "
             f"expected {expected_document_status!r}"
         )
+    quality_status = value["quality_status"]
+    if quality_status not in {"pending", "accepted", "quarantined"}:
+        raise ValueError("document.quality_status is unsupported")
+    quality_provenance = value["quality_provenance"]
+    if quality_status == "pending":
+        if quality_provenance is not None:
+            raise ValueError("pending documents must not have quality provenance")
+    else:
+        required_quality_provenance = {
+            "provider",
+            "model",
+            "prompt_version",
+            "audit_attempts",
+            "repair_rounds",
+            "sequence_sha256",
+            "issues",
+        }
+        if (
+            not isinstance(quality_provenance, dict)
+            or set(quality_provenance) != required_quality_provenance
+        ):
+            raise ValueError("final document quality provenance is invalid")
+        for field in ("provider", "model", "prompt_version", "sequence_sha256"):
+            if (
+                not isinstance(quality_provenance[field], str)
+                or not quality_provenance[field].strip()
+            ):
+                raise ValueError(f"quality provenance {field} must be non-empty")
+        for field in ("audit_attempts", "repair_rounds"):
+            if (
+                isinstance(quality_provenance[field], bool)
+                or not isinstance(quality_provenance[field], int)
+                or quality_provenance[field] < 0
+            ):
+                raise ValueError(f"quality provenance {field} must be non-negative")
+        if not isinstance(quality_provenance["issues"], list):
+            raise ValueError("quality provenance issues must be a list")
+    if value["status"] == "planned" and quality_status != "pending":
+        raise ValueError("planned documents must have quality_status='pending'")
+    if value["status"] == "partially-annotated" and quality_status not in {
+        "pending",
+        "quarantined",
+    }:
+        raise ValueError("partial documents must be pending or quarantined")
+    if quality_status == "accepted":
+        if value["status"] != "annotated":
+            raise ValueError("only fully annotated real documents can be accepted")
+        if any(
+            item["annotation"]["record"]["quality_status"] != "accepted"
+            for collection in (boundaries, units)
+            for item in collection
+        ):
+            raise ValueError(
+                "accepted documents require accepted Boundaries and Evidence Units"
+            )
+    if quality_status == "quarantined" and value["status"] not in {
+        "annotated",
+        "mock-annotated",
+        "partially-annotated",
+    }:
+        raise ValueError("only complete documents can be quarantined")
     return value
+
+
+def boundary_state_by_id(
+    document: Mapping[str, Any],
+    boundary_id: str,
+) -> Mapping[str, Any]:
+    matches = [
+        boundary
+        for boundary in document.get("boundary_states", [])
+        if isinstance(boundary, Mapping) and boundary.get("boundary_id") == boundary_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"document must contain exactly one Boundary State {boundary_id!r}"
+        )
+    return matches[0]
+
+
+def unit_boundary_states(
+    document: Mapping[str, Any],
+    unit: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    return (
+        boundary_state_by_id(document, unit["before_boundary_id"]),
+        boundary_state_by_id(document, unit["after_boundary_id"]),
+    )
 
 
 def media_timestamp(document: dict[str, Any], source_frame: int) -> float:

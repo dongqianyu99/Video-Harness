@@ -29,9 +29,7 @@ class FFmpegFrameLoader:
             or rgb_shape[1] <= 0
             or rgb_shape[2] != 3
         ):
-            raise ValueError(
-                "rgb_shape must be a positive (height, width, 3) tuple"
-            )
+            raise ValueError("rgb_shape must be a positive (height, width, 3) tuple")
         self.dataset_root = dataset_root
         self.ffmpeg = ffmpeg
         self.rgb_shape = rgb_shape
@@ -48,7 +46,9 @@ class FFmpegFrameLoader:
             fps = float(source["fps"])
             stored_timestamp = float(frame_ref["timestamp_s"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise FrameDecodeError("Invalid frame reference or document source metadata") from exc
+            raise FrameDecodeError(
+                "Invalid frame reference or document source metadata"
+            ) from exc
         if fps <= 0:
             raise FrameDecodeError(f"Invalid source FPS: {fps}")
         if not 0 <= frame_index < episode_length:
@@ -56,14 +56,18 @@ class FFmpegFrameLoader:
                 f"Episode-local frame {frame_index} is outside [0, {episode_length})"
             )
         expected_timestamp = frame_index / fps
-        if not math.isclose(stored_timestamp, expected_timestamp, rel_tol=0.0, abs_tol=1e-6):
+        if not math.isclose(
+            stored_timestamp, expected_timestamp, rel_tol=0.0, abs_tol=1e-6
+        ):
             raise FrameDecodeError(
                 "Frame reference timestamp disagrees with episode_frame_index/source FPS: "
                 f"stored={stored_timestamp:.6f}, expected={expected_timestamp:.6f}"
             )
         relative_path = Path(source["video_path"])
         if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise FrameDecodeError(f"Unsafe dataset-relative video path: {relative_path}")
+            raise FrameDecodeError(
+                f"Unsafe dataset-relative video path: {relative_path}"
+            )
         video_path = self.dataset_root / relative_path
         if not video_path.is_file():
             raise FrameDecodeError(f"Video shard does not exist: {video_path}")
@@ -133,7 +137,9 @@ class FFmpegFrameLoader:
                 f"{timestamp:.6f}s: expected {expected_size} bytes, got "
                 f"{len(process.stdout)}; {stderr or 'no ffmpeg error output'}"
             )
-        return np.frombuffer(process.stdout, dtype=np.uint8).reshape(self.rgb_shape).copy()
+        return (
+            np.frombuffer(process.stdout, dtype=np.uint8).reshape(self.rgb_shape).copy()
+        )
 
     def load_rgb_many(
         self,
@@ -150,15 +156,21 @@ class FFmpegFrameLoader:
         if not frame_refs:
             return ()
 
-        resolved = [self._resolve_request(document, frame_ref) for frame_ref in frame_refs]
+        resolved = [
+            self._resolve_request(document, frame_ref) for frame_ref in frame_refs
+        ]
         video_paths = {video_path for video_path, _ in resolved}
         if len(video_paths) != 1:
-            raise FrameDecodeError("One batch decode request must reference one video shard")
+            raise FrameDecodeError(
+                "One batch decode request must reference one video shard"
+            )
         video_path = next(iter(video_paths))
 
         source = document["source"]
         fps = float(source["fps"])
-        frame_indices = [int(frame_ref["episode_frame_index"]) for frame_ref in frame_refs]
+        frame_indices = [
+            int(frame_ref["episode_frame_index"]) for frame_ref in frame_refs
+        ]
         first_index = min(frame_indices)
         first_timestamp = float(source["video_from_timestamp"]) + first_index / fps
         unique_indices = sorted(set(frame_indices))
@@ -206,4 +218,6 @@ class FFmpegFrameLoader:
             frame_index: np.array(decoded[position], copy=True)
             for position, frame_index in enumerate(unique_indices)
         }
-        return tuple(np.array(by_index[frame_index], copy=True) for frame_index in frame_indices)
+        return tuple(
+            np.array(by_index[frame_index], copy=True) for frame_index in frame_indices
+        )
