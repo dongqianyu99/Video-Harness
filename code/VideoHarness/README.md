@@ -254,6 +254,58 @@ uv run video-harness report \
 The full 1 Hz corpus contains many thousands of Evidence Units and therefore many paid
 API calls. Always run a bounded pilot first.
 
+## Document-parallel processing
+
+One Document is the smallest schedulable unit. Units inside it remain sequential so
+that the previous Motion Summary, shared Boundary States, and final Sequence Audit stay
+coherent. Independent Documents may run concurrently.
+
+For one process, enable a small number of Document workers. Every completed Document is
+atomically saved under the checkpoint root:
+
+```bash
+uv run video-harness annotate \
+  --provider openai \
+  --model <vision-capable-model-id> \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
+  --documents "$VH_OUTPUT/documents.jsonl" \
+  --output "$VH_OUTPUT/documents.openai.jsonl" \
+  --checkpoint-root "$VH_OUTPUT/checkpoints-openai" \
+  --workers 4
+```
+
+After an interruption, rerun the same command with `--resume`. Terminal Documents are
+reused; a nonterminal checkpoint continues from its next pending Unit.
+
+For multiple processes or machines sharing storage, assign deterministic shards and use
+one shared checkpoint root. Total concurrency is `shard count × workers`, so choose it
+according to the provider quota:
+
+```bash
+for shard in 0 1 2 3; do
+  uv run video-harness annotate \
+    --provider openai \
+    --model <vision-capable-model-id> \
+    --dataset-root "$ROBODOJO_DATASET_ROOT" \
+    --documents "$VH_OUTPUT/documents.jsonl" \
+    --output "$VH_OUTPUT/documents.openai.shard-${shard}.jsonl" \
+    --checkpoint-root "$VH_OUTPUT/checkpoints-openai" \
+    --num-shards 4 \
+    --shard-index "$shard" \
+    --workers 2 &
+done
+wait
+
+uv run video-harness merge-checkpoints \
+  --documents "$VH_OUTPUT/documents.jsonl" \
+  --checkpoint-root "$VH_OUTPUT/checkpoints-openai" \
+  --output "$VH_OUTPUT/documents.openai.jsonl"
+```
+
+`merge-checkpoints` fails closed if a source Document is missing, nonterminal, or belongs
+to a different run contract. `run.json` binds the input SHA-256, dataset root,
+provider/model, shard count, and Harness configuration.
+
 ## Debug mode
 
 Normal mode writes no intermediate media. Enable debug explicitly for a small
@@ -335,6 +387,9 @@ They can be adjusted with the corresponding `annotate` CLI flags.
 ├── episodes.jsonl
 ├── documents.jsonl
 ├── documents.<provider>.jsonl
+├── checkpoints/
+│   ├── run.json
+│   └── documents/<document-id-sha256>.json
 └── pairs.jsonl
 ```
 

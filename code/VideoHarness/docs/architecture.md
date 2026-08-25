@@ -94,6 +94,17 @@ is reserved for sampled Harness evaluation and does not block corpus generation.
 
 The pipeline writes canonical output only after the final evidence validates. Intermediate output belongs to the debug sink and may be absent by design.
 
+## Batch execution
+
+The Document is the only parallel work unit. Its Evidence Units remain sequential;
+different Documents are assigned to deterministic shards and may run through independent
+worker-local provider clients. A completed Document is written to an atomic checkpoint.
+Resume reuses terminal checkpoints and continues nonterminal ones, while final merge
+requires one terminal checkpoint for every source Document and restores source order.
+
+This layer uses local or shared files and the Python standard library. It deliberately
+does not require a database, message broker, or external scheduler.
+
 ## Debug modes
 
 `debug=false` uses an in-memory/no-op sink. Decoded frames, Evidence Unit clips, sheets, crops, Call 1 output, and request payloads are released after the Evidence Unit finishes.

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
+import os
+import sys
+import tempfile
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .annotations import make_backends
+from .annotations import RepairBackend, make_backends
 from .config import HarnessConfig
 from .evidence import (
     BOUNDARY_STATE_SCHEMA_VERSION,
@@ -26,19 +33,178 @@ from .sampling import plan_document, unit_boundary_states, validate_document
 from .temporal_media import TemporalMediaBuilder
 from .training_split import build_training_split, episode_record_from_dict
 
+CHECKPOINT_SCHEMA_VERSION = "video-harness.document-checkpoint"
+CHECKPOINT_RUN_SCHEMA_VERSION = "video-harness.checkpoint-run"
+
+
+@dataclass(frozen=True)
+class DocumentAnnotationResult:
+    document: dict[str, Any]
+    annotated_units: int
+    failed_units: int
+    failures: tuple[dict[str, str], ...]
+    reused: bool = False
+
+
+@dataclass(frozen=True)
+class _WorkerContext:
+    pipeline: EvidenceUnitPipeline
+    repair_backend: RepairBackend
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
 
 def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    _atomic_write_text(
+        path,
+        json.dumps(value, indent=2, ensure_ascii=False) + "\n",
     )
 
 
 def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as stream:
-        for value in values:
-            stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            for value in values:
+                stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _checkpoint_path(root: Path, document_id: str) -> Path:
+    name = hashlib.sha256(document_id.encode("utf-8")).hexdigest()
+    return root / "documents" / f"{name}.json"
+
+
+def _write_document_checkpoint(
+    root: Path,
+    result: DocumentAnnotationResult,
+) -> Path:
+    path = _checkpoint_path(root, result.document["document_id"])
+    _write_json(
+        path,
+        {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "document_id": result.document["document_id"],
+            "document": result.document,
+            "failures": list(result.failures),
+        },
+    )
+    return path
+
+
+def _load_document_checkpoint(
+    root: Path, document_id: str
+) -> DocumentAnnotationResult | None:
+    path = _checkpoint_path(root, document_id)
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "document_id",
+        "document",
+        "failures",
+    }:
+        raise ValueError(f"Invalid document checkpoint: {path}")
+    if value["schema_version"] != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported document checkpoint schema: {path}")
+    if value["document_id"] != document_id:
+        raise ValueError(f"Document checkpoint identity mismatch: {path}")
+    document = validate_document(value["document"])
+    failures = value["failures"]
+    if not isinstance(failures, list) or any(
+        not isinstance(item, dict) for item in failures
+    ):
+        raise ValueError(f"Invalid checkpoint failures: {path}")
+    return DocumentAnnotationResult(
+        document=document,
+        annotated_units=0,
+        failed_units=0,
+        failures=tuple(failures),
+        reused=True,
+    )
+
+
+def _document_shard(document_id: str, num_shards: int) -> int:
+    digest = hashlib.sha256(document_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % num_shards
+
+
+def _ensure_checkpoint_run(
+    root: Path,
+    *,
+    documents_path: Path,
+    dataset_root: Path,
+    provider: str,
+    model: str,
+    num_shards: int,
+    config: HarnessConfig,
+) -> None:
+    config_value = config.manifest()
+    config_value.pop("debug_root", None)
+    expected = {
+        "schema_version": CHECKPOINT_RUN_SCHEMA_VERSION,
+        "documents_sha256": _file_sha256(documents_path),
+        "dataset_root": str(dataset_root.resolve()),
+        "provider": provider,
+        "model": model,
+        "num_shards": num_shards,
+        "config": config_value,
+    }
+    path = root / "run.json"
+    if path.is_file():
+        actual = json.loads(path.read_text(encoding="utf-8"))
+        if actual != expected:
+            raise ValueError(
+                f"Checkpoint run contract does not match this invocation: {path}"
+            )
+        return
+    _write_json(path, expected)
+    actual = json.loads(path.read_text(encoding="utf-8"))
+    if actual != expected:
+        raise ValueError(f"Checkpoint run contract changed during creation: {path}")
 
 
 def _require_new_or_empty_directory(path: Path) -> None:
@@ -159,14 +325,211 @@ def _build(args: argparse.Namespace) -> int:
     return 0
 
 
-def _annotate(args: argparse.Namespace) -> int:
-    if args.output.exists():
-        raise FileExistsError(f"Annotation output already exists: {args.output}")
-    documents = _read_jsonl(args.documents)
+def _make_worker_context(
+    args: argparse.Namespace, config: HarnessConfig
+) -> _WorkerContext:
     inspection_backend, evidence_backend, repair_backend = make_backends(
         args.provider,
         args.model,
     )
+    return _WorkerContext(
+        pipeline=EvidenceUnitPipeline(
+            inspection_backend=inspection_backend,
+            evidence_backend=evidence_backend,
+            media_builder=TemporalMediaBuilder(args.dataset_root),
+            config=config,
+            repair_backend=repair_backend,
+        ),
+        repair_backend=repair_backend,
+    )
+
+
+def _annotate_document(
+    original: dict[str, Any],
+    *,
+    context: _WorkerContext,
+    config: HarnessConfig,
+    unit_budget: int | None,
+) -> DocumentAnnotationResult:
+    validate_document(original)
+    document = copy.deepcopy(original)
+    annotated_units = 0
+    failed_units = 0
+    failures: list[dict[str, str]] = []
+    document_annotations = 0
+    for unit in document["evidence_units"]:
+        if unit_budget is not None and document_annotations >= unit_budget:
+            break
+        annotation = unit["annotation"]
+        if annotation.get("status") in {"complete", "mock"} and annotation.get(
+            "record"
+        ):
+            continue
+        try:
+            result = context.pipeline.run(document, unit)
+        except Exception as exc:  # noqa: BLE001 - isolate one failed Unit
+            annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
+            annotation["status"] = "failed"
+            annotation["record"] = None
+            annotation["provenance"] = None
+            for boundary in unit_boundary_states(document, unit):
+                boundary_annotation = boundary["annotation"]
+                if boundary_annotation.get("status") not in {"complete", "mock"}:
+                    boundary_annotation["schema_version"] = (
+                        BOUNDARY_STATE_SCHEMA_VERSION
+                    )
+                    boundary_annotation["status"] = "failed"
+                    boundary_annotation["record"] = None
+                    boundary_annotation["provenance"] = None
+            document_annotations += 1
+            failed_units += 1
+            failures.append(
+                {
+                    "document_id": document["document_id"],
+                    "unit_id": unit["unit_id"],
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        output_status = "mock" if result.evidence.provider == "mock" else "complete"
+        annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
+        annotation["status"] = output_status
+        annotation["record"] = result.evidence.evidence
+        call2_model = (
+            result.initial_evidence.trace.response_model
+            or result.initial_evidence.requested_model
+        )
+        call2_provenance = {
+            "provider": result.initial_evidence.provider,
+            "model": call2_model,
+            "prompt_version": result.initial_evidence.prompt_version,
+        }
+        annotation["provenance"] = {
+            "call1": {
+                "provider": result.inspection.provider,
+                "model": (
+                    result.inspection.trace.response_model
+                    or result.inspection.requested_model
+                ),
+                "prompt_version": result.inspection.prompt_version,
+            },
+            "call2": call2_provenance,
+            "repair": (
+                None
+                if result.repair is None
+                else {
+                    "provider": result.repair.provider,
+                    "model": (
+                        result.repair.trace.response_model
+                        or result.repair.requested_model
+                    ),
+                    "prompt_version": result.repair.prompt_version,
+                    "attempts": result.repair_attempts,
+                    "reason": result.repair.repair["reason"],
+                }
+            ),
+        }
+        before_boundary, after_boundary = unit_boundary_states(document, unit)
+        boundary_provenance_base = call2_provenance
+        if result.repair is not None and result.repair.repair["evidence_sufficient"]:
+            boundary_provenance_base = {
+                "provider": result.repair.provider,
+                "model": (
+                    result.repair.trace.response_model or result.repair.requested_model
+                ),
+                "prompt_version": result.repair.prompt_version,
+            }
+        for boundary, role, record in (
+            (before_boundary, "before", result.before_boundary_record),
+            (after_boundary, "after", result.after_boundary_record),
+        ):
+            if record is None:
+                continue
+            boundary["annotation"] = {
+                "schema_version": BOUNDARY_STATE_SCHEMA_VERSION,
+                "status": output_status,
+                "record": record,
+                "provenance": {
+                    **boundary_provenance_base,
+                    "source_unit_id": unit["unit_id"],
+                    "boundary_role": role,
+                },
+            }
+        boundary_by_role = {"before": before_boundary, "after": after_boundary}
+        for role in result.conflicted_boundary_roles:
+            boundary_record = boundary_by_role[role]["annotation"].get("record")
+            if isinstance(boundary_record, dict):
+                boundary_record["quality_status"] = "quarantined"
+        document_annotations += 1
+        annotated_units += 1
+
+    statuses = {
+        item["annotation"]["status"]
+        for key in ("boundary_states", "evidence_units")
+        for item in document[key]
+    }
+    if statuses == {"pending"}:
+        document["status"] = "planned"
+    elif statuses == {"complete"}:
+        document["status"] = "annotated"
+    elif statuses == {"mock"}:
+        document["status"] = "mock-annotated"
+    else:
+        document["status"] = "partially-annotated"
+    document["quality_status"] = "pending"
+    document["quality_provenance"] = None
+    if document["status"] in {"annotated", "mock-annotated"}:
+        document = reconcile_document(
+            document,
+            backend=context.repair_backend,
+            pipeline=context.pipeline,
+            config=config,
+        ).document
+    elif any(
+        unit["annotation"]["status"] == "failed" for unit in document["evidence_units"]
+    ):
+        failed_issue_list = [
+            {
+                "unit_id": unit["unit_id"],
+                "reason": "Evidence Unit provider or schema processing failed.",
+            }
+            for unit in document["evidence_units"]
+            if unit["annotation"]["status"] == "failed"
+        ]
+        document["quality_status"] = "quarantined"
+        document["quality_provenance"] = {
+            "provider": context.repair_backend.provider,
+            "model": context.repair_backend.model,
+            "prompt_version": "video-harness.sequence-audit",
+            "audit_attempts": 0,
+            "repair_rounds": 0,
+            "sequence_sha256": sequence_projection_sha256(document),
+            "issues": failed_issue_list,
+        }
+    validate_document(document)
+    return DocumentAnnotationResult(
+        document=document,
+        annotated_units=annotated_units,
+        failed_units=failed_units,
+        failures=tuple(failures),
+    )
+
+
+def _annotate(args: argparse.Namespace) -> int:
+    resume = bool(getattr(args, "resume", False))
+    workers = int(getattr(args, "workers", 1))
+    num_shards = int(getattr(args, "num_shards", 1))
+    shard_index = int(getattr(args, "shard_index", 0))
+    if workers < 1:
+        raise ValueError("--workers must be at least one")
+    if num_shards < 1 or not 0 <= shard_index < num_shards:
+        raise ValueError("--shard-index must be within [0, --num-shards)")
+    if args.output.exists() and not resume:
+        raise FileExistsError(f"Annotation output already exists: {args.output}")
+
+    documents = _read_jsonl(args.documents)
+    for document in documents:
+        validate_document(document)
     debug_root = None
     if args.debug:
         debug_root = args.debug_root or args.output.with_suffix(
@@ -177,221 +540,153 @@ def _annotate(args: argparse.Namespace) -> int:
         debug_root=debug_root,
         inspection_retries=args.inspection_retries,
         repair_max_attempts=getattr(args, "repair_max_attempts", 2),
-        sequence_audit_max_attempts=getattr(
-            args,
-            "sequence_audit_max_attempts",
-            2,
-        ),
+        sequence_audit_max_attempts=getattr(args, "sequence_audit_max_attempts", 2),
         sequence_repair_rounds=getattr(args, "sequence_repair_rounds", 2),
     )
-    pipeline = EvidenceUnitPipeline(
-        inspection_backend=inspection_backend,
-        evidence_backend=evidence_backend,
-        media_builder=TemporalMediaBuilder(args.dataset_root),
-        config=config,
-        repair_backend=repair_backend,
+    checkpoint_root = getattr(args, "checkpoint_root", None)
+    if num_shards > 1 and checkpoint_root is None:
+        raise ValueError(
+            "--checkpoint-root is required when --num-shards is greater than one"
+        )
+    checkpoint_root = (
+        Path(checkpoint_root)
+        if checkpoint_root is not None
+        else args.output.with_name(args.output.name + ".checkpoints")
     )
-    annotated_units = 0
-    annotated_documents = 0
-    failed_units = 0
-    document_quality_counts: Counter[str] = Counter()
-    failures: list[dict[str, str]] = []
+    model_name = (
+        "deterministic-insufficient-evidence" if args.provider == "mock" else args.model
+    )
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError(f"--model is required for provider {args.provider!r}")
+    _ensure_checkpoint_run(
+        checkpoint_root,
+        documents_path=args.documents,
+        dataset_root=args.dataset_root,
+        provider=args.provider,
+        model=model_name,
+        num_shards=num_shards,
+        config=config,
+    )
 
-    for document_index, original in enumerate(documents):
-        if args.limit_documents is not None and document_index >= args.limit_documents:
-            break
-        validate_document(original)
-        document = copy.deepcopy(original)
-        unit_budget = args.limit_units_per_document
-        document_annotations = 0
-        for unit in document["evidence_units"]:
-            if unit_budget is not None and document_annotations >= unit_budget:
-                break
-            annotation = unit["annotation"]
-            if annotation.get("status") in {"complete", "mock"} and annotation.get(
-                "record"
-            ):
-                continue
-            try:
-                result = pipeline.run(document, unit)
-            except Exception as exc:  # noqa: BLE001 - isolate one failed Unit
-                annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
-                annotation["status"] = "failed"
-                annotation["record"] = None
-                annotation["provenance"] = None
-                for boundary in unit_boundary_states(document, unit):
-                    boundary_annotation = boundary["annotation"]
-                    if boundary_annotation.get("status") not in {"complete", "mock"}:
-                        boundary_annotation["schema_version"] = (
-                            BOUNDARY_STATE_SCHEMA_VERSION
-                        )
-                        boundary_annotation["status"] = "failed"
-                        boundary_annotation["record"] = None
-                        boundary_annotation["provenance"] = None
-                document_annotations += 1
-                failed_units += 1
-                failures.append(
-                    {
-                        "document_id": document["document_id"],
-                        "unit_id": unit["unit_id"],
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-                continue
-            output_status = "mock" if result.evidence.provider == "mock" else "complete"
-            annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
-            annotation["status"] = output_status
-            annotation["record"] = result.evidence.evidence
-            call2_model = (
-                result.initial_evidence.trace.response_model
-                or result.initial_evidence.requested_model
-            )
-            call2_provenance = {
-                "provider": result.initial_evidence.provider,
-                "model": call2_model,
-                "prompt_version": result.initial_evidence.prompt_version,
-            }
-            annotation["provenance"] = {
-                "call1": {
-                    "provider": result.inspection.provider,
-                    "model": (
-                        result.inspection.trace.response_model
-                        or result.inspection.requested_model
-                    ),
-                    "prompt_version": result.inspection.prompt_version,
-                },
-                "call2": call2_provenance,
-                "repair": (
-                    None
-                    if result.repair is None
-                    else {
-                        "provider": result.repair.provider,
-                        "model": (
-                            result.repair.trace.response_model
-                            or result.repair.requested_model
-                        ),
-                        "prompt_version": result.repair.prompt_version,
-                        "attempts": result.repair_attempts,
-                        "reason": result.repair.repair["reason"],
-                    }
-                ),
-            }
-            before_boundary, after_boundary = unit_boundary_states(document, unit)
-            boundary_provenance_base = call2_provenance
-            if (
-                result.repair is not None
-                and result.repair.repair["evidence_sufficient"]
-            ):
-                boundary_provenance_base = {
-                    "provider": result.repair.provider,
-                    "model": (
-                        result.repair.trace.response_model
-                        or result.repair.requested_model
-                    ),
-                    "prompt_version": result.repair.prompt_version,
-                }
-            generated_boundaries = (
-                (
-                    before_boundary,
-                    "before",
-                    result.before_boundary_record,
-                ),
-                (
-                    after_boundary,
-                    "after",
-                    result.after_boundary_record,
-                ),
-            )
-            for boundary, role, record in generated_boundaries:
-                if record is None:
-                    continue
-                boundary["annotation"] = {
-                    "schema_version": BOUNDARY_STATE_SCHEMA_VERSION,
-                    "status": output_status,
-                    "record": record,
-                    "provenance": {
-                        **boundary_provenance_base,
-                        "source_unit_id": unit["unit_id"],
-                        "boundary_role": role,
-                    },
-                }
-            boundary_by_role = {
-                "before": before_boundary,
-                "after": after_boundary,
-            }
-            for role in result.conflicted_boundary_roles:
-                boundary_annotation = boundary_by_role[role]["annotation"]
-                boundary_record = boundary_annotation.get("record")
-                if isinstance(boundary_record, dict):
-                    boundary_record["quality_status"] = "quarantined"
-            document_annotations += 1
-            annotated_units += 1
+    assigned = [
+        (index, document)
+        for index, document in enumerate(documents)
+        if _document_shard(document["document_id"], num_shards) == shard_index
+    ]
+    if args.limit_documents is not None:
+        if args.limit_documents < 0:
+            raise ValueError("--limit-documents must be non-negative")
+        assigned = assigned[: args.limit_documents]
 
-        statuses = {
-            item["annotation"]["status"]
-            for key in ("boundary_states", "evidence_units")
-            for item in document[key]
-        }
-        if statuses == {"pending"}:
-            document["status"] = "planned"
-        elif statuses == {"complete"}:
-            document["status"] = "annotated"
-        elif statuses == {"mock"}:
-            document["status"] = "mock-annotated"
-        else:
-            document["status"] = "partially-annotated"
-        document["quality_status"] = "pending"
-        document["quality_provenance"] = None
-        if document["status"] in {"annotated", "mock-annotated"}:
-            reconciliation = reconcile_document(
-                document,
-                backend=repair_backend,
-                pipeline=pipeline,
-                config=config,
+    results: dict[int, DocumentAnnotationResult] = {}
+    pending: list[tuple[int, dict[str, Any]]] = []
+    for index, original in assigned:
+        checkpoint = _load_document_checkpoint(checkpoint_root, original["document_id"])
+        if checkpoint is None:
+            pending.append((index, original))
+            continue
+        if not resume:
+            raise FileExistsError(
+                "Document checkpoint already exists; rerun with --resume: "
+                f"{_checkpoint_path(checkpoint_root, original['document_id'])}"
             )
-            document = reconciliation.document
-        elif any(
-            unit["annotation"]["status"] == "failed"
-            for unit in document["evidence_units"]
+        if (
+            checkpoint.document["build_id"] != original["build_id"]
+            or checkpoint.document["source"] != original["source"]
         ):
-            failed_issue_list = [
-                {
-                    "unit_id": unit["unit_id"],
-                    "reason": "Evidence Unit provider or schema processing failed.",
-                }
-                for unit in document["evidence_units"]
-                if unit["annotation"]["status"] == "failed"
-            ]
-            document["quality_status"] = "quarantined"
-            document["quality_provenance"] = {
-                "provider": repair_backend.provider,
-                "model": repair_backend.model,
-                "prompt_version": "video-harness.sequence-audit",
-                "audit_attempts": 0,
-                "repair_rounds": 0,
-                "sequence_sha256": sequence_projection_sha256(document),
-                "issues": failed_issue_list,
-            }
-        documents[document_index] = document
-        validate_document(document)
-        document_quality_counts[document["quality_status"]] += 1
-        annotated_documents += 1
+            raise ValueError(
+                f"Checkpoint source mismatch for {original['document_id']}"
+            )
+        if checkpoint.document["quality_status"] in {"accepted", "quarantined"}:
+            results[index] = checkpoint
+        else:
+            pending.append((index, checkpoint.document))
 
-    for document in documents:
+    local = threading.local()
+
+    def process(
+        item: tuple[int, dict[str, Any]],
+    ) -> tuple[int, DocumentAnnotationResult]:
+        index, document = item
+        context = getattr(local, "context", None)
+        if context is None:
+            context = _make_worker_context(args, config)
+            local.context = context
+        result = _annotate_document(
+            document,
+            context=context,
+            config=config,
+            unit_budget=args.limit_units_per_document,
+        )
+        _write_document_checkpoint(checkpoint_root, result)
+        return index, result
+
+    completed = len(results)
+    total = len(assigned)
+
+    def record(index: int, result: DocumentAnnotationResult) -> None:
+        nonlocal completed
+        results[index] = result
+        completed += 1
+        print(
+            json.dumps(
+                {
+                    "progress": f"{completed}/{total}",
+                    "document_id": result.document["document_id"],
+                    "quality_status": result.document["quality_status"],
+                    "reused": result.reused,
+                }
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if workers == 1:
+        for item in pending:
+            index, result = process(item)
+            record(index, result)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(process, item) for item in pending]
+            for future in as_completed(futures):
+                index, result = future.result()
+                record(index, result)
+
+    if num_shards == 1:
+        output_documents = list(documents)
+        for index, result in results.items():
+            output_documents[index] = result.document
+    else:
+        output_documents = [results[index].document for index, _ in assigned]
+    for document in output_documents:
         validate_document(document)
-    _write_jsonl(args.output, documents)
+    _write_jsonl(args.output, output_documents)
+
+    selected_results = [results[index] for index, _ in assigned]
+    annotated_units = sum(result.annotated_units for result in selected_results)
+    failed_units = sum(result.failed_units for result in selected_results)
+    failures = [failure for result in selected_results for failure in result.failures]
+    document_quality_counts = Counter(
+        result.document["quality_status"] for result in selected_results
+    )
     print(
         json.dumps(
             {
-                "provider": evidence_backend.provider,
-                "model": evidence_backend.model,
-                "documents_touched": annotated_documents,
+                "provider": args.provider,
+                "model": model_name,
+                "shard": f"{shard_index}/{num_shards}",
+                "workers": workers,
+                "documents_touched": sum(
+                    not result.reused for result in selected_results
+                ),
+                "documents_reused": sum(result.reused for result in selected_results),
                 "units_annotated": annotated_units,
                 "units_failed": failed_units,
                 "document_quality_status": dict(
                     sorted(document_quality_counts.items())
                 ),
                 "failure_examples": failures[:20],
+                "checkpoint_root": str(checkpoint_root),
                 "debug_root": None if debug_root is None else str(debug_root),
                 "output": str(args.output),
             },
@@ -430,6 +725,65 @@ def _make_training_split(args: argparse.Namespace) -> int:
                 "split_id": manifest["split_id"],
                 **manifest["totals"],
                 "output_root": str(args.output_root),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _merge_checkpoints(args: argparse.Namespace) -> int:
+    if args.output.exists():
+        raise FileExistsError(f"Merged annotation output already exists: {args.output}")
+    documents = _read_jsonl(args.documents)
+    run_path = args.checkpoint_root / "run.json"
+    if not run_path.is_file():
+        raise FileNotFoundError(f"Checkpoint run manifest does not exist: {run_path}")
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(run, dict)
+        or run.get("schema_version") != CHECKPOINT_RUN_SCHEMA_VERSION
+        or run.get("documents_sha256") != _file_sha256(args.documents)
+    ):
+        raise ValueError("Checkpoint run does not match --documents")
+
+    merged: list[dict[str, Any]] = []
+    missing: list[str] = []
+    nonterminal: list[str] = []
+    for original in documents:
+        validate_document(original)
+        checkpoint = _load_document_checkpoint(
+            args.checkpoint_root, original["document_id"]
+        )
+        if checkpoint is None:
+            missing.append(original["document_id"])
+            continue
+        document = checkpoint.document
+        if (
+            document["build_id"] != original["build_id"]
+            or document["source"] != original["source"]
+        ):
+            raise ValueError(
+                f"Checkpoint source mismatch for {original['document_id']}"
+            )
+        if document["quality_status"] not in {"accepted", "quarantined"}:
+            nonterminal.append(original["document_id"])
+            continue
+        merged.append(document)
+    if missing or nonterminal:
+        raise ValueError(
+            "Cannot merge incomplete checkpoints: "
+            f"missing={len(missing)} {missing[:5]}, "
+            f"nonterminal={len(nonterminal)} {nonterminal[:5]}"
+        )
+    _write_jsonl(args.output, merged)
+    quality = Counter(document["quality_status"] for document in merged)
+    print(
+        json.dumps(
+            {
+                "documents": len(merged),
+                "document_quality_status": dict(sorted(quality.items())),
+                "output": str(args.output),
             },
             indent=2,
         )
@@ -634,6 +988,34 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--model")
     annotate.add_argument("--limit-documents", type=int)
     annotate.add_argument("--limit-units-per-document", type=int)
+    annotate.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="concurrent Documents in this process; Units remain sequential",
+    )
+    annotate.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="deterministic Document shard count",
+    )
+    annotate.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="zero-based shard assigned to this process",
+    )
+    annotate.add_argument(
+        "--checkpoint-root",
+        type=Path,
+        help="shared atomic Document checkpoint directory",
+    )
+    annotate.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse terminal checkpoints and continue nonterminal Documents",
+    )
     annotate.add_argument("--debug", action="store_true")
     annotate.add_argument("--debug-root", type=Path)
     annotate.add_argument("--inspection-retries", type=int, default=1)
@@ -641,6 +1023,15 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--sequence-audit-max-attempts", type=int, default=2)
     annotate.add_argument("--sequence-repair-rounds", type=int, default=2)
     annotate.set_defaults(handler=_annotate)
+
+    merge = subparsers.add_parser(
+        "merge-checkpoints",
+        help="merge terminal per-Document checkpoints in source order",
+    )
+    merge.add_argument("--documents", type=Path, required=True)
+    merge.add_argument("--checkpoint-root", type=Path, required=True)
+    merge.add_argument("--output", type=Path, required=True)
+    merge.set_defaults(handler=_merge_checkpoints)
 
     split = subparsers.add_parser(
         "make-training-split",
