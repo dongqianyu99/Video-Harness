@@ -5,11 +5,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from _support import annotate_boundaries, set_document_quality
 
 from video_harness import cli
 from video_harness.evidence import EVIDENCE_SCHEMA_VERSION
 from video_harness.robodojo import EpisodeRecord, VideoSlice
+from video_harness.run_tracking import ApiCallBudgetExceeded
 from video_harness.sampling import plan_document, validate_document
 
 
@@ -113,7 +115,9 @@ def test_document_workers_shard_checkpoint_and_merge(
         "".join(json.dumps(document) + "\n" for document in originals),
         encoding="utf-8",
     )
-    monkeypatch.setattr(cli, "_make_worker_context", lambda args, config: object())
+    monkeypatch.setattr(
+        cli, "_make_worker_context", lambda args, config, tracker: object()
+    )
 
     def fake_annotate(original, *, context, config, unit_budget):
         del context, config, unit_budget
@@ -201,7 +205,7 @@ def test_resume_reuses_terminal_document_checkpoint(
     monkeypatch.setattr(
         cli,
         "_make_worker_context",
-        lambda args, config: (_ for _ in ()).throw(
+        lambda args, config, tracker: (_ for _ in ()).throw(
             AssertionError("terminal checkpoints must not create a worker")
         ),
     )
@@ -220,3 +224,22 @@ def test_resume_reuses_terminal_document_checkpoint(
     assert (
         json.loads(output.read_text(encoding="utf-8"))["quality_status"] == "accepted"
     )
+
+
+def test_api_budget_exhaustion_does_not_quarantine_document() -> None:
+    class Pipeline:
+        @staticmethod
+        def run(document, unit):
+            del document, unit
+            raise ApiCallBudgetExceeded("budget exhausted")
+
+    original = _planned_document(0)
+    with pytest.raises(ApiCallBudgetExceeded, match="budget exhausted"):
+        cli._annotate_document(
+            original,
+            context=SimpleNamespace(pipeline=Pipeline(), repair_backend=None),
+            config=cli.HarnessConfig(),
+            unit_budget=None,
+        )
+    assert original["quality_status"] == "pending"
+    assert original["evidence_units"][0]["annotation"]["status"] == "pending"

@@ -29,6 +29,7 @@ from .pairing import build_pairs
 from .pipeline import EvidenceUnitPipeline
 from .reconciliation import reconcile_document, sequence_projection_sha256
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
+from .run_tracking import ApiCallBudgetExceeded, RunTracker, TrackingBackend
 from .sampling import plan_document, unit_boundary_states, validate_document
 from .temporal_media import TemporalMediaBuilder
 from .training_split import build_training_split, episode_record_from_dict
@@ -326,12 +327,17 @@ def _build(args: argparse.Namespace) -> int:
 
 
 def _make_worker_context(
-    args: argparse.Namespace, config: HarnessConfig
+    args: argparse.Namespace,
+    config: HarnessConfig,
+    tracker: RunTracker,
 ) -> _WorkerContext:
     inspection_backend, evidence_backend, repair_backend = make_backends(
         args.provider,
         args.model,
     )
+    inspection_backend = TrackingBackend(inspection_backend, tracker)
+    evidence_backend = TrackingBackend(evidence_backend, tracker)
+    repair_backend = TrackingBackend(repair_backend, tracker)
     return _WorkerContext(
         pipeline=EvidenceUnitPipeline(
             inspection_backend=inspection_backend,
@@ -367,6 +373,8 @@ def _annotate_document(
             continue
         try:
             result = context.pipeline.run(document, unit)
+        except ApiCallBudgetExceeded:
+            raise
         except Exception as exc:  # noqa: BLE001 - isolate one failed Unit
             annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
             annotation["status"] = "failed"
@@ -567,6 +575,17 @@ def _annotate(args: argparse.Namespace) -> int:
         num_shards=num_shards,
         config=config,
     )
+    tracker = RunTracker(
+        checkpoint_root,
+        max_api_calls=getattr(args, "max_api_calls", None),
+        context={"shard_index": shard_index, "num_shards": num_shards},
+    )
+    tracker.log(
+        "shard_started",
+        workers=workers,
+        resume=resume,
+        max_api_calls=tracker.max_api_calls,
+    )
 
     assigned = [
         (index, document)
@@ -599,6 +618,11 @@ def _annotate(args: argparse.Namespace) -> int:
             )
         if checkpoint.document["quality_status"] in {"accepted", "quarantined"}:
             results[index] = checkpoint
+            tracker.log(
+                "document_reused",
+                document_id=checkpoint.document["document_id"],
+                quality_status=checkpoint.document["quality_status"],
+            )
         else:
             pending.append((index, checkpoint.document))
 
@@ -610,15 +634,34 @@ def _annotate(args: argparse.Namespace) -> int:
         index, document = item
         context = getattr(local, "context", None)
         if context is None:
-            context = _make_worker_context(args, config)
+            context = _make_worker_context(args, config, tracker)
             local.context = context
-        result = _annotate_document(
-            document,
-            context=context,
-            config=config,
-            unit_budget=args.limit_units_per_document,
-        )
+        tracker.log("document_started", document_id=document["document_id"])
+        try:
+            result = _annotate_document(
+                document,
+                context=context,
+                config=config,
+                unit_budget=args.limit_units_per_document,
+            )
+        except Exception as exc:
+            tracker.log(
+                "document_interrupted",
+                document_id=document["document_id"],
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
         _write_document_checkpoint(checkpoint_root, result)
+        for failure in result.failures:
+            tracker.log("unit_failed", **failure)
+        tracker.log(
+            "document_completed",
+            document_id=document["document_id"],
+            quality_status=result.document["quality_status"],
+            units_annotated=result.annotated_units,
+            units_failed=result.failed_units,
+        )
         return index, result
 
     completed = len(results)
@@ -641,16 +684,32 @@ def _annotate(args: argparse.Namespace) -> int:
             flush=True,
         )
 
-    if workers == 1:
-        for item in pending:
-            index, result = process(item)
-            record(index, result)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(process, item) for item in pending]
-            for future in as_completed(futures):
-                index, result = future.result()
+    try:
+        if workers == 1:
+            for item in pending:
+                index, result = process(item)
                 record(index, result)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(process, item) for item in pending]
+                try:
+                    for future in as_completed(futures):
+                        index, result = future.result()
+                        record(index, result)
+                except Exception:
+                    for future in futures:
+                        future.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
+    except Exception as exc:
+        tracker.log(
+            "shard_interrupted",
+            error_type=type(exc).__name__,
+            error=str(exc),
+            completed_documents=len(results),
+            total_documents=len(assigned),
+        )
+        raise
 
     if num_shards == 1:
         output_documents = list(documents)
@@ -669,6 +728,13 @@ def _annotate(args: argparse.Namespace) -> int:
     document_quality_counts = Counter(
         result.document["quality_status"] for result in selected_results
     )
+    budget = tracker.snapshot()
+    tracker.log(
+        "shard_completed",
+        documents=len(selected_results),
+        document_quality_status=dict(sorted(document_quality_counts.items())),
+        **budget,
+    )
     print(
         json.dumps(
             {
@@ -686,6 +752,8 @@ def _annotate(args: argparse.Namespace) -> int:
                     sorted(document_quality_counts.items())
                 ),
                 "failure_examples": failures[:20],
+                "api_budget": budget,
+                "events": str(tracker.events_path),
                 "checkpoint_root": str(checkpoint_root),
                 "debug_root": None if debug_root is None else str(debug_root),
                 "output": str(args.output),
@@ -1015,6 +1083,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         action="store_true",
         help="reuse terminal checkpoints and continue nonterminal Documents",
+    )
+    annotate.add_argument(
+        "--max-api-calls",
+        type=int,
+        help="optional shared call cap across this checkpoint root; disabled by default",
     )
     annotate.add_argument("--debug", action="store_true")
     annotate.add_argument("--debug-root", type=Path)

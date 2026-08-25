@@ -306,6 +306,30 @@ uv run video-harness merge-checkpoints \
 to a different run contract. `run.json` binds the input SHA-256, dataset root,
 provider/model, shard count, and Harness configuration.
 
+### Run log and optional API budget
+
+Every shard appends structured events to `<checkpoint-root>/events.jsonl`. Events cover
+Document start/completion/reuse/interruption, Unit failures, provider call
+start/completion/failure, request ID, resolved model, reported usage, latency, and shard
+completion. The shared `run-state.json` stores the number of logical external provider
+calls reserved across all workers and shards.
+
+An API call cap is disabled by default. Enable a shared cap only when needed:
+
+```bash
+uv run video-harness annotate \
+  ... \
+  --checkpoint-root "$VH_OUTPUT/checkpoints-openai" \
+  --max-api-calls 10000
+```
+
+The counter is checked atomically before Call 1, Call 2, repair, and Sequence Audit.
+When exhausted, processing stops without marking the interrupted Document as failed;
+raise or omit the cap and use `--resume` to continue. One count represents one Harness
+SDK invocation; retries internal to a provider SDK are not counted separately. For a
+sharded run, pass the same cap to every shard; the checkpoint-root counter is shared.
+Multi-machine checkpoint storage must support atomic rename and POSIX advisory locks.
+
 ## Debug mode
 
 Normal mode writes no intermediate media. Enable debug explicitly for a small
@@ -389,6 +413,8 @@ They can be adjusted with the corresponding `annotate` CLI flags.
 ├── documents.<provider>.jsonl
 ├── checkpoints/
 │   ├── run.json
+│   ├── run-state.json
+│   ├── events.jsonl
 │   └── documents/<document-id-sha256>.json
 └── pairs.jsonl
 ```

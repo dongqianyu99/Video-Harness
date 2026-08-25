@@ -24,6 +24,7 @@ from .evidence import (
     compose_evidence_record,
     mock_inspection_record,
 )
+from .run_tracking import ApiCallBudgetExceeded
 from .sampling import unit_boundary_states
 from .temporal_media import (
     BaseMedia,
@@ -369,6 +370,8 @@ class EvidenceUnitPipeline:
             )
             try:
                 result = self.repair_backend.repair(request)
+            except ApiCallBudgetExceeded:
+                raise
             except Exception as exc:  # noqa: BLE001 - provider failure is data-local
                 if store is not None and store.enabled:
                     store.write_json(

@@ -13,6 +13,7 @@ from .annotations import (
 )
 from .config import HarnessConfig
 from .pipeline import EvidenceUnitPipeline, ExistingRepairOutcome
+from .run_tracking import ApiCallBudgetExceeded
 from .sampling import unit_boundary_states
 
 
@@ -161,6 +162,8 @@ def _audit_document(
     for attempt in range(1, config.sequence_audit_max_attempts + 1):
         try:
             return backend.audit_sequence(request), attempt
+        except ApiCallBudgetExceeded:
+            raise
         except Exception:  # noqa: BLE001,S112 - audit failure quarantines this document
             continue
     return None, config.sequence_audit_max_attempts

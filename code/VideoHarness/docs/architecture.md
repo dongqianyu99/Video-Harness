@@ -105,6 +105,13 @@ requires one terminal checkpoint for every source Document and restores source o
 This layer uses local or shared files and the Python standard library. It deliberately
 does not require a database, message broker, or external scheduler.
 
+The same checkpoint root owns an append-only JSONL event log and a lock-protected run
+state. Provider calls record stage, Document/Unit identity, latency, response identity,
+usage, and failure details. An optional shared API-call cap is reserved before external
+provider invocation; budget exhaustion interrupts the shard without converting pending
+evidence into failed or quarantined data. Without an explicit cap, accounting remains
+enabled but enforcement is disabled.
+
 ## Debug modes
 
 `debug=false` uses an in-memory/no-op sink. Decoded frames, Evidence Unit clips, sheets, crops, Call 1 output, and request payloads are released after the Evidence Unit finishes.
