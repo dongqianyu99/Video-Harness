@@ -112,6 +112,14 @@ provider invocation; budget exhaustion interrupts the shard without converting p
 evidence into failed or quarantined data. Without an explicit cap, accounting remains
 enabled but enforcement is disabled.
 
+Failure handling follows scope rather than one global catch policy. Configuration,
+source contract, and artifact-write errors are run-level and stop the shard. Budget
+exhaustion is a resumable control signal. Media/provider/schema/timeout failures are
+Evidence-Unit-local: bounded recovery runs first, unresolved evidence quarantines its
+Document, and the corpus continues. Call 1 fallback is never sufficient for acceptance;
+it must be replaced by successful full-temporal repair or remain quarantined. All FFmpeg
+subprocesses and provider clients have explicit configurable timeouts.
+
 ## Debug modes
 
 `debug=false` uses an in-memory/no-op sink. Decoded frames, Evidence Unit clips, sheets, crops, Call 1 output, and request payloads are released after the Evidence Unit finishes.

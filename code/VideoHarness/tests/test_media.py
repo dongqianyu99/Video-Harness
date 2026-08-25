@@ -1,3 +1,4 @@
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -45,8 +46,8 @@ def test_load_rgb_requests_raw_rgb24_and_restores_hwc_uint8(
     rgb = np.arange(2 * 4 * 3, dtype=np.uint8).reshape(2, 4, 3)
     calls = []
 
-    def fake_run(command, *, check, capture_output):
-        calls.append((command, check, capture_output))
+    def fake_run(command, *, check, capture_output, timeout):
+        calls.append((command, check, capture_output, timeout))
         return SimpleNamespace(returncode=0, stdout=rgb.tobytes(), stderr=b"")
 
     monkeypatch.setattr(_media.subprocess, "run", fake_run)
@@ -61,6 +62,7 @@ def test_load_rgb_requests_raw_rgb24_and_restores_hwc_uint8(
     assert actual.dtype == np.uint8
     assert actual.flags.owndata
     command = calls[0][0]
+    assert calls[0][3] == 120.0
     assert command[command.index("-f") + 1] == "rawvideo"
     assert command[command.index("-pix_fmt") + 1] == "rgb24"
 
@@ -97,7 +99,8 @@ def test_load_rgb_many_decodes_unique_frames_once_and_preserves_input_order(
     second = np.full((2, 4, 3), 22, dtype=np.uint8)
     calls = []
 
-    def fake_run(command, *, check, capture_output):
+    def fake_run(command, *, check, capture_output, timeout):
+        assert timeout == 120.0
         calls.append(command)
         return SimpleNamespace(
             returncode=0,
@@ -127,6 +130,25 @@ def test_load_rgb_many_decodes_unique_frames_once_and_preserves_input_order(
     assert command[command.index("-frames:v") + 1] == "2"
     assert "eq(n\\,0)" in command[command.index("-vf") + 1]
     assert "eq(n\\,25)" in command[command.index("-vf") + 1]
+
+
+def test_frame_loader_turns_ffmpeg_timeout_into_data_local_error(
+    tmp_path, monkeypatch
+) -> None:
+    video_path = tmp_path / "videos" / "cam" / "file-000.mp4"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video-placeholder")
+
+    def timeout(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 3)
+
+    monkeypatch.setattr(_media.subprocess, "run", timeout)
+    loader = FFmpegFrameLoader(tmp_path, timeout_s=3)
+    with pytest.raises(FrameDecodeError, match="timed out after 3s"):
+        loader.load(
+            _document(),
+            {"episode_frame_index": 25, "timestamp_s": 1.0},
+        )
 
 
 def test_load_rgb_many_rejects_empty_or_short_batch_payload(

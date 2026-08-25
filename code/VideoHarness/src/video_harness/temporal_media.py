@@ -23,6 +23,7 @@ VIEW_TO_DATASET_KEY = {
 }
 KEYFRAME_INDICES = (0, 5, 10, 15, 20, 25)
 EVIDENCE_UNIT_FRAME_COUNT = 26
+DEFAULT_FFMPEG_TIMEOUT_S = 120.0
 
 
 class TemporalMediaError(RuntimeError):
@@ -113,11 +114,15 @@ def _run_process(
     *,
     runner: Runner,
     input_bytes: bytes | None = None,
+    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> bytes:
     kwargs: dict[str, Any] = {"check": False, "capture_output": True}
     if input_bytes is not None:
         kwargs["input"] = input_bytes
-    process = runner(command, **kwargs)
+    try:
+        process = runner(command, timeout=timeout_s, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise TemporalMediaError(f"FFmpeg timed out after {timeout_s:g}s") from exc
     payload = getattr(process, "stdout", b"")
     if getattr(process, "returncode", 1) != 0:
         stderr = getattr(process, "stderr", b"")
@@ -135,6 +140,7 @@ def decode_unit_frames(
     image_shape: tuple[int, int, int] = (480, 640, 3),
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
+    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> EvidenceUnitFrames:
     if set(sources) != set(VIEWS):
         raise ValueError(f"sources must contain exactly {VIEWS}")
@@ -176,7 +182,7 @@ def decode_unit_frames(
             "rgb24",
             "pipe:1",
         ]
-        payload = _run_process(command, runner=runner)
+        payload = _run_process(command, runner=runner, timeout_s=timeout_s)
         if len(payload) != expected_bytes:
             raise FrameDecodeError(
                 f"{view} decoded {len(payload)} bytes for exact video frames "
@@ -204,6 +210,7 @@ def _ffmpeg_tile(
     cell_size: tuple[int, int],
     ffmpeg: str,
     runner: Runner,
+    timeout_s: float,
 ) -> bytes:
     if not frames or columns <= 0:
         raise ValueError("tile requires frames and positive columns")
@@ -250,6 +257,7 @@ def _ffmpeg_tile(
         command,
         runner=runner,
         input_bytes=np.stack(padded).tobytes(),
+        timeout_s=timeout_s,
     )
     if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
         raise TemporalMediaError("FFmpeg tile renderer did not return PNG")
@@ -286,6 +294,7 @@ def render_sheet(
     cell_size: tuple[int, int],
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
+    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> bytes:
     if len(frames) != len(labels):
         raise ValueError("sheet labels must match frame count")
@@ -295,6 +304,7 @@ def render_sheet(
         cell_size=cell_size,
         ffmpeg=ffmpeg,
         runner=runner,
+        timeout_s=timeout_s,
     )
     return _label_tiled_png(
         tiled,
@@ -318,6 +328,7 @@ def overview_payload(
     *,
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
+    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> ImagePayload:
     if view not in VIEWS:
         raise ValueError(f"unknown view {view!r}")
@@ -329,6 +340,7 @@ def overview_payload(
         cell_size=(320, 240),
         ffmpeg=ffmpeg,
         runner=runner,
+        timeout_s=timeout_s,
     )
     return ImagePayload(
         label=image_label(
@@ -350,6 +362,7 @@ def keyframe_sheet_payload(
     *,
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
+    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> ImagePayload:
     if view not in VIEWS:
         raise ValueError(f"unknown view {view!r}")
@@ -366,6 +379,7 @@ def keyframe_sheet_payload(
         cell_size=(512, 384),
         ffmpeg=ffmpeg,
         runner=runner,
+        timeout_s=timeout_s,
     )
     return ImagePayload(
         label=image_label(
@@ -456,6 +470,7 @@ def detail_payload(
     *,
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
+    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> ImagePayload:
     if request.end_frame >= unit.frame_count:
         raise ValueError("detail request exceeds decoded Evidence Unit frame count")
@@ -476,6 +491,7 @@ def detail_payload(
         cell_size=(384, 384),
         ffmpeg=ffmpeg,
         runner=runner,
+        timeout_s=timeout_s,
     )
     return ImagePayload(
         label=image_label(
@@ -497,6 +513,7 @@ def encode_debug_unit_video(
     fps: int,
     ffmpeg: str = "ffmpeg",
     runner: Runner = subprocess.run,
+    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> bytes:
     if frames.ndim != 4 or frames.shape[-1] != 3 or frames.dtype != np.uint8:
         raise ValueError("debug video frames must be uint8 [N,H,W,3]")
@@ -529,7 +546,12 @@ def encode_debug_unit_video(
         "mp4",
         "pipe:1",
     ]
-    payload = _run_process(command, runner=runner, input_bytes=frames.tobytes())
+    payload = _run_process(
+        command,
+        runner=runner,
+        input_bytes=frames.tobytes(),
+        timeout_s=timeout_s,
+    )
     if not payload:
         raise TemporalMediaError("FFmpeg debug video encoder returned no bytes")
     return payload
@@ -543,11 +565,15 @@ class TemporalMediaBuilder:
         image_shape: tuple[int, int, int] = (480, 640, 3),
         ffmpeg: str = "ffmpeg",
         runner: Runner = subprocess.run,
+        timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
     ) -> None:
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
         self.dataset_root = Path(dataset_root)
         self.image_shape = image_shape
         self.ffmpeg = ffmpeg
         self.runner = runner
+        self.timeout_s = float(timeout_s)
 
     def _sources(self, document: Mapping[str, Any]) -> dict[str, VideoSource]:
         source = document["source"]
@@ -585,6 +611,7 @@ class TemporalMediaBuilder:
             image_shape=self.image_shape,
             ffmpeg=self.ffmpeg,
             runner=self.runner,
+            timeout_s=self.timeout_s,
         )
         overviews = tuple(
             overview_payload(
@@ -592,6 +619,7 @@ class TemporalMediaBuilder:
                 view,
                 ffmpeg=self.ffmpeg,
                 runner=self.runner,
+                timeout_s=self.timeout_s,
             )
             for view in VIEWS
         )
@@ -601,6 +629,7 @@ class TemporalMediaBuilder:
                 view,
                 ffmpeg=self.ffmpeg,
                 runner=self.runner,
+                timeout_s=self.timeout_s,
             )
             for view in VIEWS
         )
@@ -617,6 +646,7 @@ class TemporalMediaBuilder:
             request,
             ffmpeg=self.ffmpeg,
             runner=self.runner,
+            timeout_s=self.timeout_s,
         )
 
     def debug_media(
@@ -632,6 +662,7 @@ class TemporalMediaBuilder:
                 fps=base.unit_frames.fps,
                 ffmpeg=self.ffmpeg,
                 runner=self.runner,
+                timeout_s=self.timeout_s,
             )
             for index, frame in enumerate(view_frames):
                 artifacts[f"frames/{view}/frame-{index:02d}.jpg"] = _jpeg(frame)

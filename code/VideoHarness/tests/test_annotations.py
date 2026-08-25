@@ -1,10 +1,12 @@
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from video_harness.annotations import (
     AnnotationError,
+    AnthropicBackend,
     EvidenceRequest,
     ImagePayload,
     InspectionRequest,
@@ -243,3 +245,32 @@ def test_openai_rejects_malformed_tool_arguments() -> None:
     )
     with pytest.raises(AnnotationError, match="malformed"):
         OpenAIBackend("test-model", client=client).annotate(_evidence_request())
+
+
+def test_provider_clients_receive_explicit_timeout_and_retry_config(
+    monkeypatch,
+) -> None:
+    created = {}
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def openai_factory(**kwargs):
+        created["openai"] = kwargs
+        return SimpleNamespace()
+
+    def anthropic_factory(**kwargs):
+        created["anthropic"] = kwargs
+        return SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=openai_factory))
+    monkeypatch.setitem(
+        sys.modules,
+        "anthropic",
+        SimpleNamespace(Anthropic=anthropic_factory),
+    )
+    OpenAIBackend("model", timeout_s=45, max_retries=3)
+    AnthropicBackend("model", timeout_s=60, max_retries=4)
+    assert created == {
+        "openai": {"api_key": None, "timeout": 45, "max_retries": 3},
+        "anthropic": {"api_key": None, "timeout": 60, "max_retries": 4},
+    }

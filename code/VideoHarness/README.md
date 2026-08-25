@@ -330,6 +330,35 @@ SDK invocation; retries internal to a provider SDK are not counted separately. F
 sharded run, pass the same cap to every shard; the checkpoint-root counter is shared.
 Multi-machine checkpoint storage must support atomic rename and POSIX advisory locks.
 
+### Failure and timeout semantics
+
+The automated corpus workflow separates failures by scope:
+
+- invalid configuration, source/document contract drift, and checkpoint I/O errors stop
+  the shard because continuing could corrupt or misroute the run;
+- API budget exhaustion is a resumable control stop and leaves the interrupted Document
+  pending;
+- FFmpeg, provider, structured-output, and request timeout failures are data-local. The
+  Harness applies its bounded retries/repair path, records the error, quarantines an
+  unresolved Document, and continues with other Documents.
+
+Call 1 failure uses the fallback text only to enter Targeted Reprocessing with the full
+temporal evidence. A successful repair may recover the Unit; otherwise it is
+quarantined and cannot become training-eligible merely because Call 2 returned `pass`.
+
+Defaults are intentionally generous for multimodal APIs and shared storage:
+
+```text
+--provider-timeout-s 300
+--provider-max-retries 2
+--inspection-retries 1
+--ffmpeg-timeout-s 120
+```
+
+Provider retries cover transport-level failures inside the SDK. Harness inspection,
+repair, and audit budgets remain separate semantic-processing limits. These values are
+stored in the checkpoint run contract and may be adjusted for a new run.
+
 ## Debug mode
 
 Normal mode writes no intermediate media. Enable debug explicitly for a small

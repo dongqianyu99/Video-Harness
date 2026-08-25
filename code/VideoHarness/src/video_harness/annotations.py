@@ -529,13 +529,26 @@ def _anthropic_tool_call(
 class OpenAIBackend:
     provider = "openai"
 
-    def __init__(self, model: str, *, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        timeout_s: float = 300.0,
+        max_retries: int = 2,
+        client: Any | None = None,
+    ) -> None:
+        if timeout_s <= 0 or max_retries < 0:
+            raise ValueError("provider timeout/retries are invalid")
         if client is None:
             try:
                 from openai import OpenAI
             except ImportError as exc:  # pragma: no cover
                 raise RuntimeError("Install the providers extra to use OpenAI") from exc
-            client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+            client = OpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                timeout=timeout_s,
+                max_retries=max_retries,
+            )
         self.client = client
         self.model = model
 
@@ -694,7 +707,16 @@ class OpenAIBackend:
 class AnthropicBackend:
     provider = "anthropic"
 
-    def __init__(self, model: str, *, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        timeout_s: float = 300.0,
+        max_retries: int = 2,
+        client: Any | None = None,
+    ) -> None:
+        if timeout_s <= 0 or max_retries < 0:
+            raise ValueError("provider timeout/retries are invalid")
         if client is None:
             try:
                 from anthropic import Anthropic
@@ -702,7 +724,11 @@ class AnthropicBackend:
                 raise RuntimeError(
                     "Install the providers extra to use Anthropic"
                 ) from exc
-            client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+            client = Anthropic(
+                api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                timeout=timeout_s,
+                max_retries=max_retries,
+            )
         self.client = client
         self.model = model
 
@@ -865,15 +891,26 @@ class AnthropicBackend:
 def make_backends(
     provider: str,
     model: str | None,
+    *,
+    timeout_s: float = 300.0,
+    max_retries: int = 2,
 ) -> tuple[InspectionBackend, EvidenceBackend, RepairBackend]:
     if provider == "mock":
         return MockInspectionBackend(), MockEvidenceBackend(), MockRepairBackend()
     if not model:
         raise ValueError(f"--model is required for provider {provider!r}")
     if provider == "openai":
-        backend = OpenAIBackend(model)
+        backend = OpenAIBackend(
+            model,
+            timeout_s=timeout_s,
+            max_retries=max_retries,
+        )
         return backend, backend, backend
     if provider == "anthropic":
-        backend = AnthropicBackend(model)
+        backend = AnthropicBackend(
+            model,
+            timeout_s=timeout_s,
+            max_retries=max_retries,
+        )
         return backend, backend, backend
     raise ValueError(f"Unknown provider: {provider}")

@@ -554,6 +554,39 @@ def test_inspection_retry_and_fallback_do_not_repeat_media_decode(
     assert media.base_calls == 1
     assert result.detail_status == "inspection-failed-omitted"
     assert result.inspection.provider == "harness-fallback"
+    assert result.quality_status == "quarantined"
+    assert result.evidence.evidence["causal_validation"]["status"] == "retry"
     root = Path(result.debug_root or "")
     assert (root / "call1-error.json").is_file()
     assert not (root / "sheets/cam_high-detail.png").exists()
+
+
+def test_inspection_failure_can_be_recovered_from_full_temporal_evidence() -> None:
+    document, unit = _document_and_unit()
+    resolved = _call2(
+        "pass",
+        action="The full temporal evidence resolves the demonstrated action.",
+    )
+    repair = FakeRepairBackend(
+        [
+            {
+                "evidence_sufficient": True,
+                "reason": "The temporal sheets recover the missing motion evidence.",
+                "resolved_motion_summary": "Recovered task-blind motion evidence.",
+                "resolved_call2": resolved,
+            }
+        ]
+    )
+    result = EvidenceUnitPipeline(
+        inspection_backend=FakeInspectionBackend(needs_detail=False, failures=2),
+        evidence_backend=FakeEvidenceBackend([_call2("pass")]),
+        repair_backend=repair,
+        media_builder=FakeMediaBuilder(),
+        config=HarnessConfig(inspection_retries=1),
+    ).run(document, unit)
+
+    assert result.quality_status == "accepted"
+    assert result.repair_attempts == 1
+    assert result.evidence.evidence["resolved_motion_summary"] == (
+        "Recovered task-blind motion evidence."
+    )

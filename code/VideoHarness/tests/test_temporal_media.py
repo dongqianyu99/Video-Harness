@@ -17,6 +17,7 @@ from video_harness.temporal_media import (
     DetailRequest,
     EvidenceUnitFrames,
     TemporalMediaBuilder,
+    TemporalMediaError,
     VideoSource,
     boundary_image_payloads,
     decode_unit_frames,
@@ -96,6 +97,22 @@ def test_decode_unit_frames_fails_closed_on_short_decode() -> None:
             episode_end_frame=25,
             image_shape=(2, 3, 3),
             runner=runner,
+        )
+
+
+def test_temporal_media_timeout_is_bounded_and_recoverable() -> None:
+    def runner(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    sources = {view: VideoSource(Path(f"{view}.mp4"), 0.0) for view in VIEWS}
+    with pytest.raises(TemporalMediaError, match="timed out after 7s"):
+        decode_unit_frames(
+            sources,
+            episode_start_frame=0,
+            episode_end_frame=25,
+            image_shape=(2, 3, 3),
+            runner=runner,
+            timeout_s=7,
         )
 
 

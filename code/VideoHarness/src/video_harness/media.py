@@ -22,6 +22,7 @@ class FFmpegFrameLoader:
         ffmpeg: str = "ffmpeg",
         *,
         rgb_shape: tuple[int, int, int] = (480, 640, 3),
+        timeout_s: float = 120.0,
     ) -> None:
         if (
             len(rgb_shape) != 3
@@ -30,9 +31,25 @@ class FFmpegFrameLoader:
             or rgb_shape[2] != 3
         ):
             raise ValueError("rgb_shape must be a positive (height, width, 3) tuple")
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
         self.dataset_root = dataset_root
         self.ffmpeg = ffmpeg
         self.rgb_shape = rgb_shape
+        self.timeout_s = float(timeout_s)
+
+    def _run(self, command: list[str], *, context: str) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                timeout=self.timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise FrameDecodeError(
+                f"ffmpeg timed out after {self.timeout_s:g}s while {context}"
+            ) from exc
 
     def _resolve_request(
         self,
@@ -95,7 +112,7 @@ class FFmpegFrameLoader:
             "mjpeg",
             "pipe:1",
         ]
-        process = subprocess.run(command, check=False, capture_output=True)
+        process = self._run(command, context=f"decoding {video_path}")
         if process.returncode != 0 or not process.stdout.startswith(b"\xff\xd8"):
             stderr = process.stderr.decode("utf-8", errors="replace").strip()
             raise FrameDecodeError(
@@ -128,7 +145,7 @@ class FFmpegFrameLoader:
             "rgb24",
             "pipe:1",
         ]
-        process = subprocess.run(command, check=False, capture_output=True)
+        process = self._run(command, context=f"decoding RGB from {video_path}")
         expected_size = int(np.prod(self.rgb_shape))
         if process.returncode != 0 or len(process.stdout) != expected_size:
             stderr = process.stderr.decode("utf-8", errors="replace").strip()
@@ -200,7 +217,7 @@ class FFmpegFrameLoader:
             "rgb24",
             "pipe:1",
         ]
-        process = subprocess.run(command, check=False, capture_output=True)
+        process = self._run(command, context=f"batch decoding {video_path}")
         frame_size = int(np.prod(self.rgb_shape))
         expected_size = frame_size * len(unique_indices)
         if process.returncode != 0 or len(process.stdout) != expected_size:

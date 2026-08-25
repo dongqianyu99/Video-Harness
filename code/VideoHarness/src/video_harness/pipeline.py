@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import asdict, dataclass, replace
 from typing import Any
@@ -116,7 +117,9 @@ class EvidenceUnitPipeline:
         for attempt in range(self.config.inspection_retries + 1):
             try:
                 result = self.inspection_backend.inspect(request)
-            except AnnotationError as exc:
+            except ApiCallBudgetExceeded:
+                raise
+            except Exception as exc:  # noqa: BLE001 - Call 1 failure is data-local
                 last_error = exc
                 if attempt < self.config.inspection_retries:
                     continue
@@ -498,7 +501,11 @@ class EvidenceUnitPipeline:
         initial_evidence = last_result
         repair_outcome = RepairOutcome(None, None, None, 0, None)
         resolved_motion_summary: str | None = None
-        if last_result.evidence["causal_validation"]["status"] == "retry":
+        inspection_failed = inspection.provider == "harness-fallback"
+        if (
+            last_result.evidence["causal_validation"]["status"] == "retry"
+            or inspection_failed
+        ):
             conflict_reasons = [
                 reason
                 for reason in last_result.evidence["boundary_conflicts"].values()
@@ -506,10 +513,16 @@ class EvidenceUnitPipeline:
             ]
             issue_reason = " ".join(
                 [
+                    (
+                        "Call 1 failed after its retry budget; recover the motion "
+                        f"from full temporal evidence. Last error: {inspection_error}"
+                        if inspection_failed
+                        else ""
+                    ),
                     last_result.evidence["causal_validation"]["reason"],
                     *conflict_reasons,
                 ]
-            )
+            ).strip()
             repair_outcome = self._run_repair(
                 document=document,
                 unit=unit,
@@ -533,6 +546,21 @@ class EvidenceUnitPipeline:
                 resolved_motion_summary = repair_outcome.result.repair[
                     "resolved_motion_summary"
                 ]
+
+        if (
+            inspection_failed
+            and repair_outcome.evidence is None
+            and last_result.evidence["causal_validation"]["status"] == "pass"
+        ):
+            quarantined_call2 = copy.deepcopy(last_result.evidence)
+            quarantined_call2["causal_validation"] = {
+                "status": "retry",
+                "reason": (
+                    "Call 1 did not produce usable task-blind motion evidence and "
+                    "automatic temporal repair did not resolve it."
+                ),
+            }
+            last_result = replace(last_result, evidence=quarantined_call2)
 
         causal_status = last_result.evidence["causal_validation"]["status"]
         quality_status = "accepted" if causal_status == "pass" else "quarantined"

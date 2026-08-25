@@ -334,6 +334,8 @@ def _make_worker_context(
     inspection_backend, evidence_backend, repair_backend = make_backends(
         args.provider,
         args.model,
+        timeout_s=config.provider_timeout_s,
+        max_retries=config.provider_max_retries,
     )
     inspection_backend = TrackingBackend(inspection_backend, tracker)
     evidence_backend = TrackingBackend(evidence_backend, tracker)
@@ -342,7 +344,10 @@ def _make_worker_context(
         pipeline=EvidenceUnitPipeline(
             inspection_backend=inspection_backend,
             evidence_backend=evidence_backend,
-            media_builder=TemporalMediaBuilder(args.dataset_root),
+            media_builder=TemporalMediaBuilder(
+                args.dataset_root,
+                timeout_s=config.ffmpeg_timeout_s,
+            ),
             config=config,
             repair_backend=repair_backend,
         ),
@@ -550,6 +555,9 @@ def _annotate(args: argparse.Namespace) -> int:
         repair_max_attempts=getattr(args, "repair_max_attempts", 2),
         sequence_audit_max_attempts=getattr(args, "sequence_audit_max_attempts", 2),
         sequence_repair_rounds=getattr(args, "sequence_repair_rounds", 2),
+        provider_timeout_s=getattr(args, "provider_timeout_s", 300.0),
+        provider_max_retries=getattr(args, "provider_max_retries", 2),
+        ffmpeg_timeout_s=getattr(args, "ffmpeg_timeout_s", 120.0),
     )
     checkpoint_root = getattr(args, "checkpoint_root", None)
     if num_shards > 1 and checkpoint_root is None:
@@ -1092,6 +1100,9 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--debug", action="store_true")
     annotate.add_argument("--debug-root", type=Path)
     annotate.add_argument("--inspection-retries", type=int, default=1)
+    annotate.add_argument("--provider-timeout-s", type=float, default=300.0)
+    annotate.add_argument("--provider-max-retries", type=int, default=2)
+    annotate.add_argument("--ffmpeg-timeout-s", type=float, default=120.0)
     annotate.add_argument("--repair-max-attempts", type=int, default=2)
     annotate.add_argument("--sequence-audit-max-attempts", type=int, default=2)
     annotate.add_argument("--sequence-repair-rounds", type=int, default=2)
