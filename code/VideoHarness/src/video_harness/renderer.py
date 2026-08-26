@@ -38,7 +38,7 @@ def render_evidence_text(
         raise ValueError(f"Unknown renderer profile: {profile}")
     evidence = validate_evidence_record(record)
     interpretation = evidence["unit_interpretation"]
-    motion_summary = evidence["resolved_motion_summary"] or evidence["motion_summary"]
+    motion_summary = evidence["motion_summary"]
     if profile == "brief":
         return interpretation["action_description"]
     if profile == "state-change":

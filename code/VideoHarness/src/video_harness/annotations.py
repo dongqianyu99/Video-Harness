@@ -40,6 +40,11 @@ from .prompts import (
 )
 from .protocol import ImagePayload
 
+INSPECTION_MAX_OUTPUT_TOKENS = 768
+EVIDENCE_MAX_OUTPUT_TOKENS = 1200
+REPAIR_MAX_OUTPUT_TOKENS = 2048
+SEQUENCE_AUDIT_MAX_OUTPUT_TOKENS = 1024
+
 
 class AnnotationError(RuntimeError):
     """Raised when a provider response cannot become trusted structured output."""
@@ -276,7 +281,6 @@ class MockRepairBackend:
             {
                 "evidence_sufficient": False,
                 "reason": request.issue_reason,
-                "resolved_motion_summary": None,
                 "resolved_call2": None,
             },
             self.provider,
@@ -378,7 +382,6 @@ def _validate_repair_result(value: Any) -> dict[str, Any]:
     required = {
         "evidence_sufficient",
         "reason",
-        "resolved_motion_summary",
         "resolved_call2",
     }
     if not isinstance(value, dict) or set(value) != required:
@@ -389,17 +392,10 @@ def _validate_repair_result(value: Any) -> dict[str, Any]:
         raise AnnotationError("repair evidence_sufficient must be boolean")
     if not isinstance(reason, str) or not reason.strip():
         raise AnnotationError("repair reason must be non-empty")
-    motion = value["resolved_motion_summary"]
     call2 = value["resolved_call2"]
     if sufficient:
-        if (
-            not isinstance(motion, str)
-            or not motion.strip()
-            or not isinstance(call2, dict)
-        ):
-            raise AnnotationError(
-                "sufficient repair requires resolved motion and Call 2 output"
-            )
+        if not isinstance(call2, dict):
+            raise AnnotationError("sufficient repair requires resolved Call 2 output")
         try:
             normalized_call2 = validate_call2_record(call2)
         except EvidenceValidationError as exc:
@@ -411,15 +407,13 @@ def _validate_repair_result(value: Any) -> dict[str, Any]:
         return {
             "evidence_sufficient": True,
             "reason": reason.strip(),
-            "resolved_motion_summary": motion.strip(),
             "resolved_call2": normalized_call2,
         }
-    if motion is not None or call2 is not None:
-        raise AnnotationError("insufficient repair must return null resolved fields")
+    if call2 is not None:
+        raise AnnotationError("insufficient repair must return null resolved_call2")
     return {
         "evidence_sufficient": False,
         "reason": reason.strip(),
-        "resolved_motion_summary": None,
         "resolved_call2": None,
     }
 
@@ -461,7 +455,11 @@ def _openai_tool_call(
     description: str,
     schema: dict[str, Any],
     role: str,
+    max_output_tokens: int,
 ) -> tuple[dict[str, Any], ProviderTrace]:
+    model_options = (
+        {"reasoning": {"effort": "none"}} if model.startswith("deepseek-") else {}
+    )
     response = client.responses.create(
         model=model,
         instructions=instructions,
@@ -476,6 +474,8 @@ def _openai_tool_call(
             }
         ],
         tool_choice={"type": "function", "name": tool_name},
+        max_output_tokens=max_output_tokens,
+        **model_options,
     )
     for item in response.output:
         if (
@@ -575,6 +575,7 @@ class OpenAIBackend:
             description="Locate an optional cam_high detail region.",
             schema=INSPECTION_SCHEMA,
             role="inspection",
+            max_output_tokens=INSPECTION_MAX_OUTPUT_TOKENS,
         )
         try:
             inspection = validate_inspection_record(raw)
@@ -592,6 +593,7 @@ class OpenAIBackend:
     def annotate(self, request: EvidenceRequest) -> EvidenceResult:
         images = _evidence_images(request)
         content = [
+            *_openai_image_content(images),
             {
                 "type": "input_text",
                 "text": call2_context_prompt(
@@ -600,7 +602,6 @@ class OpenAIBackend:
                     after_boundary_observation=request.after_boundary_observation,
                 ),
             },
-            *_openai_image_content(images),
         ]
         content.append(
             {
@@ -630,6 +631,7 @@ class OpenAIBackend:
             description="Compile one strict Boundary transition record.",
             schema=EVIDENCE_SCHEMA,
             role="evidence",
+            max_output_tokens=EVIDENCE_MAX_OUTPUT_TOKENS,
         )
         try:
             evidence = validate_call2_record(raw)
@@ -669,6 +671,7 @@ class OpenAIBackend:
             description="Resolve one transition inconsistency.",
             schema=REPAIR_SCHEMA,
             role="repair",
+            max_output_tokens=REPAIR_MAX_OUTPUT_TOKENS,
         )
         return RepairResult(
             _validate_repair_result(raw),
@@ -695,6 +698,7 @@ class OpenAIBackend:
             description="List unresolved sequence issues.",
             schema=SEQUENCE_AUDIT_SCHEMA,
             role="sequence audit",
+            max_output_tokens=SEQUENCE_AUDIT_MAX_OUTPUT_TOKENS,
         )
         return SequenceAuditResult(
             _validate_sequence_audit(raw),
@@ -749,7 +753,7 @@ class AnthropicBackend:
         raw, trace = _anthropic_tool_call(
             client=self.client,
             model=self.model,
-            max_tokens=1024,
+            max_tokens=INSPECTION_MAX_OUTPUT_TOKENS,
             system=INSPECTION_SYSTEM_PROMPT,
             content=content,
             tool_name=INSPECTION_TOOL_NAME,
@@ -773,6 +777,7 @@ class AnthropicBackend:
     def annotate(self, request: EvidenceRequest) -> EvidenceResult:
         images = _evidence_images(request)
         content: list[dict[str, Any]] = [
+            *_anthropic_image_content(images),
             {
                 "type": "text",
                 "text": call2_context_prompt(
@@ -781,7 +786,6 @@ class AnthropicBackend:
                     after_boundary_observation=request.after_boundary_observation,
                 ),
             },
-            *_anthropic_image_content(images),
         ]
         content.append(
             {
@@ -805,7 +809,7 @@ class AnthropicBackend:
         raw, trace = _anthropic_tool_call(
             client=self.client,
             model=self.model,
-            max_tokens=1536,
+            max_tokens=EVIDENCE_MAX_OUTPUT_TOKENS,
             system=SYSTEM_PROMPT,
             content=content,
             tool_name=TOOL_NAME,
@@ -845,7 +849,7 @@ class AnthropicBackend:
         raw, trace = _anthropic_tool_call(
             client=self.client,
             model=self.model,
-            max_tokens=2048,
+            max_tokens=REPAIR_MAX_OUTPUT_TOKENS,
             system=REPAIR_SYSTEM_PROMPT,
             content=content,
             tool_name=REPAIR_TOOL_NAME,
@@ -864,7 +868,7 @@ class AnthropicBackend:
         raw, trace = _anthropic_tool_call(
             client=self.client,
             model=self.model,
-            max_tokens=1024,
+            max_tokens=SEQUENCE_AUDIT_MAX_OUTPUT_TOKENS,
             system=SEQUENCE_AUDIT_SYSTEM_PROMPT,
             content=[
                 {

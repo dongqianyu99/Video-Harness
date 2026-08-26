@@ -5,7 +5,7 @@ from typing import Any
 
 from .camera_contract import CAMERA_VIEWS
 
-EVIDENCE_SCHEMA_VERSION = "video-harness.evidence"
+EVIDENCE_SCHEMA_VERSION = "video-harness.evidence.v3"
 INSPECTION_SCHEMA_VERSION = "video-harness.inspection"
 BOUNDARY_STATE_SCHEMA_VERSION = "video-harness.boundary-state"
 
@@ -185,6 +185,7 @@ def validate_call2_record(value: Any) -> dict[str, Any]:
         value,
         "call2",
         {
+            "motion_summary",
             "before_boundary_observation",
             "after_boundary_observation",
             "boundary_conflicts",
@@ -211,6 +212,7 @@ def validate_call2_record(value: Any) -> dict[str, Any]:
     )
     transition = _normalize_transition_fields(record, "call2")
     return {
+        "motion_summary": _text(record["motion_summary"], "call2.motion_summary"),
         "before_boundary_observation": before_boundary,
         "after_boundary_observation": after_boundary,
         "boundary_conflicts": conflicts,
@@ -271,11 +273,9 @@ def _normalize_transition_fields(
 
 
 def compose_evidence_record(
-    motion_summary: str,
     call2_record: Any,
     *,
     quality_status: str,
-    resolved_motion_summary: str | None = None,
 ) -> dict[str, Any]:
     call2 = validate_call2_record(copy.deepcopy(call2_record))
     status = _enum(quality_status, "quality_status", QUALITY_STATUSES)
@@ -285,12 +285,7 @@ def compose_evidence_record(
             "quality_status must be accepted exactly when causal_validation passes"
         )
     return {
-        "motion_summary": _text(motion_summary, "motion_summary"),
-        "resolved_motion_summary": (
-            None
-            if resolved_motion_summary is None
-            else _text(resolved_motion_summary, "resolved_motion_summary")
-        ),
+        "motion_summary": call2["motion_summary"],
         "detail_observation": call2["detail_observation"],
         "boundary_conflicts": call2["boundary_conflicts"],
         "unit_interpretation": call2["unit_interpretation"],
@@ -305,7 +300,6 @@ def validate_evidence_record(value: Any) -> dict[str, Any]:
         "evidence",
         {
             "motion_summary",
-            "resolved_motion_summary",
             "boundary_conflicts",
             "detail_observation",
             "unit_interpretation",
@@ -326,14 +320,6 @@ def validate_evidence_record(value: Any) -> dict[str, Any]:
         )
     return {
         "motion_summary": _text(record["motion_summary"], "motion_summary"),
-        "resolved_motion_summary": (
-            None
-            if record["resolved_motion_summary"] is None
-            else _text(
-                record["resolved_motion_summary"],
-                "resolved_motion_summary",
-            )
-        ),
         "boundary_conflicts": conflicts,
         **transition,
         "quality_status": status,
@@ -347,6 +333,7 @@ def mock_call2_record(
 ) -> dict[str, Any]:
     unavailable = "The mock backend does not interpret this Boundary State."
     return {
+        "motion_summary": "The mock backend does not refine the demonstrated motion.",
         "before_boundary_observation": (
             {view: unavailable for view in CAMERA_VIEWS}
             if include_before_boundary
@@ -361,7 +348,7 @@ def mock_call2_record(
         "detail_observation": None,
         "unit_interpretation": {
             "action_description": "The mock backend does not infer the demonstrated action.",
-            "task_role": "The mock backend does not infer this Evidence Unit's task role.",
+            "task_role": "The mock backend does not infer what this Evidence Unit contributes to the task.",
         },
         "causal_validation": {
             "status": "retry",
@@ -372,7 +359,6 @@ def mock_call2_record(
 
 def mock_evidence_record() -> dict[str, Any]:
     return compose_evidence_record(
-        "The mock backend does not summarize the demonstrated motion.",
         mock_call2_record(),
         quality_status="quarantined",
     )

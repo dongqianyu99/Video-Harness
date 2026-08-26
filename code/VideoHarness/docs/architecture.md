@@ -148,14 +148,24 @@ subprocesses and provider clients have explicit configurable timeouts.
   Summary as fallible continuity context; current images remain authoritative;
 - every Call 1 result locates one meaningful interaction window, whether or not
   a detail crop is requested;
-- Call 1 Motion Summary is preserved and passed to Call 2 as task-blind temporal
-  evidence that Call 2 may qualify or correct;
+- Call 1 Motion Summary is passed to Call 2 as task-blind intermediate evidence;
+  it is one concise sentence and does not repeat the static scene;
+- Call 2 revises that draft using task context, high-resolution Boundary images,
+  accepted Boundary descriptions, and optional detail, and only the revised
+  Motion Summary is stored in canonical evidence;
 - Call 2 receives no overview or keyframe sheets;
+- Call 2 receives Boundary/detail images before the fallible Call 1 Motion
+  Summary and accepted Boundary text, with Task Instruction last;
 - Call 2 sees all six synchronized Boundary images but emits a description only
   for a Boundary that has no accepted canonical description;
 - a material conflict with an accepted Boundary is recorded and enters Targeted
   Reprocessing without creating a second canonical description;
 - Call 2 may use the optional `cam_high` detail sheet;
+- Call 2 emits one sentence per new Boundary view, one revised Motion Summary,
+  one Action Description, one Task Role, and one causal-reason sentence;
+- grasp, hold, release, and contact require direct supporting evidence from the
+  corresponding wrist camera, and every key Atomic Action Claim must map to an
+  appropriate visual view before causal validation can pass;
 - normal Call 2 runs once by default; an inconsistency enters bounded Targeted
   Reprocessing with full temporal evidence;
 - every complete document receives a Sequence Audit and bounded issue-directed

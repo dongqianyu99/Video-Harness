@@ -28,14 +28,13 @@ def test_call2_record_requires_three_descriptions_per_boundary(call2_record) -> 
         validate_call2_record(call2_record)
 
 
-def test_canonical_evidence_composes_call1_and_call2(call2_record) -> None:
+def test_canonical_evidence_uses_call2_motion_summary(call2_record) -> None:
     evidence = compose_evidence_record(
-        "The right gripper approaches the object and closes around it.",
         call2_record,
         quality_status="accepted",
     )
-    assert EVIDENCE_SCHEMA_VERSION == "video-harness.evidence"
-    assert evidence["motion_summary"].startswith("The right gripper")
+    assert EVIDENCE_SCHEMA_VERSION == "video-harness.evidence.v3"
+    assert evidence["motion_summary"] == call2_record["motion_summary"]
     assert evidence["quality_status"] == "accepted"
     assert validate_evidence_record(copy.deepcopy(evidence)) == evidence
     assert evidence_is_trainable(evidence)
@@ -74,17 +73,13 @@ def test_shared_boundary_is_represented_once_in_adjacent_units() -> None:
 
 def test_quality_status_must_match_causal_validation(call2_record) -> None:
     with pytest.raises(EvidenceValidationError, match="accepted exactly"):
-        compose_evidence_record(
-            "The robot moves.", call2_record, quality_status="quarantined"
-        )
+        compose_evidence_record(call2_record, quality_status="quarantined")
     call2_record["causal_validation"]["status"] = "retry"
-    evidence = compose_evidence_record(
-        "The robot moves.", call2_record, quality_status="quarantined"
-    )
+    evidence = compose_evidence_record(call2_record, quality_status="quarantined")
     assert not evidence_is_trainable(evidence)
 
 
-def test_inspection_motion_summary_has_no_word_or_sentence_limit() -> None:
+def test_inspection_sentence_contract_is_prompt_guidance_not_parser_logic() -> None:
     record = mock_inspection_record()
     record["motion_summary"] = (
         "The right arm approaches the object. It pauses near the object; contact is "

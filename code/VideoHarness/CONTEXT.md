@@ -32,9 +32,25 @@ _Avoid_: video summary
 A higher-resolution chronological sheet of sparsely sampled frames from one Evidence Unit. Its samples do not define Semantic Stages.
 _Avoid_: stage sheet, stage view
 
-**Motion Summary**:
-The task-blind temporal account produced from Overview Sheets and Keyframe Sheets before task interpretation.
-_Avoid_: action plan, task progress
+**Call 1 Motion Summary**:
+A single concise, task-blind draft sentence describing the visible motion, interaction, and final persistent state from Overview Sheets and Keyframe Sheets. It is intermediate evidence and is not stored as the canonical Motion Summary.
+_Avoid_: canonical conclusion, action plan, task progress
+
+**Canonical Motion Summary**:
+A single concise sentence returned by Call 2 after revising the Call 1 draft with the task context, high-resolution Boundary States, accepted Boundary descriptions, and optional detail evidence. This is the Motion Summary stored in Canonical Evidence.
+_Avoid_: raw Call 1 output, Task Role
+
+**Action Description**:
+A single task-conditioned sentence stating what the robot physically does during one Evidence Unit, grounded in the Canonical Motion Summary, Boundary States, and optional detail evidence.
+_Avoid_: plan, intent, Task Role
+
+**Task Role**:
+A single concise sentence stating only what the Action Description contributes to the task without repeating the physical action or overstating progress.
+_Avoid_: Description, Action Description, task success
+
+**Atomic Action Claim**:
+A key physical predicate in a Motion Summary or Action Description that must map to direct visual evidence from an appropriate camera view. Grasp, hold, release, and contact claims require supporting evidence from the corresponding wrist camera.
+_Avoid_: plausible but unsupported substep, task-prior completion
 
 **Canonical Evidence**:
 The validated evidence record committed to an Evidence Unit, distinct from provider attempts and debug artifacts.

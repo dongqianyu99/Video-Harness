@@ -11,6 +11,7 @@ from .evidence import (
     validate_boundary_state_record,
     validate_evidence_record,
 )
+from .hdf5_source import HDF5_SOURCE_DATASET, HDF5_VIEW_KEYS
 from .robodojo import EpisodeRecord
 
 BEHAVIOR_DOCUMENT_SCHEMA_VERSION = "video-harness.behavior-document"
@@ -83,7 +84,52 @@ def plan_document(
     fps: int = 25,
     sample_hz: float = 1.0,
 ) -> dict[str, Any]:
-    boundaries = boundary_frames(record.length, fps, sample_hz)
+    head_video = next(
+        video for video in record.videos if video.key == "observation.images.cam_high"
+    )
+    videos = {video.key: video for video in record.videos}
+    if set(videos) != set(_VIEW_ALIASES):
+        raise ValueError(
+            "RoboDojo document source requires exactly three camera videos"
+        )
+    view_sources = {
+        alias: {
+            "camera_key": camera_key,
+            "video_path": videos[camera_key].path,
+            "video_from_timestamp": videos[camera_key].from_timestamp,
+        }
+        for camera_key, alias in _VIEW_ALIASES.items()
+    }
+    return plan_document_from_source(
+        build_id=build_id,
+        document_id=f"robodojo/episode-{record.episode_index:07d}",
+        source={
+            "dataset": "RoboDojo_lerobot_v30_video",
+            "episode_index": record.episode_index,
+            "episode_length": record.length,
+            "task_index": record.task_index,
+            "camera_key": head_video.key,
+            "video_path": head_video.path,
+            "video_from_timestamp": head_video.from_timestamp,
+            "views": view_sources,
+            "fps": fps,
+        },
+        task_instruction=record.task_instruction,
+        sample_hz=sample_hz,
+    )
+
+
+def plan_document_from_source(
+    *,
+    build_id: str,
+    document_id: str,
+    source: dict[str, Any],
+    task_instruction: str,
+    sample_hz: float = 1.0,
+) -> dict[str, Any]:
+    length = int(source["episode_length"])
+    fps = int(source["fps"])
+    boundaries = boundary_frames(length, fps, sample_hz)
     boundary_states = [
         BoundaryState(
             boundary_id=f"b{order:04d}",
@@ -116,41 +162,15 @@ def plan_document(
         )
         for order in range(len(boundaries) - 1)
     ]
-    head_video = next(
-        video for video in record.videos if video.key == "observation.images.cam_high"
-    )
-    videos = {video.key: video for video in record.videos}
-    if set(videos) != set(_VIEW_ALIASES):
-        raise ValueError(
-            "RoboDojo document source requires exactly three camera videos"
-        )
-    view_sources = {
-        alias: {
-            "camera_key": camera_key,
-            "video_path": videos[camera_key].path,
-            "video_from_timestamp": videos[camera_key].from_timestamp,
-        }
-        for camera_key, alias in _VIEW_ALIASES.items()
-    }
     return {
         "schema_version": BEHAVIOR_DOCUMENT_SCHEMA_VERSION,
         "build_id": build_id,
         "status": "planned",
         "quality_status": "pending",
         "quality_provenance": None,
-        "document_id": f"robodojo/episode-{record.episode_index:07d}",
-        "source": {
-            "dataset": "RoboDojo_lerobot_v30_video",
-            "episode_index": record.episode_index,
-            "episode_length": record.length,
-            "task_index": record.task_index,
-            "camera_key": head_video.key,
-            "video_path": head_video.path,
-            "video_from_timestamp": head_video.from_timestamp,
-            "views": view_sources,
-            "fps": fps,
-        },
-        "task_instruction": record.task_instruction,
+        "document_id": document_id,
+        "source": source,
+        "task_instruction": task_instruction,
         "sampling": {
             "kind": "uniform_evidence_unit",
             "sample_hz": sample_hz,
@@ -211,21 +231,43 @@ def validate_document(document: Any) -> dict[str, Any]:
         if not isinstance(value[field], str) or not value[field].strip():
             raise ValueError(f"document.{field} must be a non-empty string")
 
-    source = value["source"]
-    required_source_keys = {
-        "dataset",
-        "episode_index",
-        "episode_length",
-        "task_index",
-        "camera_key",
-        "video_path",
-        "video_from_timestamp",
-        "views",
-        "fps",
-    }
-    source = _exact_keys(source, "document.source", required_source_keys)
-    if source["dataset"] != "RoboDojo_lerobot_v30_video":
-        raise ValueError(f"unsupported document source dataset {source['dataset']!r}")
+    raw_source = value["source"]
+    if not isinstance(raw_source, dict):
+        raise TypeError("document.source must be an object")
+    dataset = raw_source.get("dataset")
+    if dataset == "RoboDojo_lerobot_v30_video":
+        source = _exact_keys(
+            raw_source,
+            "document.source",
+            {
+                "dataset",
+                "episode_index",
+                "episode_length",
+                "task_index",
+                "camera_key",
+                "video_path",
+                "video_from_timestamp",
+                "views",
+                "fps",
+            },
+        )
+    elif dataset == HDF5_SOURCE_DATASET:
+        source = _exact_keys(
+            raw_source,
+            "document.source",
+            {
+                "dataset",
+                "episode_index",
+                "episode_length",
+                "task_index",
+                "hdf5_path",
+                "views",
+                "fps",
+            },
+        )
+    else:
+        raise ValueError(f"unsupported document source dataset {dataset!r}")
+
     for field in ("episode_index", "task_index"):
         if (
             not isinstance(source[field], int)
@@ -239,46 +281,70 @@ def validate_document(document: Any) -> dict[str, Any]:
         raise ValueError("document.source.episode_length must be an integer >= 2")
     if not isinstance(fps, int) or isinstance(fps, bool) or fps <= 0:
         raise ValueError("document.source.fps must be a positive integer")
-    if source["camera_key"] != "observation.images.cam_high":
-        raise ValueError("behavior documents must use observation.images.cam_high")
-    video_path = source["video_path"]
-    if not isinstance(video_path, str) or not video_path:
-        raise ValueError("document.source.video_path must be a non-empty relative path")
-    pure_video_path = PurePosixPath(video_path)
-    if pure_video_path.is_absolute() or ".." in pure_video_path.parts:
-        raise ValueError("document.source.video_path must stay within the dataset root")
-    if (
-        not isinstance(source["video_from_timestamp"], (int, float))
-        or source["video_from_timestamp"] < 0
-    ):
-        raise ValueError("document.source.video_from_timestamp must be non-negative")
     views = _exact_keys(
         source["views"], "document.source.views", set(_VIEW_ALIASES.values())
     )
-    for alias, camera_key in ((alias, key) for key, alias in _VIEW_ALIASES.items()):
-        item = _exact_keys(
-            views[alias],
-            f"document.source.views.{alias}",
-            {"camera_key", "video_path", "video_from_timestamp"},
-        )
-        if item["camera_key"] != camera_key:
-            raise ValueError(f"document source view {alias} camera key mismatch")
-        path = item["video_path"]
-        if not isinstance(path, str) or not path:
-            raise ValueError(f"document source view {alias} video_path is invalid")
-        pure_path = PurePosixPath(path)
+    if dataset == HDF5_SOURCE_DATASET:
+        hdf5_path = source["hdf5_path"]
+        if not isinstance(hdf5_path, str) or not hdf5_path:
+            raise ValueError("document.source.hdf5_path must be a relative path")
+        pure_path = PurePosixPath(hdf5_path)
         if pure_path.is_absolute() or ".." in pure_path.parts:
-            raise ValueError(f"document source view {alias} path is unsafe")
+            raise ValueError(
+                "document.source.hdf5_path must stay within the dataset root"
+            )
+        for alias, expected_key in HDF5_VIEW_KEYS.items():
+            item = _exact_keys(
+                views[alias], f"document.source.views.{alias}", {"dataset_key"}
+            )
+            if item["dataset_key"] != expected_key:
+                raise ValueError(f"document source view {alias} dataset key mismatch")
+    else:
+        if source["camera_key"] != "observation.images.cam_high":
+            raise ValueError("behavior documents must use observation.images.cam_high")
+        video_path = source["video_path"]
+        if not isinstance(video_path, str) or not video_path:
+            raise ValueError(
+                "document.source.video_path must be a non-empty relative path"
+            )
+        pure_video_path = PurePosixPath(video_path)
+        if pure_video_path.is_absolute() or ".." in pure_video_path.parts:
+            raise ValueError(
+                "document.source.video_path must stay within the dataset root"
+            )
         if (
-            not isinstance(item["video_from_timestamp"], (int, float))
-            or isinstance(item["video_from_timestamp"], bool)
-            or item["video_from_timestamp"] < 0
+            not isinstance(source["video_from_timestamp"], (int, float))
+            or source["video_from_timestamp"] < 0
         ):
-            raise ValueError(f"document source view {alias} timestamp is invalid")
-    if views["cam_high"]["video_path"] != source["video_path"]:
-        raise ValueError("primary cam_high path does not match multiview source")
-    if views["cam_high"]["video_from_timestamp"] != source["video_from_timestamp"]:
-        raise ValueError("primary cam_high timestamp does not match multiview source")
+            raise ValueError(
+                "document.source.video_from_timestamp must be non-negative"
+            )
+        for alias, camera_key in ((alias, key) for key, alias in _VIEW_ALIASES.items()):
+            item = _exact_keys(
+                views[alias],
+                f"document.source.views.{alias}",
+                {"camera_key", "video_path", "video_from_timestamp"},
+            )
+            if item["camera_key"] != camera_key:
+                raise ValueError(f"document source view {alias} camera key mismatch")
+            path = item["video_path"]
+            if not isinstance(path, str) or not path:
+                raise ValueError(f"document source view {alias} video_path is invalid")
+            pure_path = PurePosixPath(path)
+            if pure_path.is_absolute() or ".." in pure_path.parts:
+                raise ValueError(f"document source view {alias} path is unsafe")
+            if (
+                not isinstance(item["video_from_timestamp"], (int, float))
+                or isinstance(item["video_from_timestamp"], bool)
+                or item["video_from_timestamp"] < 0
+            ):
+                raise ValueError(f"document source view {alias} timestamp is invalid")
+        if views["cam_high"]["video_path"] != source["video_path"]:
+            raise ValueError("primary cam_high path does not match multiview source")
+        if views["cam_high"]["video_from_timestamp"] != source["video_from_timestamp"]:
+            raise ValueError(
+                "primary cam_high timestamp does not match multiview source"
+            )
 
     sampling = _exact_keys(
         value["sampling"],
@@ -615,4 +681,6 @@ def unit_boundary_states(
 
 def media_timestamp(document: dict[str, Any], source_frame: int) -> float:
     source = document["source"]
-    return float(source["video_from_timestamp"]) + source_frame / int(source["fps"])
+    return float(source.get("video_from_timestamp", 0.0)) + source_frame / int(
+        source["fps"]
+    )

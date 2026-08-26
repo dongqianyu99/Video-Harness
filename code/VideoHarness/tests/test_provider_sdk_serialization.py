@@ -86,6 +86,7 @@ def test_openai_sdk_serializes_inspection_images_without_task() -> None:
         OpenAIBackend("test-model", client=client).inspect(_inspection_request())
     body = bodies[0]
     assert body["tools"][0]["strict"] is True
+    assert body["max_output_tokens"] == 768
     assert (
         sum(item["type"] == "input_image" for item in body["input"][0]["content"]) == 6
     )
@@ -116,10 +117,52 @@ def test_openai_sdk_serializes_evidence_images_and_task_last() -> None:
     )
     with pytest.raises(openai.BadRequestError):
         OpenAIBackend("test-model", client=client).annotate(_evidence_request())
+    assert bodies[0]["max_output_tokens"] == 1200
     content = bodies[0]["input"][0]["content"]
-    assert sum(item["type"] == "input_image" for item in content) == 6
-    assert "motion summary" in content[0]["text"].lower()
+    image_positions = [
+        index for index, item in enumerate(content) if item["type"] == "input_image"
+    ]
+    motion_position = next(
+        index
+        for index, item in enumerate(content)
+        if item["type"] == "input_text" and "motion summary" in item["text"].lower()
+    )
+    assert len(image_positions) == 6
+    assert content[0]["text"].startswith("EVIDENCE=BOUNDARY_BEFORE")
+    assert max(image_positions) < motion_position < len(content) - 1
     assert "Task instruction" in content[-1]["text"]
+
+
+def test_deepseek_responses_disable_thinking_for_forced_tool_choice() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "intentional local mock",
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": None,
+                }
+            },
+        )
+
+    client = openai.OpenAI(
+        api_key="local-test-key",
+        base_url="https://api.deepseek.com",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(openai.BadRequestError):
+        OpenAIBackend("deepseek-v4-flash-vision-exp", client=client).inspect(
+            _inspection_request()
+        )
+
+    assert bodies[0]["reasoning"] == {"effort": "none"}
+    assert bodies[0]["max_output_tokens"] == 768
+    assert bodies[0]["tool_choice"]["name"] == "locate_temporal_detail"
 
 
 def test_anthropic_sdk_serializes_multiview_evidence() -> None:
@@ -147,6 +190,17 @@ def test_anthropic_sdk_serializes_multiview_evidence() -> None:
         AnthropicBackend("test-model", client=client).annotate(_evidence_request())
     body = bodies[0]
     assert body["tools"][0]["strict"] is True
-    assert sum(item["type"] == "image" for item in body["messages"][0]["content"]) == 6
-    assert "motion summary" in body["messages"][0]["content"][0]["text"].lower()
-    assert "Task instruction" in body["messages"][0]["content"][-1]["text"]
+    assert body["max_tokens"] == 1200
+    content = body["messages"][0]["content"]
+    image_positions = [
+        index for index, item in enumerate(content) if item["type"] == "image"
+    ]
+    motion_position = next(
+        index
+        for index, item in enumerate(content)
+        if item["type"] == "text" and "motion summary" in item["text"].lower()
+    )
+    assert len(image_positions) == 6
+    assert content[0]["text"].startswith("EVIDENCE=BOUNDARY_BEFORE")
+    assert max(image_positions) < motion_position < len(content) - 1
+    assert "Task instruction" in content[-1]["text"]

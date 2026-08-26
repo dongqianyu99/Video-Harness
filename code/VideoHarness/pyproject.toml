@@ -8,6 +8,7 @@ version = "0.3.0"
 description = "Evidence-grounded behavior-document compiler for the Video Harness project"
 requires-python = ">=3.11"
 dependencies = [
+  "h5py>=3.11,<4",
   "huggingface-hub>=1,<2",
   "numpy>=1.22,<3",
   "pillow>=11,<13",

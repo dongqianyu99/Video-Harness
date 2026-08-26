@@ -75,6 +75,7 @@ def _call2(
         include_before_boundary=include_before_boundary,
         include_after_boundary=include_after_boundary,
     )
+    record["motion_summary"] = "The revised motion is grounded in Call 2 evidence."
     record["detail_observation"] = (
         "The detail sheet shows the gripper closing near the object."
         if detail
@@ -82,7 +83,7 @@ def _call2(
     )
     record["unit_interpretation"] = {
         "action_description": action,
-        "task_role": "This Evidence Unit positions the gripper for the next task step.",
+        "task_role": "This Evidence Unit prepares the next task interaction.",
     }
     record["causal_validation"] = {
         "status": status,
@@ -241,7 +242,8 @@ class FakeRepairBackend:
 def test_pipeline_passes_call1_motion_boundaries_and_optional_detail_to_call2() -> None:
     document, unit = _document_and_unit()
     media = FakeMediaBuilder()
-    evidence = FakeEvidenceBackend([_call2("pass", detail=True)])
+    revised_call2 = _call2("pass", detail=True)
+    evidence = FakeEvidenceBackend([revised_call2])
     result = EvidenceUnitPipeline(
         inspection_backend=FakeInspectionBackend(needs_detail=True),
         evidence_backend=evidence,
@@ -258,7 +260,7 @@ def test_pipeline_passes_call1_motion_boundaries_and_optional_detail_to_call2() 
     assert not hasattr(request, "overviews")
     assert not hasattr(request, "keyframe_sheets")
     assert result.quality_status == "accepted"
-    assert result.evidence.evidence["motion_summary"] == request.motion_summary
+    assert result.evidence.evidence["motion_summary"] == revised_call2["motion_summary"]
     assert result.before_boundary_record is not None
     assert result.after_boundary_record is not None
 
@@ -415,12 +417,12 @@ def test_retry_enters_targeted_repair_and_commits_resolved_transition() -> None:
         "pass",
         action="The repaired transition is supported by the temporal evidence.",
     )
+    resolved["motion_summary"] = "The corrected qualitative motion."
     repair = FakeRepairBackend(
         [
             {
                 "evidence_sufficient": True,
                 "reason": "The full temporal sheets resolve the inconsistency.",
-                "resolved_motion_summary": "The corrected qualitative motion.",
                 "resolved_call2": resolved,
             }
         ]
@@ -436,8 +438,9 @@ def test_retry_enters_targeted_repair_and_commits_resolved_transition() -> None:
     assert result.quality_status == "accepted"
     assert result.repair_attempts == 1
     assert result.repair is not None
-    assert result.evidence.evidence["resolved_motion_summary"] == (
-        "The corrected qualitative motion."
+    assert (
+        result.evidence.evidence["motion_summary"]
+        == "The corrected qualitative motion."
     )
     assert result.evidence.evidence["unit_interpretation"][
         "action_description"
@@ -466,7 +469,6 @@ def test_unresolved_targeted_repairs_quarantine_transition() -> None:
             {
                 "evidence_sufficient": False,
                 "reason": "Evidence remains insufficient.",
-                "resolved_motion_summary": None,
                 "resolved_call2": None,
             }
             for _ in range(2)
@@ -495,7 +497,6 @@ def test_debug_mode_saves_call2_repair_and_final_selection(tmp_path: Path) -> No
             {
                 "evidence_sufficient": True,
                 "reason": "The temporal evidence resolves the issue.",
-                "resolved_motion_summary": "Resolved motion.",
                 "resolved_call2": resolved,
             }
         ]
@@ -567,12 +568,12 @@ def test_inspection_failure_can_be_recovered_from_full_temporal_evidence() -> No
         "pass",
         action="The full temporal evidence resolves the demonstrated action.",
     )
+    resolved["motion_summary"] = "Recovered task-conditioned motion evidence."
     repair = FakeRepairBackend(
         [
             {
                 "evidence_sufficient": True,
                 "reason": "The temporal sheets recover the missing motion evidence.",
-                "resolved_motion_summary": "Recovered task-blind motion evidence.",
                 "resolved_call2": resolved,
             }
         ]
@@ -587,6 +588,6 @@ def test_inspection_failure_can_be_recovered_from_full_temporal_evidence() -> No
 
     assert result.quality_status == "accepted"
     assert result.repair_attempts == 1
-    assert result.evidence.evidence["resolved_motion_summary"] == (
-        "Recovered task-blind motion evidence."
+    assert result.evidence.evidence["motion_summary"] == (
+        "Recovered task-conditioned motion evidence."
     )

@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .camera_contract import CAMERA_VIEWS, image_label
+from .hdf5_source import HDF5_SOURCE_DATASET, decode_hdf5_frames
 from .media import FrameDecodeError
 from .protocol import ImagePayload
 from .sampling import unit_boundary_states
@@ -602,17 +603,36 @@ class TemporalMediaBuilder:
         before_boundary, after_boundary = unit_boundary_states(document, unit)
         start = int(before_boundary["frame"]["episode_frame_index"])
         end = int(after_boundary["frame"]["episode_frame_index"])
-        fps = int(document["source"]["fps"])
-        frames = decode_unit_frames(
-            self._sources(document),
-            episode_start_frame=start,
-            episode_end_frame=end,
-            fps=fps,
-            image_shape=self.image_shape,
-            ffmpeg=self.ffmpeg,
-            runner=self.runner,
-            timeout_s=self.timeout_s,
-        )
+        source = document["source"]
+        fps = int(source["fps"])
+        if source["dataset"] == HDF5_SOURCE_DATASET:
+            relative = Path(str(source["hdf5_path"]))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"unsafe HDF5 source path: {relative}")
+            arrays = decode_hdf5_frames(
+                self.dataset_root / relative,
+                {view: str(source["views"][view]["dataset_key"]) for view in VIEWS},
+                start=start,
+                end=end,
+                fps=fps,
+            )
+            frames = EvidenceUnitFrames(
+                frames=arrays,
+                fps=fps,
+                episode_start_frame=start,
+                episode_end_frame=end,
+            )
+        else:
+            frames = decode_unit_frames(
+                self._sources(document),
+                episode_start_frame=start,
+                episode_end_frame=end,
+                fps=fps,
+                image_shape=self.image_shape,
+                ffmpeg=self.ffmpeg,
+                runner=self.runner,
+                timeout_s=self.timeout_s,
+            )
         overviews = tuple(
             overview_payload(
                 frames,

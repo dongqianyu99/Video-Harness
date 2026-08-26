@@ -18,6 +18,7 @@ from video_harness.camera_contract import image_label
 from video_harness.prompts import (
     EVIDENCE_SCHEMA,
     INSPECTION_SCHEMA,
+    INSPECTION_SYSTEM_PROMPT,
     PROMPT_VERSION,
     SYSTEM_PROMPT,
     TOOL_NAME,
@@ -81,8 +82,19 @@ def test_prompt_and_schema_define_progressive_calls() -> None:
     normalized = " ".join(SYSTEM_PROMPT.split()).lower()
     assert "task-blind motion_summary from call 1" in normalized
     assert "describe each boundary state once" in normalized
-    assert "status=retry only for a clear violation" in normalized
+    assert "status=retry only for a clear unresolved violation" in normalized
+    assert "exactly one concise sentence per camera view" in normalized
+    assert "return motion_summary as exactly one concise sentence" in normalized
+    assert "action_description as exactly one concise sentence" in normalized
+    assert "task_role as exactly one concise sentence" in normalized
+    assert "reason as exactly one concise sentence" in normalized
+    assert "grasp, hold, release, or contact require direct supporting" in normalized
+    assert "decompose motion_summary and action_description" in normalized
+    assert "action-to-view evidence mapping" in normalized
     assert "active_end_effector" not in INSPECTION_SCHEMA["properties"]
+    inspection_prompt = " ".join(INSPECTION_SYSTEM_PROMPT.split()).lower()
+    assert "motion_summary as exactly one concise sentence" in inspection_prompt
+    assert "do not inventory or repeat the static scene" in inspection_prompt
     before = EVIDENCE_SCHEMA["properties"]["before_boundary_observation"]["anyOf"][0]
     assert set(before["required"]) == {
         "cam_high",
@@ -222,7 +234,16 @@ def test_openai_call2_uses_boundaries_detail_motion_and_task_last(call2_record) 
         "requested-model", client=SimpleNamespace(responses=responses)
     ).annotate(_evidence_request(detail=True))
     content = responses.kwargs["input"][0]["content"]
-    assert "motion summary" in content[0]["text"].lower()
+    assert content[0]["text"].startswith("EVIDENCE=BOUNDARY_BEFORE")
+    image_positions = [
+        index for index, item in enumerate(content) if item["type"] == "input_image"
+    ]
+    motion_position = next(
+        index
+        for index, item in enumerate(content)
+        if item["type"] == "input_text" and "motion summary" in item["text"].lower()
+    )
+    assert max(image_positions) < motion_position < len(content) - 1
     assert content[-1]["type"] == "input_text"
     assert "Task instruction" in content[-1]["text"]
     assert sum(item["type"] == "input_image" for item in content) == 7

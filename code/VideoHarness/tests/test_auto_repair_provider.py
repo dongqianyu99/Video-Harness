@@ -48,7 +48,6 @@ def test_openai_targeted_repair_uses_full_temporal_evidence(call2_record) -> Non
     payload = {
         "evidence_sufficient": True,
         "reason": "The full temporal evidence resolves the issue.",
-        "resolved_motion_summary": "The corrected motion summary.",
         "resolved_call2": call2_record,
     }
 
@@ -83,7 +82,6 @@ def test_repair_rejects_sufficient_claim_without_resolved_output(call2_record) -
     invalid = {
         "evidence_sufficient": True,
         "reason": "claimed sufficient",
-        "resolved_motion_summary": None,
         "resolved_call2": None,
     }
     client = SimpleNamespace(
@@ -140,5 +138,4 @@ def test_sequence_audit_deduplicates_unit_issues() -> None:
 def test_mock_repair_is_automatically_insufficient(call2_record) -> None:
     result = MockRepairBackend().repair(_repair_request(call2_record))
     assert result.repair["evidence_sufficient"] is False
-    assert result.repair["resolved_motion_summary"] is None
     assert result.repair["resolved_call2"] is None

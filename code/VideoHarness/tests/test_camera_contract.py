@@ -51,10 +51,12 @@ def test_both_calls_share_the_camera_authority_contract() -> None:
         assert "Not visible is not the same as absent or unchanged" in prompt
     assert "never infer global entity movement" in SYSTEM_PROMPT
     assert "Do not treat pixel coordinates from different cameras" in SYSTEM_PROMPT
-
-
 def test_shared_prompts_do_not_encode_task_specific_scene_vocabulary() -> None:
-    prompts = (system_prompt_camera_contract(), INSPECTION_SYSTEM_PROMPT, SYSTEM_PROMPT)
+    prompts = (
+        system_prompt_camera_contract(),
+        INSPECTION_SYSTEM_PROMPT,
+        SYSTEM_PROMPT,
+    )
     banned_terms = (
         "pad occupancy",
         "tabletop",

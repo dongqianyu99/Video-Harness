@@ -24,13 +24,24 @@ from .evidence import (
     validate_boundary_state_record,
     validate_evidence_record,
 )
+from .hdf5_source import (
+    HDF5_SOURCE_DATASET,
+    hdf5_document_source,
+    inspect_hdf5_episode,
+    load_hdf5_jpeg,
+)
 from .media import FFmpegFrameLoader
 from .pairing import build_pairs
 from .pipeline import EvidenceUnitPipeline
 from .reconciliation import reconcile_document, sequence_projection_sha256
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
 from .run_tracking import ApiCallBudgetExceeded, RunTracker, TrackingBackend
-from .sampling import plan_document, unit_boundary_states, validate_document
+from .sampling import (
+    plan_document,
+    plan_document_from_source,
+    unit_boundary_states,
+    validate_document,
+)
 from .temporal_media import TemporalMediaBuilder
 from .training_split import build_training_split, episode_record_from_dict
 
@@ -326,6 +337,42 @@ def _build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_hdf5(args: argparse.Namespace) -> int:
+    _require_new_or_empty_directory(args.output_root)
+    episode = inspect_hdf5_episode(args.episode)
+    build_id = (
+        f"robodojo-hdf5-v1__task-{episode.task_name}__"
+        f"episode-{episode.episode_index:07d}__hz-{args.sample_hz:g}"
+    )
+    document = plan_document_from_source(
+        build_id=build_id,
+        document_id=(
+            f"robodojo-hdf5/{episode.task_name}/episode-{episode.episode_index:07d}"
+        ),
+        source=hdf5_document_source(episode),
+        task_instruction=episode.task_instruction,
+        sample_hz=args.sample_hz,
+    )
+    validate_document(document)
+    summary = {
+        "schema_version": "video-harness.hdf5-source",
+        "build_id": build_id,
+        "source_dataset": HDF5_SOURCE_DATASET,
+        "episode": episode.path.name,
+        "episode_index": episode.episode_index,
+        "task_name": episode.task_name,
+        "task_instruction": episode.task_instruction,
+        "frames": episode.length,
+        "fps": episode.fps,
+        "sample_hz": args.sample_hz,
+        "documents": 1,
+    }
+    _write_json(args.output_root / "dataset.json", summary)
+    _write_jsonl(args.output_root / "documents.jsonl", [document])
+    print(json.dumps({**summary, "output_root": str(args.output_root)}, indent=2))
+    return 0
+
+
 def _make_worker_context(
     args: argparse.Namespace,
     config: HarnessConfig,
@@ -513,7 +560,7 @@ def _annotate_document(
         document["quality_provenance"] = {
             "provider": context.repair_backend.provider,
             "model": context.repair_backend.model,
-            "prompt_version": "video-harness.sequence-audit",
+            "prompt_version": "video-harness.sequence-audit.v3",
             "audit_attempts": 0,
             "repair_rounds": 0,
             "sequence_sha256": sequence_projection_sha256(document),
@@ -1000,7 +1047,7 @@ def _report(args: argparse.Namespace) -> int:
 
 def _decode_smoke(args: argparse.Namespace) -> int:
     documents = _read_jsonl(args.documents)
-    loader = FFmpegFrameLoader(args.dataset_root)
+    video_loader = FFmpegFrameLoader(args.dataset_root)
     decoded: list[dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
     for document in documents:
@@ -1011,7 +1058,15 @@ def _decode_smoke(args: argparse.Namespace) -> int:
             if key in seen:
                 continue
             seen.add(key)
-            image = loader.load(document, frame_ref)
+            source = document["source"]
+            if source["dataset"] == HDF5_SOURCE_DATASET:
+                image = load_hdf5_jpeg(
+                    args.dataset_root / source["hdf5_path"],
+                    source["views"]["cam_high"]["dataset_key"],
+                    int(frame_ref["episode_frame_index"]),
+                )
+            else:
+                image = video_loader.load(document, frame_ref)
             decoded.append(
                 {
                     "document_id": document["document_id"],
@@ -1050,6 +1105,14 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--max-tasks", type=int)
     build.add_argument("--episodes-per-task", type=int)
     build.set_defaults(handler=_build)
+
+    build_hdf5 = subparsers.add_parser(
+        "build-hdf5", help="build one standalone RoboDojo HDF5 document"
+    )
+    build_hdf5.add_argument("--episode", type=Path, required=True)
+    build_hdf5.add_argument("--output-root", type=Path, required=True)
+    build_hdf5.add_argument("--sample-hz", type=float, default=1.0)
+    build_hdf5.set_defaults(handler=_build_hdf5)
 
     annotate = subparsers.add_parser(
         "annotate",

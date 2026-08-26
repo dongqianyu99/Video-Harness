@@ -7,6 +7,7 @@ import pytest
 from video_harness.evidence import compose_evidence_record
 
 _CALL2_RECORD = {
+    "motion_summary": "The gripper transports the bread slice toward the toaster and releases it into the slot.",
     "before_boundary_observation": {
         "cam_high": "A bread slice rests beside the toaster.",
         "cam_left_wrist": "The bread slice is visible near the open gripper.",
@@ -21,7 +22,7 @@ _CALL2_RECORD = {
     "detail_observation": "The bread slice passes below the gripper tips into the slot.",
     "unit_interpretation": {
         "action_description": "The robot inserts the bread slice into the toaster slot.",
-        "task_role": "This Evidence Unit places one bread slice into the toaster.",
+        "task_role": "This Evidence Unit loads one bread slice for the toasting task.",
     },
     "causal_validation": {
         "status": "pass",
@@ -30,7 +31,6 @@ _CALL2_RECORD = {
 }
 
 _ACCEPTED_EVIDENCE = compose_evidence_record(
-    "The gripper transports the bread slice toward the toaster and releases it into the slot.",
     _CALL2_RECORD,
     quality_status="accepted",
 )

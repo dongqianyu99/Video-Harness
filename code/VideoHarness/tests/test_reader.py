@@ -33,8 +33,8 @@ _TASK_INSTRUCTION = "Put bread into the toaster."
 def _changed_evidence() -> dict[str, Any]:
     views = ("cam_high", "cam_left_wrist", "cam_right_wrist")
     return compose_evidence_record(
-        "The gripper transports the bread slice and releases it into the toaster.",
         {
+            "motion_summary": "The gripper transports the bread slice and releases it into the toaster.",
             "before_boundary_observation": {
                 view: "The bread slice is outside the toaster." for view in views
             },
@@ -45,7 +45,7 @@ def _changed_evidence() -> dict[str, Any]:
             "detail_observation": None,
             "unit_interpretation": {
                 "action_description": "The robot inserts the bread slice into the toaster.",
-                "task_role": "This Evidence Unit loads one bread slice into the toaster.",
+                "task_role": "This Evidence Unit loads one bread slice for the toasting task.",
             },
             "causal_validation": {
                 "status": "pass",

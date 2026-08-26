@@ -9,15 +9,19 @@ from .evidence import (
     DETAIL_REASONS,
 )
 
-PROMPT_VERSION = "video-harness.evidence"
-INSPECTION_PROMPT_VERSION = "video-harness.inspection"
+PROMPT_VERSION = "video-harness.evidence.v4"
+INSPECTION_PROMPT_VERSION = "video-harness.inspection.v2"
 TOOL_NAME = "record_transition_evidence"
 INSPECTION_TOOL_NAME = "locate_temporal_detail"
 REPAIR_TOOL_NAME = "resolve_transition_repair"
 SEQUENCE_AUDIT_TOOL_NAME = "audit_sequence_consistency"
-REPAIR_PROMPT_VERSION = "video-harness.repair"
-SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit"
+REPAIR_PROMPT_VERSION = "video-harness.repair.v4"
+SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v3"
 CAMERA_CONTRACT = system_prompt_camera_contract()
+ACTION_EVIDENCE_CONTRACT = """Action-evidence contract:
+- Claims of grasp, hold, release, or contact require direct supporting visual evidence from the corresponding wrist camera.
+- Before returning causal status=pass, decompose motion_summary and action_description into their key atomic actions and find corresponding visual evidence from the appropriate camera view for each action.
+- The causal reason must summarize the action-to-view evidence mapping in one sentence. Weaken or remove any action that lacks visual support; use retry only when a material contradiction remains."""
 
 REPAIR_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -25,13 +29,11 @@ REPAIR_SCHEMA: dict[str, Any] = {
     "required": [
         "evidence_sufficient",
         "reason",
-        "resolved_motion_summary",
         "resolved_call2",
     ],
     "properties": {
         "evidence_sufficient": {"type": "boolean"},
         "reason": {"type": "string"},
-        "resolved_motion_summary": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "resolved_call2": {"type": "null"},
     },
 }
@@ -65,7 +67,7 @@ def _view_string_schema() -> dict[str, Any]:
             view: {
                 "type": "string",
                 "description": (
-                    f"A concise static-state description grounded in the {view} "
+                    f"Exactly one concise static-state sentence grounded in the {view} "
                     f"[{camera_spec(view).role_id}] Boundary view and limited to that "
                     "camera's evidence authority."
                 ),
@@ -79,6 +81,7 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
+        "motion_summary",
         "before_boundary_observation",
         "after_boundary_observation",
         "boundary_conflicts",
@@ -87,6 +90,10 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
         "causal_validation",
     ],
     "properties": {
+        "motion_summary": {
+            "type": "string",
+            "description": "Exactly one concise sentence revising Call 1's task-blind motion summary using the task context, high-resolution BEFORE and AFTER Boundary images, accepted Boundary descriptions, and optional detail evidence.",
+        },
         "before_boundary_observation": {
             "anyOf": [_view_string_schema(), {"type": "null"}],
             "description": "A new static description of the synchronized BEFORE Boundary State when no accepted description was supplied, otherwise null.",
@@ -116,11 +123,11 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
             "properties": {
                 "action_description": {
                     "type": "string",
-                    "description": "What the robot physically does during this Evidence Unit, grounded in motion, Boundary images, and optional detail.",
+                    "description": "Exactly one concise sentence stating what the robot physically does during this Evidence Unit, grounded in motion, Boundary images, and optional detail.",
                 },
                 "task_role": {
                     "type": "string",
-                    "description": "What this Evidence Unit contributes to the task, without claiming more progress than the evidence supports.",
+                    "description": "Exactly one concise sentence stating what this physical action contributes to the task without overstating progress.",
                 },
             },
         },
@@ -135,7 +142,7 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
                 },
                 "reason": {
                     "type": "string",
-                    "description": "A concise explanation of whether the interpretation obeys basic causal and physical constraints.",
+                    "description": "Exactly one concise sentence explaining whether the interpretation obeys basic causal and physical constraints.",
                 },
             },
         },
@@ -158,7 +165,7 @@ INSPECTION_SCHEMA: dict[str, Any] = {
     "properties": {
         "motion_summary": {
             "type": "string",
-            "description": "A task-blind, evidence-complete description of the visible qualitative motion, interaction, and final persistent state across the Evidence Unit.",
+            "description": "Exactly one concise, task-blind sentence describing the visible qualitative motion, interaction, and final persistent state across the Evidence Unit without repeating the static scene.",
         },
         "interaction_window": {
             "type": "object",
@@ -199,7 +206,9 @@ INSPECTION_SYSTEM_PROMPT = f"""You are the Video Harness task-blind temporal mot
 
 {CAMERA_CONTRACT}
 
-Produce a task-blind, evidence-complete motion_summary of the visible qualitative motion and interaction across the Evidence Unit. Describe the temporal progression and spatial relations needed to understand what changes, while distinguishing wrist-camera ego-motion from physical motion in the scene. A globally stable view does not rule out a meaningful local interaction. A view with no evident motion may be omitted from the summary or noted briefly as showing no evident motion. Calibrate the language to the evidence and preserve uncertainty instead of turning an unresolved observation into either a positive or negative claim. End the summary by stating any visually supported interaction state that persists at the final frame and could carry into the next Evidence Unit; if that state is unresolved, say so.
+{ACTION_EVIDENCE_CONTRACT}
+
+Produce motion_summary as exactly one concise sentence describing the task-blind qualitative motion, interaction, and final persistent state across the Evidence Unit. Describe only the temporal progression and spatial relations needed to understand what moves or changes, while distinguishing wrist-camera ego-motion from physical motion in the scene. Do not inventory or repeat the static scene; mention an unchanged entity or view only when necessary to disambiguate the motion. A globally stable view does not rule out a meaningful local interaction. Calibrate the sentence to the evidence and preserve uncertainty instead of turning an unresolved observation into either a positive or negative claim.
 
 Do not infer task intent, task outcome, or future behavior. Do not estimate or invent precise physical quantities; use qualitative descriptions grounded in the supplied visual evidence. Normalized image coordinates are used only to specify an optional detail ROI.
 
@@ -216,11 +225,13 @@ SYSTEM_PROMPT = f"""You are the Video Harness task-conditioned evidence compiler
 
 {CAMERA_CONTRACT}
 
-Describe each Boundary State once. When an accepted Boundary description is supplied, verify it against the corresponding current images and return null for that boundary output; do not create a second description of the same shared state. If the existing description materially contradicts the images, explain the conflict in boundary_conflicts and use causal status=retry. When no accepted description is supplied, produce it from the corresponding images and leave its conflict null. Boundary descriptions report the visible state at that instant rather than inferring an interval event from one image. Keep the three views separate and follow their evidence authority.
+{ACTION_EVIDENCE_CONTRACT}
 
-If a detail sheet is supplied, describe only the fine interaction evidence that it directly shows. Then combine the Boundary States, optional detail, Call 1 motion_summary, and task instruction to explain the physical transition across this Evidence Unit and its role in the task. Treat prior text and motion_summary as useful but fallible evidence; qualify the interpretation when visual evidence disagrees.
+Describe each Boundary State once, using exactly one concise sentence per camera view. When an accepted Boundary description is supplied, verify it against the corresponding current images and return null for that boundary output; do not create a second description of the same shared state. If the existing description materially contradicts the images, explain the conflict in boundary_conflicts and use causal status=retry. When no accepted description is supplied, produce it from the corresponding images and leave its conflict null. Boundary descriptions report the visible state at that instant rather than inferring an interval event from one image. Keep the three views separate and follow their evidence authority.
 
-Finally perform a causal validation of your own interpretation. Use status=retry only for a clear violation of basic causal or physical logic, such as claiming object displacement with no compatible interaction, or claiming global movement solely from apparent motion or visibility changes in a moving wrist camera while cam_high remains inconsistent with that claim. Use status=pass when the interpretation is physically plausible even if fine details remain uncertain. Do not retry merely because the exact motion, object identity, or task role is incomplete.
+If a detail sheet is supplied, describe only the fine interaction evidence that it directly shows. Return motion_summary as exactly one concise sentence that revises Call 1's task-blind draft using the task context, the high-resolution static BEFORE and AFTER Boundary images, accepted Boundary descriptions, and optional detail evidence. Write action_description as exactly one concise sentence stating the physical action. Write task_role as exactly one concise sentence stating only what that action contributes to the task. Treat Call 1 and prior text as useful but fallible evidence; correct them when the Boundary or detail evidence disagrees.
+
+Finally perform a causal validation of your own interpretation and express its reason as exactly one concise sentence. Use status=pass only when every key atomic action has corresponding visual evidence from the appropriate camera view and no material cross-view or cross-field contradiction remains. Use status=retry only for a clear unresolved violation, such as claiming object displacement with no compatible interaction or claiming global movement solely from a moving wrist view while cam_high remains inconsistent. Do not retry merely because the exact motion or object identity is incomplete; instead weaken unsupported wording while preserving uncertainty.
 
 Do not invent hidden substeps, future states, success, trajectories, velocities, coordinates, forces, joint values, or precise poses. Return exactly one record_transition_evidence tool call and no other text."""
 
@@ -229,7 +240,9 @@ REPAIR_SYSTEM_PROMPT = f"""You are the Video Harness automatic transition repair
 
 {CAMERA_CONTRACT}
 
-Resolve only the identified Evidence Unit. If the visual evidence supports one coherent account, return evidence_sufficient=true, a corrected qualitative motion summary, and a complete corrected Call 2 record with causal status=pass. Return a replacement Boundary observation only when the detected issue explicitly requires correcting that shared Boundary; otherwise reuse its supplied description with a null observation. If the supplied evidence cannot resolve the issue, return evidence_sufficient=false with null resolved fields. Do not preserve a prior claim merely for consistency, and do not invent precise physical quantities or unseen events.
+{ACTION_EVIDENCE_CONTRACT}
+
+Resolve only the identified Evidence Unit. If the visual evidence supports one coherent account, return evidence_sufficient=true and a complete corrected Call 2 record that follows the same motion_summary, Boundary, action_description, task_role, and causal-reason sentence contract with causal status=pass. Return a replacement Boundary observation only when the detected issue explicitly requires correcting that shared Boundary; otherwise reuse its supplied description with a null observation. If the supplied evidence cannot resolve the issue, return evidence_sufficient=false with a null resolved_call2. Do not preserve a prior claim merely for consistency, and do not invent precise physical quantities or unseen events.
 
 Return exactly one resolve_transition_repair tool call and no other text."""
 

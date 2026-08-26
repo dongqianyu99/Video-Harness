@@ -66,6 +66,7 @@ src/video_harness/
 ├── pipeline.py            # two-call Evidence Unit state machine
 ├── reconciliation.py      # automatic Sequence Audit and document repair
 ├── temporal_media.py      # exact multiview decode and visual products
+├── hdf5_source.py         # standalone RoboDojo HDF5 source adapter
 ├── annotations.py         # OpenAI, Anthropic, and mock providers
 ├── prompts.py             # versioned prompts and strict tool schemas
 ├── evidence.py            # structured-output validation
@@ -123,6 +124,47 @@ ffmpeg -version | head -n 1
 Do not copy `.venv` between machines. Recreate it from `pyproject.toml`; this
 portable package intentionally does not distribute a machine-generated
 `uv.lock`.
+
+## Standalone HDF5 episode
+
+For local Video Harness iteration, one public RoboDojo HDF5 episode is enough;
+no LeRobot conversion or Actuator installation is required. Build a pending
+document directly from the episode:
+
+```bash
+export VH_EPISODE=/path/to/arrange_largest_number/episode_0000000.hdf5
+export VH_HDF5_ROOT=/path/to/arrange_largest_number
+export VH_OUTPUT=/path/to/output/hdf5-episode-0
+
+uv run video-harness build-hdf5 \
+  --episode "$VH_EPISODE" \
+  --output-root "$VH_OUTPUT" \
+  --sample-hz 1
+
+uv run video-harness decode-smoke \
+  --dataset-root "$VH_HDF5_ROOT" \
+  --documents "$VH_OUTPUT/documents.jsonl" \
+  --limit-frames 3
+```
+
+Then use the normal `annotate` and `report` commands. `--dataset-root` must be
+the directory containing the HDF5 file:
+
+```bash
+uv run video-harness annotate \
+  --provider openai \
+  --model <vision-capable-model-id> \
+  --dataset-root "$VH_HDF5_ROOT" \
+  --documents "$VH_OUTPUT/documents.jsonl" \
+  --output "$VH_OUTPUT/documents.openai.jsonl" \
+  --limit-documents 1 \
+  --debug \
+  --debug-root "$VH_OUTPUT/debug"
+```
+
+This standalone path writes `dataset.json` and `documents.jsonl`. It is for
+compiler/prompt iteration only; it intentionally does not create support/query
+pairs or a formal Actuator training split.
 
 ## Download RoboDojo
 
@@ -188,6 +230,11 @@ uv run video-harness annotate \
 
 unset OPENAI_API_KEY
 ```
+
+OpenAI-compatible DeepSeek Vision uses the same backend. Set
+`OPENAI_BASE_URL=https://api.deepseek.com` and pass
+`--model deepseek-v4-flash-vision-exp`; the Harness disables DeepSeek thinking
+mode because its forced structured tool choice requires non-thinking mode.
 
 ### Anthropic Claude
 
@@ -404,15 +451,16 @@ Canonical annotations are separated into two records:
 
 - `video-harness.boundary-state` stores one synchronized three-view static
   observation and its quality status;
-- `video-harness.evidence` stores one transition between adjacent Boundary
+- `video-harness.evidence.v3` stores one transition between adjacent Boundary
   States.
 
 Transition evidence contains:
 
-- the task-blind `motion_summary` from Call 1;
+- the final `motion_summary` revised by Call 2 from Call 1, task context,
+  Boundary images, accepted Boundary descriptions, and optional detail;
 - an optional `detail_observation`;
 - any detected conflict with an already accepted shared Boundary;
-- `action_description` and `task_role` from Call 2;
+- one-sentence `action_description` and one-sentence `task_role` from Call 2;
 - Call 2 `causal_validation`;
 - `quality_status: accepted | quarantined`.
 

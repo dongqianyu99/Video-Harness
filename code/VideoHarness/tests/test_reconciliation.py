@@ -102,13 +102,12 @@ class FakeRepairPipeline:
 
 def _successful_repair(evidence: dict) -> ExistingRepairOutcome:
     repaired = copy.deepcopy(evidence)
-    repaired["resolved_motion_summary"] = "Automatically resolved motion."
+    repaired["motion_summary"] = "Automatically resolved motion."
     result = RepairResult(
         {
             "evidence_sufficient": True,
             "reason": "The bounded evidence resolves the issue.",
-            "resolved_motion_summary": "Automatically resolved motion.",
-            "resolved_call2": None,
+            "resolved_call2": {"motion_summary": "Automatically resolved motion."},
         },
         "test-repair",
         "repair-model",
@@ -169,9 +168,7 @@ def test_sequence_issue_is_repaired_and_reaudited(changed_evidence):
     assert outcome.repair_rounds == 1
     assert pipeline.calls[0][1:] == ("u0000", "Missing release.")
     assert (
-        outcome.document["evidence_units"][0]["annotation"]["record"][
-            "resolved_motion_summary"
-        ]
+        outcome.document["evidence_units"][0]["annotation"]["record"]["motion_summary"]
         == "Automatically resolved motion."
     )
     validate_document(outcome.document)

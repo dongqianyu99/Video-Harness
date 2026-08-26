@@ -54,12 +54,7 @@ def build_sequence_projection(document: dict[str, Any]) -> str:
                 "before_boundary_id": unit["before_boundary_id"],
                 "after_boundary_id": unit["after_boundary_id"],
                 "motion_summary": (
-                    (
-                        record.get("resolved_motion_summary")
-                        or record.get("motion_summary")
-                    )
-                    if isinstance(record, dict)
-                    else None
+                    record.get("motion_summary") if isinstance(record, dict) else None
                 ),
                 "action_description": (
                     record.get("unit_interpretation", {}).get("action_description")
@@ -313,7 +308,7 @@ def _quality_provenance(
         "prompt_version": (
             audit.prompt_version
             if audit is not None
-            else "video-harness.sequence-audit"
+            else "video-harness.sequence-audit.v3"
         ),
         "audit_attempts": audit_attempts,
         "repair_rounds": repair_rounds,

@@ -238,8 +238,7 @@ class EvidenceUnitPipeline:
                 return None
             return {
                 "unit_id": units[index]["unit_id"],
-                "motion_summary": record.get("resolved_motion_summary")
-                or record.get("motion_summary"),
+                "motion_summary": record.get("motion_summary"),
                 "action_description": record.get("unit_interpretation", {}).get(
                     "action_description"
                 ),
@@ -500,7 +499,6 @@ class EvidenceUnitPipeline:
 
         initial_evidence = last_result
         repair_outcome = RepairOutcome(None, None, None, 0, None)
-        resolved_motion_summary: str | None = None
         inspection_failed = inspection.provider == "harness-fallback"
         if (
             last_result.evidence["causal_validation"]["status"] == "retry"
@@ -542,10 +540,6 @@ class EvidenceUnitPipeline:
             )
             if repair_outcome.evidence is not None:
                 last_result = repair_outcome.evidence
-                assert repair_outcome.result is not None
-                resolved_motion_summary = repair_outcome.result.repair[
-                    "resolved_motion_summary"
-                ]
 
         if (
             inspection_failed
@@ -568,10 +562,8 @@ class EvidenceUnitPipeline:
             "quarantined" if last_result.provider == "mock" else "accepted"
         )
         canonical = compose_evidence_record(
-            inspection.inspection["motion_summary"],
             last_result.evidence,
             quality_status=quality_status,
-            resolved_motion_summary=resolved_motion_summary,
         )
         before_boundary_record = repair_outcome.before_boundary_record
         if repair_outcome.evidence is None:
@@ -661,12 +653,11 @@ class EvidenceUnitPipeline:
         if not isinstance(record, dict):
             return ExistingRepairOutcome(None, None, None, 0, None)
         base = self.media_builder.build_base(document, unit)
-        motion_summary = record.get("resolved_motion_summary") or record.get(
-            "motion_summary"
-        )
+        motion_summary = record.get("motion_summary")
         if not isinstance(motion_summary, str) or not motion_summary.strip():
             return ExistingRepairOutcome(None, None, None, 0, None)
         call2 = {
+            "motion_summary": record["motion_summary"],
             "before_boundary_observation": None,
             "after_boundary_observation": None,
             "boundary_conflicts": {"before": None, "after": None},
@@ -694,10 +685,8 @@ class EvidenceUnitPipeline:
                 repair.result,
             )
         canonical = compose_evidence_record(
-            record["motion_summary"],
             repair.evidence.evidence,
             quality_status="accepted",
-            resolved_motion_summary=repair.result.repair["resolved_motion_summary"],
         )
         return ExistingRepairOutcome(
             canonical,
