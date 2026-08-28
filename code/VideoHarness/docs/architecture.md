@@ -9,6 +9,7 @@ CLI
   → typed config
   → annotation pipeline
       → temporal media service
+      → synchronized gripper-state reader
       → inspection/evidence provider
       → debug artifact sink
       → canonical document writer
@@ -49,6 +50,7 @@ src/video_harness/
 ├── pipeline.py            # two-pass Evidence Unit annotation state machine
 ├── reconciliation.py      # automatic Sequence Audit and document repair
 ├── temporal_media.py      # multiview decode and temporal image products
+├── gripper_state.py       # keyframe-aligned measured aperture
 ├── annotations.py         # provider protocols and SDK adapters
 ├── prompts.py             # versioned strict tools and prompts
 ├── evidence.py            # evidence validation
@@ -124,7 +126,7 @@ subprocesses and provider clients have explicit configurable timeouts.
 
 `debug=false` uses an in-memory/no-op sink. Decoded frames, Evidence Unit clips, sheets, crops, Call 1 output, and request payloads are released after the Evidence Unit finishes.
 
-`debug=true` uses a filesystem sink rooted at an explicit new directory. Per Evidence Unit it records the three Evidence Unit clips, decoded frames, overview/keyframe/detail sheets, Call 1 and Call 2 outputs, automatic repair attempts, the final decision, payload hashes, and a manifest. Debug artifacts are diagnostic evidence, not canonical documents and not training inputs.
+`debug=true` uses a filesystem sink rooted at an explicit new directory. Per Evidence Unit it records the three Evidence Unit clips, decoded frames, overview/keyframe/detail sheets, sampled gripper state, Call 1 and Call 2 outputs, automatic repair attempts, the final decision, payload hashes, and a manifest. Debug artifacts are diagnostic evidence, not canonical documents and not training inputs.
 
 ## Stable invariants
 
@@ -141,9 +143,11 @@ subprocesses and provider clients have explicit configurable timeouts.
 - each of `cam_high`, `cam_left_wrist`, and `cam_right_wrist` has an independent
   5×5 overview covering Evidence-Unit-local frames 0–24;
 - each view has a 2×3 keyframe sheet for frames 0,5,10,15,20,25;
+- measured left/right gripper aperture uses the same keyframe indices and enters
+  both Call 1 and Call 2;
 - all three views also produce independent BEFORE/AFTER Boundary images;
 - detail crops use only `cam_high` and one fixed ROI over a contiguous interval;
-- Call 1 does not receive task text;
+- Call 1 receives synchronized gripper aperture but does not receive task text;
 - Call 1 may receive only the immediately preceding accepted task-blind Motion
   Summary as fallible continuity context; current images remain authoritative;
 - every Call 1 result locates one meaningful interaction window, whether or not
@@ -151,7 +155,8 @@ subprocesses and provider clients have explicit configurable timeouts.
 - Call 1 Motion Summary is passed to Call 2 as task-blind intermediate evidence;
   it is one concise sentence and does not repeat the static scene;
 - Call 2 revises that draft using task context, high-resolution Boundary images,
-  accepted Boundary descriptions, and optional detail, and only the revised
+  accepted Boundary descriptions, the same gripper aperture samples, and optional
+  detail, and only the revised
   Motion Summary is stored in canonical evidence;
 - Call 2 receives no overview or keyframe sheets;
 - Call 2 receives Boundary/detail images before the fallible Call 1 Motion

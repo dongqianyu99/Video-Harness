@@ -12,6 +12,7 @@ def test_normal_mode_has_no_debug_destination() -> None:
     assert config.manifest()["debug_root"] is None
     assert config.provider_timeout_s == 300.0
     assert config.provider_max_retries == 2
+    assert config.call2_retries == 2
     assert config.ffmpeg_timeout_s == 120.0
 
 
@@ -23,8 +24,8 @@ def test_debug_mode_requires_explicit_destination(tmp_path: Path) -> None:
     assert HarnessConfig(debug=True, debug_root=tmp_path).debug_root == tmp_path
 
 
-def test_inspection_retries_are_nonnegative() -> None:
-    field = "inspection_retries"
+@pytest.mark.parametrize("field", ["inspection_retries", "call2_retries"])
+def test_provider_output_retries_are_nonnegative(field: str) -> None:
     with pytest.raises(ValueError, match=field):
         HarnessConfig(**{field: -1})
     with pytest.raises(ValueError, match=field):

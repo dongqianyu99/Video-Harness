@@ -13,6 +13,7 @@ from video_harness.annotations import (
     SequenceAuditRequest,
 )
 from video_harness.camera_contract import image_label
+from video_harness.gripper_state import GripperState
 from video_harness.protocol import ImagePayload
 
 
@@ -40,6 +41,11 @@ def _repair_request(call2: dict) -> RepairRequest:
             _image(f"BOUNDARY_{role}", view)
             for role in ("BEFORE", "AFTER")
             for view in views
+        ),
+        gripper_state=GripperState(
+            unit_frame_indices=(0, 5, 10, 15, 20, 25),
+            left=(1.0,) * 6,
+            right=(1.0, 0.8, 0.4, 0.4, 0.8, 1.0),
         ),
     )
 

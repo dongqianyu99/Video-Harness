@@ -110,6 +110,7 @@ class EvidenceUnitPipeline:
             episode_end_frame=base.unit_frames.episode_end_frame,
             overviews=base.overviews,
             keyframe_sheets=base.keyframe_sheets,
+            gripper_state=base.gripper_state,
             previous_motion_summary=previous_motion_summary,
         )
         last_result: InspectionResult | None = None
@@ -380,6 +381,7 @@ class EvidenceUnitPipeline:
                 overviews=base.overviews,
                 keyframe_sheets=base.keyframe_sheets,
                 boundary_images=base.boundary_images,
+                gripper_state=base.gripper_state,
                 detail=detail,
                 required_boundary_replacements=tuple(
                     sorted(required_boundary_replacements)
@@ -486,30 +488,36 @@ class EvidenceUnitPipeline:
             task_instruction=document["task_instruction"],
             detail=detail,
             boundary_images=base.boundary_images,
+            gripper_state=base.gripper_state,
         )
-        try:
-            last_result = self.evidence_backend.annotate(request)
-            self._validate_normal_call2(
-                last_result.evidence,
-                detail=detail,
-                before_context=before_boundary_observation,
-                after_context=after_boundary_observation,
-            )
-        except Exception as exc:
-            if store.enabled:
-                store.write_json(
-                    "call2-error.json",
-                    {"type": type(exc).__name__, "message": str(exc)},
+        for attempt in range(1, self.config.call2_retries + 2):
+            try:
+                last_result = self.evidence_backend.annotate(request)
+                self._validate_normal_call2(
+                    last_result.evidence,
+                    detail=detail,
+                    before_context=before_boundary_observation,
+                    after_context=after_boundary_observation,
                 )
-            if store.enabled:
-                self._finalize_failure(
-                    store,
-                    document,
-                    unit,
-                    base,
-                    detail_status,
-                )
-            raise
+            except ApiCallBudgetExceeded:
+                raise
+            except Exception as exc:  # noqa: BLE001 - Call 2 failure is data-local
+                error = {"type": type(exc).__name__, "message": str(exc)}
+                if store.enabled:
+                    store.write_json(f"call2-attempt-{attempt:02d}-error.json", error)
+                if attempt <= self.config.call2_retries:
+                    continue
+                if store.enabled:
+                    store.write_json("call2-error.json", error)
+                    self._finalize_failure(
+                        store,
+                        document,
+                        unit,
+                        base,
+                        detail_status,
+                    )
+                raise
+            break
         if store.enabled:
             store.write_json("call2.json", asdict(last_result))
 

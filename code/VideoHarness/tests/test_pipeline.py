@@ -17,6 +17,7 @@ from video_harness.annotations import (
 from video_harness.camera_contract import image_label
 from video_harness.config import HarnessConfig
 from video_harness.evidence import mock_call2_record
+from video_harness.gripper_state import GripperState
 from video_harness.pipeline import EvidenceUnitPipeline
 from video_harness.protocol import ImagePayload
 from video_harness.temporal_media import (
@@ -58,6 +59,11 @@ def _base() -> BaseMedia:
             _camera_payload(f"BOUNDARY_{role}", view, "image/jpeg")
             for role in ("BEFORE", "AFTER")
             for view in VIEWS
+        ),
+        gripper_state=GripperState(
+            unit_frame_indices=(0, 5, 10, 15, 20, 25),
+            left=(1.0,) * 6,
+            right=(1.0, 0.8, 0.4, 0.4, 0.8, 1.0),
         ),
     )
 
@@ -457,7 +463,7 @@ def test_call2_rejects_detail_description_without_supplied_media() -> None:
             inspection_backend=FakeInspectionBackend(needs_detail=True),
             evidence_backend=FakeEvidenceBackend([_call2("pass")]),
             media_builder=FakeMediaBuilder(),
-            config=HarnessConfig(),
+            config=HarnessConfig(call2_retries=0),
         ).run(document, unit)
 
 
@@ -525,15 +531,42 @@ def test_call2_provider_error_fails_with_scoped_debug(tmp_path: Path) -> None:
     with pytest.raises(AnnotationError, match="provider failure"):
         EvidenceUnitPipeline(
             inspection_backend=FakeInspectionBackend(needs_detail=False),
-            evidence_backend=FakeEvidenceBackend([AnnotationError("provider failure")]),
+            evidence_backend=FakeEvidenceBackend(
+                [AnnotationError("provider failure") for _ in range(3)]
+            ),
             media_builder=FakeMediaBuilder(),
             config=HarnessConfig(debug=True, debug_root=tmp_path),
         ).run(document, unit)
 
     root = next(tmp_path.rglob("u0000"))
+    assert (root / "call2-attempt-01-error.json").is_file()
+    assert (root / "call2-attempt-02-error.json").is_file()
+    assert (root / "call2-attempt-03-error.json").is_file()
     assert (root / "call2-error.json").is_file()
     manifest = json.loads((root / "manifest.json").read_text())
     assert manifest["status"] == "failed"
+
+
+def test_call2_retries_malformed_output_without_rebuilding_media(tmp_path: Path) -> None:
+    document, unit = _document_and_unit()
+    media = FakeMediaBuilder()
+    evidence = FakeEvidenceBackend(
+        [AnnotationError("malformed evidence arguments"), _call2("pass")]
+    )
+
+    result = EvidenceUnitPipeline(
+        inspection_backend=FakeInspectionBackend(needs_detail=False),
+        evidence_backend=evidence,
+        media_builder=media,
+        config=HarnessConfig(debug=True, debug_root=tmp_path),
+    ).run(document, unit)
+
+    root = Path(result.debug_root or "")
+    assert result.quality_status == "accepted"
+    assert len(evidence.requests) == 2
+    assert media.base_calls == 1
+    assert (root / "call2-attempt-01-error.json").is_file()
+    assert (root / "call2.json").is_file()
 
 
 def test_inspection_retry_and_fallback_do_not_repeat_media_decode(

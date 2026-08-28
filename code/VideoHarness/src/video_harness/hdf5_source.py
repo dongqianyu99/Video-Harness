@@ -15,6 +15,10 @@ HDF5_VIEW_KEYS = {
     "cam_left_wrist": "vision/cam_left_wrist/colors",
     "cam_right_wrist": "vision/cam_right_wrist/colors",
 }
+HDF5_GRIPPER_KEYS = {
+    "left": "state/left_ee_joint_states",
+    "right": "state/right_ee_joint_states",
+}
 _EPISODE_NAME = re.compile(r"episode_(\d+)\.hdf5$")
 
 
@@ -84,11 +88,23 @@ def inspect_hdf5_episode(path: Path) -> HDF5Episode:
                 if len(image_shape) != 3:
                     raise HDF5SourceError(f"{key} camera shape must be H,W,3")
                 shapes.add(image_shape)
+            if len(lengths) != 1 or next(iter(lengths)) < 2:
+                raise HDF5SourceError(
+                    "all HDF5 camera streams must share a length >= 2"
+                )
+            frame_count = next(iter(lengths))
+            for key in HDF5_GRIPPER_KEYS.values():
+                dataset = file.get(key)
+                if dataset is None or dataset.shape not in {
+                    (frame_count,),
+                    (frame_count, 1),
+                }:
+                    raise HDF5SourceError(
+                        f"{key} must contain one gripper value per frame"
+                    )
     except (KeyError, OSError) as exc:
         raise HDF5SourceError(f"cannot read RoboDojo HDF5 episode: {exc}") from exc
 
-    if len(lengths) != 1 or next(iter(lengths)) < 2:
-        raise HDF5SourceError("all HDF5 camera streams must share a length >= 2")
     if shapes != {(480, 640, 3)}:
         raise HDF5SourceError(
             f"all HDF5 camera streams must be RGB 480x640, got {sorted(shapes)}"
@@ -196,3 +212,19 @@ def load_hdf5_jpeg(path: Path, dataset_key: str, frame_index: int) -> bytes:
     output = BytesIO()
     Image.fromarray(frame).save(output, format="JPEG", quality=95)
     return output.getvalue()
+
+
+def load_hdf5_gripper_states(path: Path) -> np.ndarray:
+    h5py = _h5py()
+    try:
+        with h5py.File(path, "r") as file:
+            columns = [
+                np.asarray(file[key][:], dtype=np.float32).reshape(-1)
+                for key in HDF5_GRIPPER_KEYS.values()
+            ]
+    except (KeyError, OSError) as exc:
+        raise HDF5SourceError(f"cannot read HDF5 gripper state: {exc}") from exc
+    states = np.stack(columns, axis=1)
+    if not np.isfinite(states).all() or np.any((states < 0) | (states > 1)):
+        raise HDF5SourceError("HDF5 gripper state must be finite and within [0, 1]")
+    return states

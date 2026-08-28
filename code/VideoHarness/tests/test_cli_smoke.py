@@ -5,6 +5,9 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pyarrow as pa
+from pyarrow import parquet
+
 from video_harness.cli import _annotate
 from video_harness.evidence import (
     BOUNDARY_STATE_SCHEMA_VERSION,
@@ -41,6 +44,19 @@ def test_mock_cli_runs_full_multiview_media_pipeline_without_debug(
         check=False,
     )
     assert encoded.returncode == 0, encoded.stderr.decode(errors="replace")
+    state_path = dataset_root / "data/chunk-000/file-000.parquet"
+    state_path.parent.mkdir(parents=True)
+    states = [[0.0] * 6 + [1.0] + [0.0] * 6 + [1.0] for _ in range(26)]
+    parquet.write_table(
+        pa.table(
+            {
+                "episode_index": [0] * 26,
+                "frame_index": list(range(26)),
+                "observation.state": states,
+            }
+        ),
+        state_path,
+    )
 
     record = EpisodeRecord(
         episode_index=0,
@@ -91,6 +107,7 @@ def test_mock_cli_runs_full_multiview_media_pipeline_without_debug(
     assert annotation["status"] == "mock"
     assert annotation["record"]["quality_status"] == "quarantined"
     assert annotation["record"]["causal_validation"]["status"] == "retry"
+    assert "gripper_state" not in annotation["record"]
     assert set(annotation["provenance"]) == {"call1", "call2", "repair"}
     assert set(annotation["provenance"]["call2"]) == {
         "provider",

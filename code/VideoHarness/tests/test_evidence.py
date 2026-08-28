@@ -73,9 +73,15 @@ def test_shared_boundary_is_represented_once_in_adjacent_units() -> None:
 
 def test_quality_status_must_match_causal_validation(call2_record) -> None:
     with pytest.raises(EvidenceValidationError, match="accepted exactly"):
-        compose_evidence_record(call2_record, quality_status="quarantined")
+        compose_evidence_record(
+            call2_record,
+            quality_status="quarantined",
+        )
     call2_record["causal_validation"]["status"] = "retry"
-    evidence = compose_evidence_record(call2_record, quality_status="quarantined")
+    evidence = compose_evidence_record(
+        call2_record,
+        quality_status="quarantined",
+    )
     assert not evidence_is_trainable(evidence)
 
 

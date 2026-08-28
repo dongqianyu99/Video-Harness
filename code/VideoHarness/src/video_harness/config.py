@@ -10,6 +10,7 @@ class HarnessConfig:
     debug: bool = False
     debug_root: Path | None = None
     inspection_retries: int = 1
+    call2_retries: int = 2
     repair_max_attempts: int = 2
     sequence_audit_max_attempts: int = 2
     sequence_repair_rounds: int = 2
@@ -18,7 +19,7 @@ class HarnessConfig:
     ffmpeg_timeout_s: float = 120.0
     fps: int = 25
     unit_frame_count: int = 26
-    preprocessing_version: str = "video-harness.temporal-pack"
+    preprocessing_version: str = "video-harness.temporal-pack.v2"
 
     def __post_init__(self) -> None:
         if self.debug and self.debug_root is None:
@@ -27,6 +28,7 @@ class HarnessConfig:
             raise ValueError("debug_root must be omitted when debug mode is disabled")
         for field in (
             "inspection_retries",
+            "call2_retries",
             "repair_max_attempts",
             "sequence_audit_max_attempts",
             "sequence_repair_rounds",
@@ -38,6 +40,7 @@ class HarnessConfig:
                 if field
                 in {
                     "inspection_retries",
+                    "call2_retries",
                     "sequence_repair_rounds",
                     "provider_max_retries",
                 }

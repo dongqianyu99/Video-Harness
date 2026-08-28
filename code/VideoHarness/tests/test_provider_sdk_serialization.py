@@ -14,6 +14,7 @@ from video_harness.annotations import (
     OpenAIBackend,
 )
 from video_harness.camera_contract import image_label
+from video_harness.gripper_state import GripperState
 
 
 def _image(label: str) -> ImagePayload:
@@ -26,6 +27,14 @@ def _camera_image(role: str, view: str) -> ImagePayload:
     )
 
 
+def _gripper_state() -> GripperState:
+    return GripperState(
+        unit_frame_indices=(0, 5, 10, 15, 20, 25),
+        left=(1.0,) * 6,
+        right=(1.0, 0.8, 0.4, 0.4, 0.8, 1.0),
+    )
+
+
 def _inspection_request() -> InspectionRequest:
     views = ("cam_high", "cam_left_wrist", "cam_right_wrist")
     return InspectionRequest(
@@ -35,6 +44,7 @@ def _inspection_request() -> InspectionRequest:
         episode_end_frame=25,
         overviews=tuple(_camera_image("OVERVIEW", view) for view in views),
         keyframe_sheets=tuple(_camera_image("KEYFRAME_SHEET", view) for view in views),
+        gripper_state=_gripper_state(),
     )
 
 
@@ -57,6 +67,7 @@ def _evidence_request() -> EvidenceRequest:
             _camera_image("BOUNDARY_AFTER", "cam_left_wrist"),
             _camera_image("BOUNDARY_AFTER", "cam_right_wrist"),
         ),
+        gripper_state=_gripper_state(),
     )
 
 
@@ -91,6 +102,7 @@ def test_openai_sdk_serializes_inspection_images_without_task() -> None:
         sum(item["type"] == "input_image" for item in body["input"][0]["content"]) == 6
     )
     assert "Put bread" not in json.dumps(body)
+    assert "Measured gripper aperture" in json.dumps(body)
 
 
 def test_openai_sdk_serializes_evidence_images_and_task_last() -> None:
@@ -131,6 +143,7 @@ def test_openai_sdk_serializes_evidence_images_and_task_last() -> None:
     assert content[0]["text"].startswith("EVIDENCE=BOUNDARY_BEFORE")
     assert max(image_positions) < motion_position < len(content) - 1
     assert "Task instruction" in content[-1]["text"]
+    assert "Measured gripper aperture" in content[motion_position]["text"]
 
 
 def test_deepseek_responses_disable_thinking_for_forced_tool_choice() -> None:

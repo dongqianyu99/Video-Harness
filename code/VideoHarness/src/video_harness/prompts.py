@@ -9,19 +9,20 @@ from .evidence import (
     DETAIL_REASONS,
 )
 
-PROMPT_VERSION = "video-harness.evidence.v4"
-INSPECTION_PROMPT_VERSION = "video-harness.inspection.v2"
+PROMPT_VERSION = "video-harness.evidence.v6"
+INSPECTION_PROMPT_VERSION = "video-harness.inspection.v4"
 TOOL_NAME = "record_transition_evidence"
 INSPECTION_TOOL_NAME = "locate_temporal_detail"
 REPAIR_TOOL_NAME = "resolve_transition_repair"
 SEQUENCE_AUDIT_TOOL_NAME = "audit_sequence_consistency"
-REPAIR_PROMPT_VERSION = "video-harness.repair.v5"
+REPAIR_PROMPT_VERSION = "video-harness.repair.v7"
 SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v4"
 CAMERA_CONTRACT = system_prompt_camera_contract()
 ACTION_EVIDENCE_CONTRACT = """Action-evidence contract:
 - Claims of grasp, hold, release, or contact require direct supporting visual evidence from the corresponding wrist camera.
 - Before returning causal status=pass, decompose motion_summary and action_description into their key atomic actions and find corresponding visual evidence from the appropriate camera view for each action.
 - The causal reason must summarize the action-to-view evidence mapping in one sentence. Weaken or remove any action that lacks visual support; use retry only when a material contradiction remains."""
+GRIPPER_STATE_CONTRACT = """Use the synchronized gripper state together with the visual evidence to determine the gripper-object interaction throughout the Evidence Unit. Do not speculate about, quote, or reproduce any numerical gripper-state values in the output; describe the interaction only in qualitative terms."""
 
 REPAIR_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -206,13 +207,15 @@ INSPECTION_SCHEMA: dict[str, Any] = {
 }
 
 
-INSPECTION_SYSTEM_PROMPT = f"""You are the Video Harness task-blind temporal motion analyst. You receive synchronized 5×5 overview sheets and higher-resolution 2×3 keyframe sheets from cam_high, cam_left_wrist, and cam_right_wrist. All sheets cover the same Evidence Unit in chronological order. Inspect all three views before forming a conclusion.
+INSPECTION_SYSTEM_PROMPT = f"""You are the Video Harness task-blind temporal motion analyst. You receive synchronized 5×5 overview sheets and higher-resolution 2×3 keyframe sheets from cam_high, cam_left_wrist, and cam_right_wrist, plus measured gripper aperture aligned with the 2×3 sheets. All inputs cover the same Evidence Unit in chronological order. Inspect all three views and the aperture evidence before forming a conclusion.
 
 {CAMERA_CONTRACT}
 
 {ACTION_EVIDENCE_CONTRACT}
 
 Produce motion_summary as exactly one concise sentence describing the task-blind qualitative motion, interaction, and final persistent state across the Evidence Unit. Describe only the temporal progression and spatial relations needed to understand what moves or changes, while distinguishing wrist-camera ego-motion from physical motion in the scene. Do not inventory or repeat the static scene; mention an unchanged entity or view only when necessary to disambiguate the motion. A globally stable view does not rule out a meaningful local interaction. Calibrate the sentence to the evidence and preserve uncertainty instead of turning an unresolved observation into either a positive or negative claim.
+
+{GRIPPER_STATE_CONTRACT}
 
 Do not infer task intent, task outcome, or future behavior. Do not estimate or invent precise physical quantities; use qualitative descriptions grounded in the supplied visual evidence. Normalized image coordinates are used only to specify an optional detail ROI.
 
@@ -225,7 +228,7 @@ When task-blind context from the immediately preceding Evidence Unit is supplied
 Return exactly one locate_temporal_detail tool call and no other text."""
 
 
-SYSTEM_PROMPT = f"""You are the Video Harness task-conditioned evidence compiler and lightweight causal validator. You receive a task-blind motion_summary from Call 1, synchronized original-resolution BEFORE and AFTER Boundary images from cam_high, cam_left_wrist, and cam_right_wrist, optional accepted descriptions of those Boundary States, an optional cam_high detail sheet, and a coarse task instruction.
+SYSTEM_PROMPT = f"""You are the Video Harness task-conditioned evidence compiler and lightweight causal validator. You receive a task-blind motion_summary from Call 1, synchronized original-resolution BEFORE and AFTER Boundary images from cam_high, cam_left_wrist, and cam_right_wrist, measured gripper aperture aligned with Call 1 keyframes, optional accepted descriptions of those Boundary States, an optional cam_high detail sheet, and a coarse task instruction.
 
 {CAMERA_CONTRACT}
 
@@ -235,18 +238,22 @@ Describe each Boundary State once, using exactly one concise sentence per camera
 
 If a detail sheet is supplied, describe only the fine interaction evidence that it directly shows. Return motion_summary as exactly one concise sentence that revises Call 1's task-blind draft using the task context, the high-resolution static BEFORE and AFTER Boundary images, accepted Boundary descriptions, and optional detail evidence. Write action_description as exactly one concise sentence stating the physical action. Write task_role as exactly one concise sentence stating only what that action contributes to the task. Treat Call 1 and prior text as useful but fallible evidence; correct them when the Boundary or detail evidence disagrees.
 
+{GRIPPER_STATE_CONTRACT}
+
 Finally perform a causal validation of your own interpretation and express its reason as exactly one concise sentence. Use status=pass only when every key atomic action has corresponding visual evidence from the appropriate camera view and no material cross-view or cross-field contradiction remains. Use status=retry only for a clear unresolved violation, such as claiming object displacement with no compatible interaction or claiming global movement solely from a moving wrist view while cam_high remains inconsistent. Do not retry merely because the exact motion or object identity is incomplete; instead weaken unsupported wording while preserving uncertainty.
 
 Do not invent hidden substeps, future states, success, trajectories, velocities, coordinates, forces, joint values, or precise poses. Return exactly one record_transition_evidence tool call and no other text."""
 
 
-REPAIR_SYSTEM_PROMPT = f"""You are the Video Harness automatic transition repair adjudicator. A normal compilation attempt was inconsistent or a Sequence Audit identified an unexplained transition. Re-examine the supplied full temporal sheets, Boundary images, canonical context, and prior outputs as fallible evidence.
+REPAIR_SYSTEM_PROMPT = f"""You are the Video Harness automatic transition repair adjudicator. A normal compilation attempt was inconsistent or a Sequence Audit identified an unexplained transition. Re-examine the supplied full temporal sheets, Boundary images, measured gripper aperture, canonical context, and prior outputs as fallible evidence.
 
 {CAMERA_CONTRACT}
 
 {ACTION_EVIDENCE_CONTRACT}
 
 Resolve only the identified Evidence Unit. If the visual evidence supports one coherent account, return evidence_sufficient=true and a complete corrected Call 2 record that follows the same motion_summary, Boundary, action_description, task_role, and causal-reason sentence contract with causal status=pass. Return a replacement Boundary observation only when the detected issue explicitly requires correcting that shared Boundary; otherwise reuse its supplied description with a null observation. If the supplied evidence cannot resolve the issue, return evidence_sufficient=false with a null resolved_call2. Do not preserve a prior claim merely for consistency, and do not invent precise physical quantities or unseen events.
+
+{GRIPPER_STATE_CONTRACT}
 
 Return exactly one resolve_transition_repair tool call and no other text."""
 
@@ -261,6 +268,7 @@ def inspection_user_prompt(
     episode_start_frame: int,
     episode_end_frame: int,
     previous_motion_summary: str | None,
+    gripper_state: str,
 ) -> str:
     continuity_context = ""
     if previous_motion_summary is not None:
@@ -273,6 +281,8 @@ def inspection_user_prompt(
         f"episode_frames={episode_start_frame}..{episode_end_frame}. "
         "Images are authoritative and labels identify view and Evidence-Unit-local frame. "
         "Describe the task-blind temporal motion and return the strict localization tool call."
+        + " "
+        + gripper_state
         + continuity_context
     )
 
@@ -282,6 +292,7 @@ def call2_context_prompt(
     motion_summary: str,
     before_boundary_observation: dict[str, str] | None,
     after_boundary_observation: dict[str, str] | None,
+    gripper_state: str,
 ) -> str:
     def boundary_context(
         role: str,
@@ -304,6 +315,8 @@ def call2_context_prompt(
         + boundary_context("BEFORE", before_boundary_observation)
         + " "
         + boundary_context("AFTER", after_boundary_observation)
+        + " "
+        + gripper_state
     )
 
 
@@ -340,6 +353,7 @@ def repair_user_prompt(
     call2: dict[str, Any],
     boundary_context: str,
     required_boundary_replacements: tuple[str, ...],
+    gripper_state: str,
 ) -> str:
     replacement_instruction = (
         " No Boundary replacement is required; return null Boundary observations."
@@ -355,6 +369,8 @@ def repair_user_prompt(
         + json.dumps(call2, ensure_ascii=False, sort_keys=True)
         + "."
         + replacement_instruction
+        + " "
+        + gripper_state
         + " Reconcile only from supplied evidence; regenerate the complete corrected "
         "transition record and return the strict repair tool call."
     )

@@ -70,6 +70,26 @@ def _accepted_document(original: dict, evidence: dict) -> dict:
     return validate_document(document)
 
 
+def test_legacy_gripper_evidence_is_migrated(changed_evidence: dict) -> None:
+    document = _accepted_document(_planned_document(0), changed_evidence)
+    annotation = document["evidence_units"][0]["annotation"]
+    annotation["schema_version"] = "video-harness.evidence.v4"
+    annotation["record"]["gripper_state"] = {"samples": []}
+
+    migrated = cli._migrate_legacy_gripper_evidence(document)
+
+    assert annotation["schema_version"] == "video-harness.evidence.v4"
+    assert migrated["evidence_units"][0]["annotation"]["schema_version"] == (
+        EVIDENCE_SCHEMA_VERSION
+    )
+    assert "gripper_state" not in migrated["evidence_units"][0]["annotation"][
+        "record"
+    ]
+    assert migrated["quality_status"] == "pending"
+    assert migrated["quality_provenance"] is None
+    validate_document(migrated)
+
+
 def _args(
     *,
     documents: Path,
@@ -119,8 +139,15 @@ def test_document_workers_shard_checkpoint_and_merge(
         cli, "_make_worker_context", lambda args, config, tracker: object()
     )
 
-    def fake_annotate(original, *, context, config, unit_budget):
-        del context, config, unit_budget
+    def fake_annotate(
+        original,
+        *,
+        context,
+        config,
+        unit_budget,
+        selected_unit_ids=None,
+    ):
+        del context, config, unit_budget, selected_unit_ids
         return cli.DocumentAnnotationResult(
             document=copy.deepcopy(accepted[original["document_id"]]),
             annotated_units=1,

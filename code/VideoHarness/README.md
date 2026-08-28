@@ -1,7 +1,7 @@
 # Video Harness
 
 `VideoHarness` compiles a successful RoboDojo demonstration into a lightweight,
-source-grounded behavior document. A canonical document stores only text,
+source-grounded behavior document. A canonical document stores text,
 frame references, source identity, and provenance. Images, videos, sheets, and
 crops are reconstructed from the source dataset at annotation time and are not
 saved unless debug mode is explicitly enabled.
@@ -11,11 +11,13 @@ consecutive frames at 25 Hz from three synchronized cameras. It uses two VLM
 calls:
 
 1. **Motion analysis** receives one 5×5 overview and one higher-resolution 2×3
-   keyframe sheet per camera. It is task-blind, preserves a Motion Summary, and may
-   request one fixed `cam_high` detail crop.
+   keyframe sheet per camera plus measured gripper aperture aligned to the six
+   keyframes. It is task-blind, preserves a Motion Summary, and may request one
+   fixed `cam_high` detail crop.
 2. **Task interpretation** receives that Motion Summary, six original-resolution
    BEFORE/AFTER Boundary images, any accepted shared Boundary descriptions, the
-   optional detail sheet, and finally the coarse Task Instruction. It creates only
+   optional detail sheet, the same gripper aperture samples, and finally the coarse
+   Task Instruction. It creates only
    missing Boundary descriptions, interprets the Evidence Unit transition, and
    performs a permissive causal self-check.
 
@@ -66,6 +68,7 @@ src/video_harness/
 ├── pipeline.py            # two-call Evidence Unit state machine
 ├── reconciliation.py      # automatic Sequence Audit and document repair
 ├── temporal_media.py      # exact multiview decode and visual products
+├── gripper_state.py       # synchronized left/right aperture samples
 ├── hdf5_source.py         # standalone RoboDojo HDF5 source adapter
 ├── annotations.py         # OpenAI, Anthropic, and mock providers
 ├── prompts.py             # versioned prompts and strict tool schemas
@@ -177,7 +180,9 @@ scripts/verify_robodojo.sh "$ROBODOJO_DATASET_ROOT"
 ```
 
 This downloads the public joint-space LeRobot v3 export used by the Pi_05 data
-contract: three RGB cameras, 14D joint state/action, 25 Hz. The compiler selects
+contract: three RGB cameras, 14D joint state/action, 25 Hz. The compiler uses the
+two gripper channels from the measured state as auxiliary evidence for both VLM
+calls. It selects
 the 34 runnable benchmark tasks and excludes the DLC auxiliary task from
 guidance generation.
 
@@ -399,12 +404,13 @@ Defaults are intentionally generous for multimodal APIs and shared storage:
 --provider-timeout-s 300
 --provider-max-retries 2
 --inspection-retries 1
+--call2-retries 2
 --ffmpeg-timeout-s 120
 ```
 
 Provider retries cover transport-level failures inside the SDK. Harness inspection,
-repair, and audit budgets remain separate semantic-processing limits. These values are
-stored in the checkpoint run contract and may be adjusted for a new run.
+Call 2, repair, and audit budgets remain separate semantic-processing limits. These
+values are stored in the checkpoint run contract and may be adjusted for a new run.
 
 ## Debug mode
 
@@ -439,6 +445,8 @@ debug/<document>/<unit>/
 ├── sheets/<view>-overview.png
 ├── sheets/<view>-keyframes.png
 ├── sheets/cam_high-detail.png  # only when requested
+├── gripper-state.json
+├── call2-attempt-XX-error.json # only for failed attempts before retry/success
 └── boundaries/*.jpg
 ```
 

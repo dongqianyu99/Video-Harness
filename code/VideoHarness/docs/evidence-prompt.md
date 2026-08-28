@@ -1,11 +1,12 @@
 # Evidence and Inspection Prompt
 
-The harness uses a progressive two-call protocol. Call 1 receives one overview
-and one keyframe sheet per camera with no task text. It produces one concise,
+The harness uses a progressive two-call protocol. Call 1 receives one overview,
+one keyframe sheet per camera, and measured left/right gripper aperture aligned
+with the keyframe sheet, with no task text. It produces one concise,
 task-blind Motion Summary sentence without repeating the static scene, plus a
 bounded optional `cam_high` ROI. Call 2 receives that Motion Summary,
-six labeled original-resolution Boundary images, any accepted shared Boundary
-descriptions, optional detail, and the Task Instruction. It does not receive
+six labeled original-resolution Boundary images, the same gripper samples, any
+accepted shared Boundary descriptions, optional detail, and the Task Instruction. It does not receive
 overview or keyframe sheets.
 
 Call 2 serializes visual evidence first: Boundary images and optional detail,
@@ -23,10 +24,11 @@ motion interval when no localized interaction is resolved. A detail crop is
 requested only when enlarging a fixed `cam_high` region can add evidence.
 
 All image labels include view and Evidence Unit frame metadata. The Call 1 Motion
-Summary is passed to Call 2 as fallible temporal evidence, not an authoritative
+Summary and gripper samples are passed to Call 2 as temporal evidence, not an authoritative
 conclusion. Call 2 revises it using the task context, high-resolution Boundary
-images, accepted Boundary descriptions, and optional detail; only that final
-Motion Summary is stored in canonical evidence. Debug mode retains the Call 2 result, automatic
+images, accepted Boundary descriptions, and optional detail; that final Motion
+Summary is stored in canonical evidence. Measured samples remain compiler inputs
+and optional debug artifacts rather than document fields. Debug mode retains the Call 2 result, automatic
 repair attempts, and final decision; normal mode deletes intermediate media.
 
 Call 2 creates one three-view static description for each previously undescribed
@@ -52,6 +54,9 @@ fixed elevated oblique view and is the primary source for global scene layout,
 entity position, spatial relations, scene state, and displacement. Wrist cameras
 move with their grippers and are the primary source for local identity,
 end-effector configuration, proximity, contact, and local interaction state.
+Both calls combine measured gripper state with the visual evidence to determine
+the gripper-object interaction. Numerical state values remain reasoning inputs
+and are not quoted or reproduced in generated descriptions.
 Grasp, hold, release, and contact claims require direct supporting evidence from
 the corresponding wrist camera. Before causal status can pass, each key Atomic
 Action Claim must map to visual evidence from an appropriate view; unsupported

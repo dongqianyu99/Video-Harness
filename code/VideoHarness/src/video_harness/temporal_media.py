@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,12 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .camera_contract import CAMERA_VIEWS, image_label
+from .gripper_state import (
+    GripperState,
+    GripperStateReader,
+    STANDARD_KEYFRAME_INDICES,
+    keyframe_indices,
+)
 from .hdf5_source import HDF5_SOURCE_DATASET, decode_hdf5_frames
 from .media import FrameDecodeError
 from .protocol import ImagePayload
@@ -22,7 +29,7 @@ VIEW_TO_DATASET_KEY = {
     "cam_left_wrist": "observation.images.cam_left_wrist",
     "cam_right_wrist": "observation.images.cam_right_wrist",
 }
-KEYFRAME_INDICES = (0, 5, 10, 15, 20, 25)
+KEYFRAME_INDICES = STANDARD_KEYFRAME_INDICES
 EVIDENCE_UNIT_FRAME_COUNT = 26
 DEFAULT_FFMPEG_TIMEOUT_S = 120.0
 
@@ -105,6 +112,7 @@ class BaseMedia:
     overviews: tuple[ImagePayload, ...]
     keyframe_sheets: tuple[ImagePayload, ...]
     boundary_images: tuple[ImagePayload, ...]
+    gripper_state: GripperState
 
 
 Runner = Callable[..., Any]
@@ -367,12 +375,7 @@ def keyframe_sheet_payload(
 ) -> ImagePayload:
     if view not in VIEWS:
         raise ValueError(f"unknown view {view!r}")
-    if unit.frame_count == EVIDENCE_UNIT_FRAME_COUNT:
-        indices = KEYFRAME_INDICES
-    else:
-        indices = tuple(
-            sorted({round(value) for value in np.linspace(0, unit.frame_count - 1, 6)})
-        )
+    indices = keyframe_indices(unit.frame_count)
     data = render_sheet(
         [unit.frames[view][index] for index in indices],
         labels=[_frame_label(unit, view, index) for index in indices],
@@ -575,6 +578,7 @@ class TemporalMediaBuilder:
         self.ffmpeg = ffmpeg
         self.runner = runner
         self.timeout_s = float(timeout_s)
+        self.gripper_states = GripperStateReader(self.dataset_root)
 
     def _sources(self, document: Mapping[str, Any]) -> dict[str, VideoSource]:
         source = document["source"]
@@ -658,6 +662,11 @@ class TemporalMediaBuilder:
             overviews=overviews,
             keyframe_sheets=keyframe_sheets,
             boundary_images=boundary_image_payloads(frames),
+            gripper_state=self.gripper_states.read_unit(
+                document,
+                episode_start_frame=start,
+                episode_end_frame=end,
+            ),
         )
 
     def build_detail(self, base: BaseMedia, request: DetailRequest) -> ImagePayload:
@@ -675,6 +684,14 @@ class TemporalMediaBuilder:
         detail: ImagePayload | None,
     ) -> dict[str, bytes]:
         artifacts: dict[str, bytes] = {}
+        artifacts["gripper-state.json"] = (
+            json.dumps(
+                base.gripper_state.to_dict(),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8")
         for view in VIEWS:
             view_frames = base.unit_frames.frames[view]
             artifacts[f"videos/{view}.mp4"] = encode_debug_unit_video(

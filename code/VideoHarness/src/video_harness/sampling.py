@@ -111,6 +111,9 @@ def plan_document(
             "camera_key": head_video.key,
             "video_path": head_video.path,
             "video_from_timestamp": head_video.from_timestamp,
+            "data_path": record.data_path,
+            "dataset_from_index": record.dataset_from_index,
+            "dataset_to_index": record.dataset_to_index,
             "views": view_sources,
             "fps": fps,
         },
@@ -247,6 +250,9 @@ def validate_document(document: Any) -> dict[str, Any]:
                 "camera_key",
                 "video_path",
                 "video_from_timestamp",
+                "data_path",
+                "dataset_from_index",
+                "dataset_to_index",
                 "views",
                 "fps",
             },
@@ -302,6 +308,23 @@ def validate_document(document: Any) -> dict[str, Any]:
     else:
         if source["camera_key"] != "observation.images.cam_high":
             raise ValueError("behavior documents must use observation.images.cam_high")
+        data_path = source["data_path"]
+        if not isinstance(data_path, str) or not data_path:
+            raise ValueError("document.source.data_path must be a relative path")
+        pure_data_path = PurePosixPath(data_path)
+        if pure_data_path.is_absolute() or ".." in pure_data_path.parts:
+            raise ValueError("document.source.data_path must stay within the dataset root")
+        dataset_from = source["dataset_from_index"]
+        dataset_to = source["dataset_to_index"]
+        if (
+            not isinstance(dataset_from, int)
+            or isinstance(dataset_from, bool)
+            or not isinstance(dataset_to, int)
+            or isinstance(dataset_to, bool)
+            or dataset_from < 0
+            or dataset_to - dataset_from != length
+        ):
+            raise ValueError("document source dataset frame bounds are invalid")
         video_path = source["video_path"]
         if not isinstance(video_path, str) or not video_path:
             raise ValueError(

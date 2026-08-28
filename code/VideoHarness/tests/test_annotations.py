@@ -15,6 +15,7 @@ from video_harness.annotations import (
     OpenAIBackend,
 )
 from video_harness.camera_contract import image_label
+from video_harness.gripper_state import GripperState
 from video_harness.prompts import (
     EVIDENCE_SCHEMA,
     INSPECTION_SCHEMA,
@@ -35,6 +36,14 @@ def _camera_image(role: str, view: str) -> ImagePayload:
     )
 
 
+def _gripper_state() -> GripperState:
+    return GripperState(
+        unit_frame_indices=(0, 5, 10, 15, 20, 25),
+        left=(1.0,) * 6,
+        right=(1.0, 0.8, 0.4, 0.4, 0.8, 1.0),
+    )
+
+
 def _inspection_request(
     *, previous_motion_summary: str | None = None
 ) -> InspectionRequest:
@@ -46,6 +55,7 @@ def _inspection_request(
         episode_end_frame=125,
         overviews=tuple(_camera_image("OVERVIEW", view) for view in views),
         keyframe_sheets=tuple(_camera_image("KEYFRAME_SHEET", view) for view in views),
+        gripper_state=_gripper_state(),
         previous_motion_summary=previous_motion_summary,
     )
 
@@ -66,6 +76,7 @@ def _evidence_request(*, detail: bool = False) -> EvidenceRequest:
             for role in ("BEFORE", "AFTER")
             for view in ("cam_high", "cam_left_wrist", "cam_right_wrist")
         ),
+        gripper_state=_gripper_state(),
     )
 
 
@@ -91,10 +102,15 @@ def test_prompt_and_schema_define_progressive_calls() -> None:
     assert "grasp, hold, release, or contact require direct supporting" in normalized
     assert "decompose motion_summary and action_description" in normalized
     assert "action-to-view evidence mapping" in normalized
+    assert "measured gripper aperture" in normalized
+    assert "do not speculate about, quote, or reproduce" in normalized
+    assert "does not alone prove object attachment" not in normalized
     assert "active_end_effector" not in INSPECTION_SCHEMA["properties"]
     inspection_prompt = " ".join(INSPECTION_SYSTEM_PROMPT.split()).lower()
     assert "motion_summary as exactly one concise sentence" in inspection_prompt
     assert "do not inventory or repeat the static scene" in inspection_prompt
+    assert "measured gripper aperture" in inspection_prompt
+    assert "do not speculate about, quote, or reproduce" in inspection_prompt
     before = EVIDENCE_SCHEMA["properties"]["before_boundary_observation"]["anyOf"][0]
     assert set(before["required"]) == {
         "cam_high",
@@ -115,6 +131,7 @@ def test_request_requires_three_overviews_three_keyframe_sheets_and_six_boundary
             episode_end_frame=25,
             overviews=inspection.overviews,
             keyframe_sheets=inspection.keyframe_sheets[:2],
+            gripper_state=_gripper_state(),
         )
     request = _evidence_request()
     with pytest.raises(ValueError, match="six Boundary"):
@@ -129,6 +146,7 @@ def test_request_requires_three_overviews_three_keyframe_sheets_and_six_boundary
             task_instruction=request.task_instruction,
             detail=None,
             boundary_images=request.boundary_images[:5],
+            gripper_state=_gripper_state(),
         )
 
 

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from video_harness.gripper_state import GripperState
 from video_harness.media import FrameDecodeError
 from video_harness.temporal_media import (
     EVIDENCE_UNIT_FRAME_COUNT,
@@ -295,6 +296,11 @@ def test_debug_media_contains_only_expected_multiview_artifacts() -> None:
         overviews=tuple(overview_payload(unit, view) for view in VIEWS),
         keyframe_sheets=tuple(keyframe_sheet_payload(unit, view) for view in VIEWS),
         boundary_images=boundary_image_payloads(unit),
+        gripper_state=GripperState(
+            unit_frame_indices=(0, 5, 10, 15, 20, 25),
+            left=(1.0,) * 6,
+            right=(1.0, 0.8, 0.4, 0.4, 0.8, 1.0),
+        ),
     )
     builder = TemporalMediaBuilder(Path("/unused"), image_shape=(24, 32, 3))
     detail = detail_payload(unit, DetailRequest((0.1, 0.1, 0.5, 0.5), 2, 5))
@@ -306,4 +312,5 @@ def test_debug_media_contains_only_expected_multiview_artifacts() -> None:
     assert "sheets/cam_high-detail.png" in artifacts
     assert len([name for name in artifacts if name.startswith("frames/")]) == 78
     assert len([name for name in artifacts if name.startswith("boundaries/")]) == 6
+    assert "gripper-state.json" in artifacts
     assert not any("wrist-detail" in name for name in artifacts)

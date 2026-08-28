@@ -15,6 +15,7 @@ from .evidence import (
     validate_call2_record,
     validate_inspection_record,
 )
+from .gripper_state import GripperState
 from .prompts import (
     EVIDENCE_SCHEMA,
     INSPECTION_PROMPT_VERSION,
@@ -58,6 +59,7 @@ class InspectionRequest:
     episode_end_frame: int
     overviews: tuple[ImagePayload, ...]
     keyframe_sheets: tuple[ImagePayload, ...]
+    gripper_state: GripperState
     previous_motion_summary: str | None = None
 
     def __post_init__(self) -> None:
@@ -94,6 +96,7 @@ class EvidenceRequest:
     task_instruction: str
     detail: ImagePayload | None
     boundary_images: tuple[ImagePayload, ...]
+    gripper_state: GripperState
 
     def __post_init__(self) -> None:
         if not self.motion_summary.strip():
@@ -160,6 +163,7 @@ class RepairRequest:
     overviews: tuple[ImagePayload, ...]
     keyframe_sheets: tuple[ImagePayload, ...]
     boundary_images: tuple[ImagePayload, ...]
+    gripper_state: GripperState
     detail: ImagePayload | None = None
     required_boundary_replacements: tuple[str, ...] = ()
 
@@ -581,6 +585,7 @@ class OpenAIBackend:
                     episode_start_frame=request.episode_start_frame,
                     episode_end_frame=request.episode_end_frame,
                     previous_motion_summary=request.previous_motion_summary,
+                    gripper_state=request.gripper_state.prompt_text(),
                 ),
             },
             *_openai_image_content(_inspection_images(request)),
@@ -619,6 +624,7 @@ class OpenAIBackend:
                     motion_summary=request.motion_summary,
                     before_boundary_observation=request.before_boundary_observation,
                     after_boundary_observation=request.after_boundary_observation,
+                    gripper_state=request.gripper_state.prompt_text(),
                 ),
             },
         ]
@@ -680,6 +686,7 @@ class OpenAIBackend:
                     required_boundary_replacements=(
                         request.required_boundary_replacements
                     ),
+                    gripper_state=request.gripper_state.prompt_text(),
                 ),
             },
             *_openai_image_content(_repair_images(request)),
@@ -768,6 +775,7 @@ class AnthropicBackend:
                     episode_start_frame=request.episode_start_frame,
                     episode_end_frame=request.episode_end_frame,
                     previous_motion_summary=request.previous_motion_summary,
+                    gripper_state=request.gripper_state.prompt_text(),
                 ),
             },
             *_anthropic_image_content(_inspection_images(request)),
@@ -806,6 +814,7 @@ class AnthropicBackend:
                     motion_summary=request.motion_summary,
                     before_boundary_observation=request.before_boundary_observation,
                     after_boundary_observation=request.after_boundary_observation,
+                    gripper_state=request.gripper_state.prompt_text(),
                 ),
             },
         ]
@@ -867,6 +876,7 @@ class AnthropicBackend:
                     required_boundary_replacements=(
                         request.required_boundary_replacements
                     ),
+                    gripper_state=request.gripper_state.prompt_text(),
                 ),
             },
             *_anthropic_image_content(_repair_images(request)),

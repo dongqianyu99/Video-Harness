@@ -8,11 +8,13 @@ import numpy as np
 from PIL import Image
 
 from video_harness.hdf5_source import (
+    HDF5_GRIPPER_KEYS,
     HDF5_VIEW_KEYS,
     decode_hdf5_frames,
     hdf5_document_source,
     inspect_hdf5_episode,
     load_hdf5_jpeg,
+    load_hdf5_gripper_states,
 )
 from video_harness.sampling import plan_document_from_source, validate_document
 from video_harness.temporal_media import TemporalMediaBuilder
@@ -40,6 +42,8 @@ def _episode(path: Path) -> tuple[np.ndarray, np.ndarray]:
             group = file.require_group(key.rsplit("/", 1)[0])
             group.create_dataset("shape", data=np.array([480, 640, 3]))
             group.create_dataset("colors", data=np.asarray(encoded, dtype=f"S{width}"))
+        file.create_dataset(HDF5_GRIPPER_KEYS["left"], data=[1.0, 0.4])
+        file.create_dataset(HDF5_GRIPPER_KEYS["right"], data=[[0.3], [1.0]])
     return first, second
 
 
@@ -88,6 +92,10 @@ def test_hdf5_frames_restore_lerobot_rgb_order(tmp_path: Path) -> None:
     jpeg = load_hdf5_jpeg(path, HDF5_VIEW_KEYS["cam_high"], 0)
     decoded = np.asarray(Image.open(BytesIO(jpeg)).convert("RGB"))
     np.testing.assert_allclose(decoded, first, atol=5)
+    np.testing.assert_allclose(
+        load_hdf5_gripper_states(path),
+        [[1.0, 0.3], [0.4, 1.0]],
+    )
 
 
 def test_temporal_media_builder_uses_hdf5_without_video_conversion(
@@ -106,3 +114,5 @@ def test_temporal_media_builder_uses_hdf5_without_video_conversion(
     assert len(base.overviews) == 3
     assert len(base.keyframe_sheets) == 3
     assert len(base.boundary_images) == 6
+    assert base.gripper_state.unit_frame_indices == (0, 1)
+    np.testing.assert_allclose(base.gripper_state.left, [1.0, 0.4])

@@ -93,6 +93,29 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
+def _migrate_legacy_gripper_evidence(document: dict[str, Any]) -> dict[str, Any]:
+    """Read the short-lived evidence.v4 format without preserving sensor values."""
+    migrated = copy.deepcopy(document)
+    changed = False
+    for unit in migrated.get("evidence_units", []):
+        annotation = unit.get("annotation")
+        if not isinstance(annotation, dict) or annotation.get(
+            "schema_version"
+        ) != "video-harness.evidence.v4":
+            continue
+        record = annotation.get("record")
+        if isinstance(record, dict):
+            record = dict(record)
+            record.pop("gripper_state", None)
+            annotation["record"] = record
+        annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
+        changed = True
+    if changed:
+        migrated["quality_status"] = "pending"
+        migrated["quality_provenance"] = None
+    return migrated
+
+
 def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
@@ -193,6 +216,7 @@ def _ensure_checkpoint_run(
     model: str,
     num_shards: int,
     config: HarnessConfig,
+    unit_ids: tuple[str, ...] | None = None,
 ) -> None:
     config_value = config.manifest()
     config_value.pop("debug_root", None)
@@ -203,6 +227,7 @@ def _ensure_checkpoint_run(
         "provider": provider,
         "model": model,
         "num_shards": num_shards,
+        "unit_ids": None if unit_ids is None else list(unit_ids),
         "config": config_value,
     }
     path = root / "run.json"
@@ -408,6 +433,7 @@ def _annotate_document(
     context: _WorkerContext,
     config: HarnessConfig,
     unit_budget: int | None,
+    selected_unit_ids: frozenset[str] | None = None,
 ) -> DocumentAnnotationResult:
     validate_document(original)
     document = copy.deepcopy(original)
@@ -416,11 +442,15 @@ def _annotate_document(
     failures: list[dict[str, str]] = []
     document_annotations = 0
     for unit in document["evidence_units"]:
+        if selected_unit_ids is not None and unit["unit_id"] not in selected_unit_ids:
+            continue
         if unit_budget is not None and document_annotations >= unit_budget:
             break
         annotation = unit["annotation"]
-        if annotation.get("status") in {"complete", "mock"} and annotation.get(
-            "record"
+        if (
+            selected_unit_ids is None
+            and annotation.get("status") in {"complete", "mock"}
+            and annotation.get("record")
         ):
             continue
         try:
@@ -588,9 +618,24 @@ def _annotate(args: argparse.Namespace) -> int:
     if args.output.exists() and not resume:
         raise FileExistsError(f"Annotation output already exists: {args.output}")
 
-    documents = _read_jsonl(args.documents)
+    unit_ids = tuple(getattr(args, "unit_id", None) or ())
+    if len(set(unit_ids)) != len(unit_ids):
+        raise ValueError("--unit-id values must be unique")
+    if unit_ids and args.limit_units_per_document is not None:
+        raise ValueError("--unit-id cannot be combined with --limit-units-per-document")
+
+    documents = [
+        _migrate_legacy_gripper_evidence(document)
+        for document in _read_jsonl(args.documents)
+    ]
     for document in documents:
         validate_document(document)
+        available = {unit["unit_id"] for unit in document["evidence_units"]}
+        missing = sorted(set(unit_ids) - available)
+        if missing:
+            raise ValueError(
+                f"Document {document['document_id']} has no Units: {', '.join(missing)}"
+            )
     debug_root = None
     if args.debug:
         debug_root = args.debug_root or args.output.with_suffix(
@@ -600,6 +645,7 @@ def _annotate(args: argparse.Namespace) -> int:
         debug=args.debug,
         debug_root=debug_root,
         inspection_retries=args.inspection_retries,
+        call2_retries=getattr(args, "call2_retries", 2),
         repair_max_attempts=getattr(args, "repair_max_attempts", 2),
         sequence_audit_max_attempts=getattr(args, "sequence_audit_max_attempts", 2),
         sequence_repair_rounds=getattr(args, "sequence_repair_rounds", 2),
@@ -630,6 +676,7 @@ def _annotate(args: argparse.Namespace) -> int:
         model=model_name,
         num_shards=num_shards,
         config=config,
+        unit_ids=unit_ids or None,
     )
     tracker = RunTracker(
         checkpoint_root,
@@ -699,6 +746,7 @@ def _annotate(args: argparse.Namespace) -> int:
                 context=context,
                 config=config,
                 unit_budget=args.limit_units_per_document,
+                selected_unit_ids=frozenset(unit_ids) if unit_ids else None,
             )
         except Exception as exc:
             tracker.log(
@@ -1129,6 +1177,11 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--limit-documents", type=int)
     annotate.add_argument("--limit-units-per-document", type=int)
     annotate.add_argument(
+        "--unit-id",
+        action="append",
+        help="process or reprocess only this Evidence Unit; repeat for multiple Units",
+    )
+    annotate.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -1164,6 +1217,7 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--debug", action="store_true")
     annotate.add_argument("--debug-root", type=Path)
     annotate.add_argument("--inspection-retries", type=int, default=1)
+    annotate.add_argument("--call2-retries", type=int, default=2)
     annotate.add_argument("--provider-timeout-s", type=float, default=300.0)
     annotate.add_argument("--provider-max-retries", type=int, default=2)
     annotate.add_argument("--ffmpeg-timeout-s", type=float, default=120.0)

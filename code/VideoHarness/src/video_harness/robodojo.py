@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 CAMERA_KEYS = (
     "observation.images.cam_high",
     "observation.images.cam_left_wrist",
@@ -285,3 +287,51 @@ def summarize(records: Iterable[EpisodeRecord]) -> dict[str, Any]:
             str(key): counts[key] for key in sorted(counts)
         },
     }
+
+
+def load_episode_gripper_states(
+    dataset_root: Path,
+    *,
+    data_path: str,
+    episode_index: int,
+    episode_length: int,
+) -> np.ndarray:
+    relative = Path(data_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SourceContractError(f"unsafe LeRobot data path: {relative}")
+    path = Path(dataset_root) / relative
+    parquet = _load_pyarrow_parquet()
+    try:
+        rows = parquet.read_table(
+            path,
+            columns=["episode_index", "frame_index", "observation.state"],
+            filters=[("episode_index", "=", episode_index)],
+        ).to_pylist()
+    except Exception as exc:  # noqa: BLE001 - normalized as a source error
+        raise SourceContractError(
+            f"cannot read LeRobot state parquet {path}: {exc}"
+        ) from exc
+    episode_rows = sorted(
+        rows,
+        key=lambda row: int(row["frame_index"]),
+    )
+    if len(episode_rows) != episode_length or [
+        int(row["frame_index"]) for row in episode_rows
+    ] != list(range(episode_length)):
+        raise SourceContractError(
+            f"episode {episode_index} state rows do not match length {episode_length}"
+        )
+    states = np.asarray(
+        [row["observation.state"] for row in episode_rows],
+        dtype=np.float32,
+    )
+    if states.shape != (episode_length, 14):
+        raise SourceContractError(
+            f"episode {episode_index} state must be [{episode_length},14], got {states.shape}"
+        )
+    grippers = states[:, (6, 13)]
+    if not np.isfinite(grippers).all() or np.any((grippers < 0) | (grippers > 1)):
+        raise SourceContractError(
+            "LeRobot gripper state must be finite and within [0, 1]"
+        )
+    return grippers
