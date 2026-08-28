@@ -95,12 +95,34 @@ class FakeRepairPipeline:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def repair_existing(self, document, unit, *, issue_reason, attempts=None):
-        self.calls.append((document["document_id"], unit["unit_id"], issue_reason))
+    def repair_existing(
+        self,
+        document,
+        unit,
+        *,
+        issue_reason,
+        attempts=None,
+        allowed_boundary_replacements=frozenset(),
+        required_boundary_replacements=frozenset(),
+    ):
+        self.calls.append(
+            (
+                document["document_id"],
+                unit["unit_id"],
+                issue_reason,
+                allowed_boundary_replacements,
+                required_boundary_replacements,
+            )
+        )
         return self.outcomes.pop(0)
 
 
-def _successful_repair(evidence: dict) -> ExistingRepairOutcome:
+def _successful_repair(
+    evidence: dict,
+    *,
+    before_boundary: dict | None = None,
+    after_boundary: dict | None = None,
+) -> ExistingRepairOutcome:
     repaired = copy.deepcopy(evidence)
     repaired["motion_summary"] = "Automatically resolved motion."
     result = RepairResult(
@@ -112,7 +134,13 @@ def _successful_repair(evidence: dict) -> ExistingRepairOutcome:
         "test-repair",
         "repair-model",
     )
-    return ExistingRepairOutcome(repaired, None, None, 1, result)
+    return ExistingRepairOutcome(
+        repaired,
+        before_boundary,
+        after_boundary,
+        1,
+        result,
+    )
 
 
 def test_sequence_projection_is_stable_and_deduplicates_boundaries(changed_evidence):
@@ -147,7 +175,15 @@ def test_sequence_issue_is_repaired_and_reaudited(changed_evidence):
     document = _document(changed_evidence)
     backend = FakeAuditBackend(
         [
-            {"issues": [{"unit_id": "u0000", "reason": "Missing release."}]},
+            {
+                "issues": [
+                    {
+                        "target_type": "unit",
+                        "target_id": "u0000",
+                        "reason": "Missing release.",
+                    }
+                ]
+            },
             {"issues": []},
         ]
     )
@@ -166,7 +202,7 @@ def test_sequence_issue_is_repaired_and_reaudited(changed_evidence):
 
     assert outcome.document["quality_status"] == "accepted"
     assert outcome.repair_rounds == 1
-    assert pipeline.calls[0][1:] == ("u0000", "Missing release.")
+    assert pipeline.calls[0][1:3] == ("u0000", "Missing release.")
     assert (
         outcome.document["evidence_units"][0]["annotation"]["record"]["motion_summary"]
         == "Automatically resolved motion."
@@ -177,7 +213,17 @@ def test_sequence_issue_is_repaired_and_reaudited(changed_evidence):
 def test_unresolved_issue_quarantines_document_without_human_queue(changed_evidence):
     document = _document(changed_evidence)
     backend = FakeAuditBackend(
-        [{"issues": [{"unit_id": "u0001", "reason": "Unresolved continuity."}]}]
+        [
+            {
+                "issues": [
+                    {
+                        "target_type": "unit",
+                        "target_id": "u0001",
+                        "reason": "Unresolved continuity.",
+                    }
+                ]
+            }
+        ]
     )
     pipeline = FakeRepairPipeline([ExistingRepairOutcome(None, None, None, 2, None)])
     outcome = reconcile_document(
@@ -188,7 +234,7 @@ def test_unresolved_issue_quarantines_document_without_human_queue(changed_evide
     )
 
     assert outcome.document["quality_status"] == "quarantined"
-    assert outcome.issues[0]["unit_id"] == "u0001"
+    assert outcome.issues[0]["target_id"] == "u0001"
     validate_document(outcome.document)
 
 
@@ -199,7 +245,15 @@ def test_unit_only_repair_does_not_promote_quarantined_boundary(changed_evidence
     )
     backend = FakeAuditBackend(
         [
-            {"issues": [{"unit_id": "u0000", "reason": "Boundary conflict."}]},
+            {
+                "issues": [
+                    {
+                        "target_type": "unit",
+                        "target_id": "u0000",
+                        "reason": "Boundary conflict.",
+                    }
+                ]
+            },
             {"issues": []},
         ]
     )
@@ -220,6 +274,97 @@ def test_unit_only_repair_does_not_promote_quarantined_boundary(changed_evidence
     assert (
         outcome.document["boundary_states"][1]["annotation"]["record"]["quality_status"]
         == "quarantined"
+    )
+
+
+def test_boundary_issue_atomically_rebuilds_shared_boundary_and_adjacent_units(
+    changed_evidence,
+):
+    document = _document(changed_evidence)
+    replacement = copy.deepcopy(
+        document["boundary_states"][1]["annotation"]["record"]
+    )
+    replacement["observation"]["cam_high"] = "Corrected shared state."
+    backend = FakeAuditBackend(
+        [
+            {
+                "issues": [
+                    {
+                        "target_type": "boundary",
+                        "target_id": "b0001",
+                        "reason": "The shared Boundary is visually incorrect.",
+                    }
+                ]
+            },
+            {"issues": []},
+        ]
+    )
+    pipeline = FakeRepairPipeline(
+        [
+            _successful_repair(changed_evidence, after_boundary=replacement),
+            _successful_repair(changed_evidence),
+        ]
+    )
+
+    outcome = reconcile_document(
+        document,
+        backend=backend,
+        pipeline=pipeline,
+        config=HarnessConfig(sequence_repair_rounds=1),
+    )
+
+    assert outcome.document["quality_status"] == "accepted"
+    assert outcome.document["boundary_states"][1]["annotation"]["record"] == replacement
+    assert [call[1] for call in pipeline.calls] == ["u0000", "u0001"]
+    assert pipeline.calls[0][3:] == (
+        frozenset({"after"}),
+        frozenset({"after"}),
+    )
+    assert pipeline.calls[1][3:] == (frozenset(), frozenset())
+
+
+def test_boundary_window_discards_partial_repair(changed_evidence):
+    document = _document(changed_evidence)
+    original = copy.deepcopy(document)
+    replacement = copy.deepcopy(
+        document["boundary_states"][1]["annotation"]["record"]
+    )
+    replacement["observation"]["cam_high"] = "Corrected shared state."
+    backend = FakeAuditBackend(
+        [
+            {
+                "issues": [
+                    {
+                        "target_type": "boundary",
+                        "target_id": "b0001",
+                        "reason": "The shared Boundary is visually incorrect.",
+                    }
+                ]
+            }
+        ]
+    )
+    pipeline = FakeRepairPipeline(
+        [
+            _successful_repair(changed_evidence, after_boundary=replacement),
+            ExistingRepairOutcome(None, None, None, 2, None),
+        ]
+    )
+
+    outcome = reconcile_document(
+        document,
+        backend=backend,
+        pipeline=pipeline,
+        config=HarnessConfig(sequence_repair_rounds=1),
+    )
+
+    assert outcome.document["quality_status"] == "quarantined"
+    assert (
+        outcome.document["boundary_states"][1]["annotation"]
+        == original["boundary_states"][1]["annotation"]
+    )
+    assert (
+        outcome.document["evidence_units"][0]["annotation"]
+        == original["evidence_units"][0]["annotation"]
     )
 
 

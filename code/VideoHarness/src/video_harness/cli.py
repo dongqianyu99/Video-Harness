@@ -550,7 +550,8 @@ def _annotate_document(
     ):
         failed_issue_list = [
             {
-                "unit_id": unit["unit_id"],
+                "target_type": "unit",
+                "target_id": unit["unit_id"],
                 "reason": "Evidence Unit provider or schema processing failed.",
             }
             for unit in document["evidence_units"]
@@ -560,7 +561,7 @@ def _annotate_document(
         document["quality_provenance"] = {
             "provider": context.repair_backend.provider,
             "model": context.repair_backend.model,
-            "prompt_version": "video-harness.sequence-audit.v3",
+            "prompt_version": "video-harness.sequence-audit.v4",
             "audit_attempts": 0,
             "repair_rounds": 0,
             "sequence_sha256": sequence_projection_sha256(document),

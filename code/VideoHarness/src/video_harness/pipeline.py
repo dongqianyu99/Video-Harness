@@ -263,6 +263,7 @@ class EvidenceUnitPipeline:
         before_context: dict[str, str] | None,
         after_context: dict[str, str] | None,
         allowed_boundary_replacements: frozenset[str],
+        required_boundary_replacements: frozenset[str],
     ) -> None:
         if (call2["detail_observation"] is not None) != (detail is not None):
             raise AnnotationError(
@@ -284,6 +285,16 @@ class EvidenceUnitPipeline:
             and "after" not in allowed_boundary_replacements
         ):
             raise AnnotationError("repair may not replace the accepted AFTER Boundary")
+        replacements = {
+            role
+            for role, observation in (
+                ("before", call2["before_boundary_observation"]),
+                ("after", call2["after_boundary_observation"]),
+            )
+            if observation is not None
+        }
+        if not required_boundary_replacements <= replacements:
+            raise AnnotationError("repair omitted a required Boundary replacement")
         if any(value is not None for value in call2["boundary_conflicts"].values()):
             raise AnnotationError(
                 "successful repair must resolve all Boundary conflicts"
@@ -337,6 +348,7 @@ class EvidenceUnitPipeline:
         attempts: int | None = None,
         store: DebugArtifactStore | None = None,
         allowed_boundary_replacements: frozenset[str] = frozenset(),
+        required_boundary_replacements: frozenset[str] = frozenset(),
     ) -> RepairOutcome:
         if self.repair_backend is None:
             return RepairOutcome(None, None, None, 0, None)
@@ -369,6 +381,9 @@ class EvidenceUnitPipeline:
                 keyframe_sheets=base.keyframe_sheets,
                 boundary_images=base.boundary_images,
                 detail=detail,
+                required_boundary_replacements=tuple(
+                    sorted(required_boundary_replacements)
+                ),
             )
             try:
                 result = self.repair_backend.repair(request)
@@ -395,6 +410,7 @@ class EvidenceUnitPipeline:
                     before_context=before_context,
                     after_context=after_context,
                     allowed_boundary_replacements=allowed_boundary_replacements,
+                    required_boundary_replacements=required_boundary_replacements,
                 )
             except AnnotationError:
                 continue
@@ -521,6 +537,13 @@ class EvidenceUnitPipeline:
                     *conflict_reasons,
                 ]
             ).strip()
+            conflicted_roles = frozenset(
+                role
+                for role, reason in last_result.evidence[
+                    "boundary_conflicts"
+                ].items()
+                if reason is not None
+            )
             repair_outcome = self._run_repair(
                 document=document,
                 unit=unit,
@@ -530,13 +553,8 @@ class EvidenceUnitPipeline:
                 call2=last_result.evidence,
                 issue_reason=issue_reason,
                 store=store,
-                allowed_boundary_replacements=frozenset(
-                    role
-                    for role, reason in last_result.evidence[
-                        "boundary_conflicts"
-                    ].items()
-                    if reason is not None
-                ),
+                allowed_boundary_replacements=conflicted_roles,
+                required_boundary_replacements=conflicted_roles,
             )
             if repair_outcome.evidence is not None:
                 last_result = repair_outcome.evidence
@@ -647,6 +665,8 @@ class EvidenceUnitPipeline:
         *,
         issue_reason: str,
         attempts: int | None = None,
+        allowed_boundary_replacements: frozenset[str] = frozenset(),
+        required_boundary_replacements: frozenset[str] = frozenset(),
     ) -> ExistingRepairOutcome:
         annotation = unit.get("annotation")
         record = annotation.get("record") if isinstance(annotation, dict) else None
@@ -674,7 +694,8 @@ class EvidenceUnitPipeline:
             call2=call2,
             issue_reason=issue_reason,
             attempts=attempts,
-            allowed_boundary_replacements=frozenset({"before", "after"}),
+            allowed_boundary_replacements=allowed_boundary_replacements,
+            required_boundary_replacements=required_boundary_replacements,
         )
         if repair.evidence is None or repair.result is None:
             return ExistingRepairOutcome(

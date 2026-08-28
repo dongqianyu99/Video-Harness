@@ -161,6 +161,7 @@ class RepairRequest:
     keyframe_sheets: tuple[ImagePayload, ...]
     boundary_images: tuple[ImagePayload, ...]
     detail: ImagePayload | None = None
+    required_boundary_replacements: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for field in (
@@ -189,6 +190,11 @@ class RepairRequest:
                 evidence_role="DETAIL",
                 view="cam_high",
             )
+        if any(
+            role not in {"before", "after"}
+            for role in self.required_boundary_replacements
+        ):
+            raise ValueError("RepairRequest Boundary replacements must be before/after")
 
 
 @dataclass(frozen=True)
@@ -425,23 +431,36 @@ def _validate_sequence_audit(value: Any) -> dict[str, Any]:
     if not isinstance(issues, list):
         raise AnnotationError("sequence audit issues must be a list")
     normalized: list[dict[str, str]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for issue in issues:
-        if not isinstance(issue, dict) or set(issue) != {"unit_id", "reason"}:
+        if not isinstance(issue, dict) or set(issue) != {
+            "target_type",
+            "target_id",
+            "reason",
+        }:
             raise AnnotationError("sequence audit issue has unexpected fields")
-        unit_id = issue["unit_id"]
+        target_type = issue["target_type"]
+        target_id = issue["target_id"]
         reason = issue["reason"]
         if (
-            not isinstance(unit_id, str)
-            or not unit_id.strip()
+            target_type not in {"unit", "boundary"}
+            or not isinstance(target_id, str)
+            or not target_id.strip()
             or not isinstance(reason, str)
             or not reason.strip()
         ):
             raise AnnotationError("sequence audit issue fields must be non-empty")
-        if unit_id in seen:
+        key = (target_type, target_id)
+        if key in seen:
             continue
-        seen.add(unit_id)
-        normalized.append({"unit_id": unit_id, "reason": reason.strip()})
+        seen.add(key)
+        normalized.append(
+            {
+                "target_type": target_type,
+                "target_id": target_id.strip(),
+                "reason": reason.strip(),
+            }
+        )
     return {"issues": normalized}
 
 
@@ -658,6 +677,9 @@ class OpenAIBackend:
                     call1=request.call1_motion_summary,
                     call2=request.call2,
                     boundary_context=request.boundary_context,
+                    required_boundary_replacements=(
+                        request.required_boundary_replacements
+                    ),
                 ),
             },
             *_openai_image_content(_repair_images(request)),
@@ -842,6 +864,9 @@ class AnthropicBackend:
                     call1=request.call1_motion_summary,
                     call2=request.call2,
                     boundary_context=request.boundary_context,
+                    required_boundary_replacements=(
+                        request.required_boundary_replacements
+                    ),
                 ),
             },
             *_anthropic_image_content(_repair_images(request)),

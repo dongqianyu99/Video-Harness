@@ -15,8 +15,8 @@ TOOL_NAME = "record_transition_evidence"
 INSPECTION_TOOL_NAME = "locate_temporal_detail"
 REPAIR_TOOL_NAME = "resolve_transition_repair"
 SEQUENCE_AUDIT_TOOL_NAME = "audit_sequence_consistency"
-REPAIR_PROMPT_VERSION = "video-harness.repair.v4"
-SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v3"
+REPAIR_PROMPT_VERSION = "video-harness.repair.v5"
+SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v4"
 CAMERA_CONTRACT = system_prompt_camera_contract()
 ACTION_EVIDENCE_CONTRACT = """Action-evidence contract:
 - Claims of grasp, hold, release, or contact require direct supporting visual evidence from the corresponding wrist camera.
@@ -47,9 +47,13 @@ SEQUENCE_AUDIT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["unit_id", "reason"],
+                "required": ["target_type", "target_id", "reason"],
                 "properties": {
-                    "unit_id": {"type": "string"},
+                    "target_type": {
+                        "type": "string",
+                        "enum": ["unit", "boundary"],
+                    },
+                    "target_id": {"type": "string"},
                     "reason": {"type": "string"},
                 },
             },
@@ -247,7 +251,7 @@ Resolve only the identified Evidence Unit. If the visual evidence supports one c
 Return exactly one resolve_transition_repair tool call and no other text."""
 
 
-SEQUENCE_AUDIT_SYSTEM_PROMPT = """You are the Video Harness automatic sequence auditor. Check whether every Boundary State change is explained by its connecting Evidence Unit, whether persistent interactions remain coherent across adjacent Units, and whether Call 1 motion evidence materially conflicts with the transition interpretation. Report only material issues that require automatic reprocessing. An empty issue list means the complete canonical sequence is coherent. Return exactly one audit_sequence_consistency tool call and no other text."""
+SEQUENCE_AUDIT_SYSTEM_PROMPT = """You are the Video Harness automatic sequence auditor. Check whether every Boundary State change is explained by its connecting Evidence Unit, whether persistent interactions remain coherent across adjacent Units, and whether motion evidence materially conflicts with the transition interpretation. Report only material issues that require automatic reprocessing. Target a Boundary when its static description is the likely source of contradictions across adjacent Units; report that shared Boundary once rather than reporting both neighboring Units. Otherwise target the specific Evidence Unit. An empty issue list means the complete canonical sequence is coherent. Return exactly one audit_sequence_consistency tool call and no other text."""
 
 
 def inspection_user_prompt(
@@ -335,14 +339,24 @@ def repair_user_prompt(
     call1: str,
     call2: dict[str, Any],
     boundary_context: str,
+    required_boundary_replacements: tuple[str, ...],
 ) -> str:
+    replacement_instruction = (
+        " No Boundary replacement is required; return null Boundary observations."
+        if not required_boundary_replacements
+        else " You must regenerate these Boundary descriptions from their supplied "
+        "images: " + ", ".join(required_boundary_replacements) + "."
+    )
     return (
         f"Document={document_id} | EvidenceUnit={unit_id}. Automatic targeted repair. "
         f"Task instruction: {task_instruction}. Detected issue: {issue_reason}. "
         f"Bounded adjacent context: {boundary_context}. Original Call 1: {call1}. "
         "Original Call 2: "
         + json.dumps(call2, ensure_ascii=False, sort_keys=True)
-        + ". Reconcile only from supplied evidence; return the strict repair tool call."
+        + "."
+        + replacement_instruction
+        + " Reconcile only from supplied evidence; regenerate the complete corrected "
+        "transition record and return the strict repair tool call."
     )
 
 

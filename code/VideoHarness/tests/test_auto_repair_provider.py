@@ -106,8 +106,12 @@ def test_repair_rejects_sufficient_claim_without_resolved_output(call2_record) -
 def test_sequence_audit_deduplicates_unit_issues() -> None:
     audit = {
         "issues": [
-            {"unit_id": "u0001", "reason": "first"},
-            {"unit_id": "u0001", "reason": "duplicate"},
+            {"target_type": "unit", "target_id": "u0001", "reason": "first"},
+            {
+                "target_type": "unit",
+                "target_id": "u0001",
+                "reason": "duplicate",
+            },
         ]
     }
 
@@ -132,7 +136,11 @@ def test_sequence_audit_deduplicates_unit_issues() -> None:
             task_instruction="Perform the task.",
         )
     )
-    assert result.audit == {"issues": [{"unit_id": "u0001", "reason": "first"}]}
+    assert result.audit == {
+        "issues": [
+            {"target_type": "unit", "target_id": "u0001", "reason": "first"}
+        ]
+    }
 
 
 def test_mock_repair_is_automatically_insufficient(call2_record) -> None:
