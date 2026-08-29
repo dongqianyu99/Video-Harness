@@ -101,7 +101,7 @@ class EvidenceUnitPipeline:
         document: dict[str, Any],
         unit: dict[str, Any],
         base: BaseMedia,
-    ) -> tuple[InspectionResult, DetailRequest | None, str, str | None]:
+    ) -> tuple[InspectionResult, DetailRequest, str, str | None]:
         previous_motion_summary = self._previous_motion_summary(document, unit)
         request = InspectionRequest(
             document_id=document["document_id"],
@@ -115,6 +115,11 @@ class EvidenceUnitPipeline:
         )
         last_result: InspectionResult | None = None
         last_error: Exception | None = None
+        fallback_detail = DetailRequest(
+            (0.0, 0.0, 1.0, 1.0),
+            0,
+            base.unit_frames.frame_count - 1,
+        )
         for attempt in range(self.config.inspection_retries + 1):
             try:
                 result = self.inspection_backend.inspect(request)
@@ -135,21 +140,21 @@ class EvidenceUnitPipeline:
                 last_error = exc
                 if attempt < self.config.inspection_retries:
                     continue
-                return result, None, "invalid-request-omitted", str(exc)
-            return (
-                result,
-                detail,
-                "requested" if detail is not None else "not-requested",
-                None,
-            )
+                return result, fallback_detail, "invalid-request-fallback", str(exc)
+            return result, detail, "requested", None
         if last_result is not None:
-            return last_result, None, "inspection-failed-omitted", str(last_error)
+            return (
+                last_result,
+                fallback_detail,
+                "inspection-failed-fallback",
+                str(last_error),
+            )
         fallback = InspectionResult(
             inspection=mock_inspection_record(),
             provider="harness-fallback",
             requested_model=self.inspection_backend.model,
         )
-        return fallback, None, "inspection-failed-omitted", str(last_error)
+        return fallback, fallback_detail, "inspection-failed-fallback", str(last_error)
 
     @staticmethod
     def _previous_motion_summary(
@@ -460,11 +465,7 @@ class EvidenceUnitPipeline:
             unit,
             base,
         )
-        detail = (
-            None
-            if detail_request is None
-            else self.media_builder.build_detail(base, detail_request)
-        )
+        detail = self.media_builder.build_detail(base, detail_request)
         if store.enabled:
             store.write_many(self.media_builder.debug_media(base, detail))
             store.write_json("call1.json", asdict(inspection))
@@ -689,15 +690,19 @@ class EvidenceUnitPipeline:
             "before_boundary_observation": None,
             "after_boundary_observation": None,
             "boundary_conflicts": {"before": None, "after": None},
-            "detail_observation": None,
+            "detail_observation": record["detail_observation"],
             "unit_interpretation": record["unit_interpretation"],
             "causal_validation": record["causal_validation"],
         }
+        detail = self.media_builder.build_detail(
+            base,
+            DetailRequest((0.0, 0.0, 1.0, 1.0), 0, base.unit_frames.frame_count - 1),
+        )
         repair = self._run_repair(
             document=document,
             unit=unit,
             base=base,
-            detail=None,
+            detail=detail,
             motion_summary=motion_summary,
             call2=call2,
             issue_reason=issue_reason,

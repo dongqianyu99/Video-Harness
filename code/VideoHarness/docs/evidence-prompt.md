@@ -4,12 +4,12 @@ The harness uses a progressive two-call protocol. Call 1 receives one overview,
 one keyframe sheet per camera, and measured left/right gripper aperture aligned
 with the keyframe sheet, with no task text. It produces one concise,
 task-blind Motion Summary sentence without repeating the static scene, plus a
-bounded optional `cam_high` ROI. Call 2 receives that Motion Summary,
+bounded `cam_high` ROI. Call 2 receives that Motion Summary,
 six labeled original-resolution Boundary images, the same gripper samples, any
-accepted shared Boundary descriptions, optional detail, and the Task Instruction. It does not receive
+accepted shared Boundary descriptions, required detail, and the Task Instruction. It does not receive
 overview or keyframe sheets.
 
-Call 2 serializes visual evidence first: Boundary images and optional detail,
+Call 2 serializes visual evidence first: Boundary images and detail,
 followed by the Call 1 Motion Summary and accepted Boundary text, with the Task
 Instruction last. This reduces anchoring on the fallible Call 1 draft.
 
@@ -20,13 +20,13 @@ task-conditioned interpretation or longer accumulated history enters Call 1.
 
 The Call 1 `interaction_window` is always meaningful. It preserves the visible
 precondition, primary change, and immediate outcome, or the most informative
-motion interval when no localized interaction is resolved. A detail crop is
-requested only when enlarging a fixed `cam_high` region can add evidence.
+motion interval when no localized interaction is resolved. Call 1 always selects
+one fixed `cam_high` region that preserves the context needed to interpret it.
 
 All image labels include view and Evidence Unit frame metadata. The Call 1 Motion
 Summary and gripper samples are passed to Call 2 as temporal evidence, not an authoritative
 conclusion. Call 2 revises it using the task context, high-resolution Boundary
-images, accepted Boundary descriptions, and optional detail; that final Motion
+images, accepted Boundary descriptions, and detail; that final Motion
 Summary is stored in canonical evidence. Measured samples remain compiler inputs
 and optional debug artifacts rather than document fields. Debug mode retains the Call 2 result, automatic
 repair attempts, and final decision; normal mode deletes intermediate media.
@@ -37,7 +37,7 @@ it against the corresponding images and returns `null` instead of duplicating it
 If that description materially contradicts the images, Call 2 records a concise
 `boundary_conflicts` reason and requests retry; the shared Boundary becomes
 ineligible until automatic Targeted Reprocessing resolves or quarantines it.
-It separately describes optional detail, produces a one-sentence revised Motion
+It separately describes detail, produces a one-sentence revised Motion
 Summary, a one-sentence Action Description, and a one-sentence Task Role, and performs a
 causal validation with a one-sentence reason. A material inconsistency enters
 Targeted Reprocessing with the full temporal sheets and prior outputs. Complete
@@ -61,6 +61,11 @@ Grasp, hold, release, and contact claims require direct supporting evidence from
 the corresponding wrist camera. Before causal status can pass, each key Atomic
 Action Claim must map to visual evidence from an appropriate view; unsupported
 claims are weakened or removed, and the causal reason summarizes that mapping.
+Both calls maintain one physically coherent account of persistent entities and
+their relations to the end effectors; unsupported state changes remain uncertain.
+The Action Description is a task-grounded restatement of the finalized Motion
+Summary and cannot add physical claims beyond it. Sequence Audit applies the same
+continuity and entailment constraints across adjacent Boundaries and Units.
 Camera authority is not infallibility; occlusion and unresolved evidence remain
 explicitly uncertain. Apparent wrist-image motion is not global entity motion.
 Every image label uses:

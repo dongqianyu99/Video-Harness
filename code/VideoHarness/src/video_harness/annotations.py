@@ -94,7 +94,7 @@ class EvidenceRequest:
     before_boundary_observation: dict[str, str] | None
     after_boundary_observation: dict[str, str] | None
     task_instruction: str
-    detail: ImagePayload | None
+    detail: ImagePayload
     boundary_images: tuple[ImagePayload, ...]
     gripper_state: GripperState
 
@@ -120,10 +120,9 @@ class EvidenceRequest:
         )
         for (role, view), payload in zip(expected, self.boundary_images, strict=True):
             validate_image_label(payload.label, evidence_role=role, view=view)
-        if self.detail is not None:
-            validate_image_label(
-                self.detail.label, evidence_role="DETAIL", view="cam_high"
-            )
+        if self.detail is None:
+            raise ValueError("EvidenceRequest requires a detail image")
+        validate_image_label(self.detail.label, evidence_role="DETAIL", view="cam_high")
 
 
 @dataclass(frozen=True)
@@ -164,7 +163,7 @@ class RepairRequest:
     keyframe_sheets: tuple[ImagePayload, ...]
     boundary_images: tuple[ImagePayload, ...]
     gripper_state: GripperState
-    detail: ImagePayload | None = None
+    detail: ImagePayload
     required_boundary_replacements: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -188,12 +187,13 @@ class RepairRequest:
                 "RepairRequest requires three overviews, three keyframe sheets, "
                 "and six Boundary images"
             )
-        if self.detail is not None:
-            validate_image_label(
-                self.detail.label,
-                evidence_role="DETAIL",
-                view="cam_high",
-            )
+        if self.detail is None:
+            raise ValueError("RepairRequest requires a detail image")
+        validate_image_label(
+            self.detail.label,
+            evidence_role="DETAIL",
+            view="cam_high",
+        )
         if any(
             role not in {"before", "after"}
             for role in self.required_boundary_replacements
@@ -256,12 +256,16 @@ class RepairBackend(Protocol):
 
 class MockInspectionBackend:
     provider = "mock"
-    model = "deterministic-no-detail"
+    model = "deterministic-required-detail"
 
     def inspect(self, request: InspectionRequest) -> InspectionResult:
-        del request
+        inspection = mock_inspection_record()
+        inspection["interaction_window"]["end_frame"] = min(
+            25,
+            request.episode_end_frame - request.episode_start_frame,
+        )
         return InspectionResult(
-            inspection=mock_inspection_record(),
+            inspection=inspection,
             provider=self.provider,
             requested_model=self.model,
         )
@@ -358,17 +362,15 @@ def _inspection_images(request: InspectionRequest) -> tuple[ImagePayload, ...]:
 
 
 def _evidence_images(request: EvidenceRequest) -> tuple[ImagePayload, ...]:
-    detail = () if request.detail is None else (request.detail,)
-    return (*request.boundary_images, *detail)
+    return (*request.boundary_images, request.detail)
 
 
 def _repair_images(request: RepairRequest) -> tuple[ImagePayload, ...]:
-    detail = () if request.detail is None else (request.detail,)
     return (
         *request.overviews,
         *request.keyframe_sheets,
         *request.boundary_images,
-        *detail,
+        request.detail,
     )
 
 
@@ -596,7 +598,7 @@ class OpenAIBackend:
             instructions=INSPECTION_SYSTEM_PROMPT,
             content=content,
             tool_name=INSPECTION_TOOL_NAME,
-            description="Locate an optional cam_high detail region.",
+            description="Locate the required cam_high detail region.",
             schema=INSPECTION_SCHEMA,
             role="inspection",
             max_output_tokens=INSPECTION_MAX_OUTPUT_TOKENS,
@@ -637,7 +639,6 @@ class OpenAIBackend:
                     episode_start_frame=request.episode_start_frame,
                     episode_end_frame=request.episode_end_frame,
                     task_instruction=request.task_instruction,
-                    detail_supplied=request.detail is not None,
                     before_boundary_supplied=(
                         request.before_boundary_observation is not None
                     ),
@@ -787,7 +788,7 @@ class AnthropicBackend:
             system=INSPECTION_SYSTEM_PROMPT,
             content=content,
             tool_name=INSPECTION_TOOL_NAME,
-            description="Locate an optional cam_high detail region.",
+            description="Locate the required cam_high detail region.",
             schema=INSPECTION_SCHEMA,
             role="inspection",
         )
@@ -827,7 +828,6 @@ class AnthropicBackend:
                     episode_start_frame=request.episode_start_frame,
                     episode_end_frame=request.episode_end_frame,
                     task_instruction=request.task_instruction,
-                    detail_supplied=request.detail is not None,
                     before_boundary_supplied=(
                         request.before_boundary_observation is not None
                     ),

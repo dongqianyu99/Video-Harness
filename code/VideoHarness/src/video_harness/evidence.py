@@ -5,20 +5,12 @@ from typing import Any
 
 from .camera_contract import CAMERA_VIEWS
 
-EVIDENCE_SCHEMA_VERSION = "video-harness.evidence.v3"
+EVIDENCE_SCHEMA_VERSION = "video-harness.evidence.v5"
 INSPECTION_SCHEMA_VERSION = "video-harness.inspection"
 BOUNDARY_STATE_SCHEMA_VERSION = "video-harness.boundary-state"
 
 CAUSAL_VALIDATION_STATUSES = ("pass", "retry")
 QUALITY_STATUSES = ("accepted", "quarantined")
-DETAIL_REASONS = (
-    "fine_spatial_detail",
-    "temporal_disambiguation",
-    "occlusion",
-    "other",
-)
-
-
 class EvidenceValidationError(ValueError):
     """Raised when a provider output violates a Harness evidence contract."""
 
@@ -111,7 +103,6 @@ def validate_inspection_record(value: Any) -> dict[str, Any]:
         {
             "motion_summary",
             "interaction_window",
-            "needs_detail",
             "detail_request",
         },
     )
@@ -136,47 +127,29 @@ def validate_inspection_record(value: Any) -> dict[str, Any]:
     if start_frame > end_frame:
         raise EvidenceValidationError("inspection interaction window is reversed")
 
-    needs_detail = record["needs_detail"]
-    if not isinstance(needs_detail, bool):
-        raise EvidenceValidationError("inspection.needs_detail must be boolean")
-
-    detail = record["detail_request"]
-    normalized_detail: dict[str, Any] | None = None
-    if detail is not None:
-        detail = _exact_object(
-            detail,
-            "inspection.detail_request",
-            {"x_min", "y_min", "x_max", "y_max", "reason"},
-        )
-        x_min = _number(detail["x_min"], "inspection.detail_request.x_min")
-        y_min = _number(detail["y_min"], "inspection.detail_request.y_min")
-        x_max = _number(detail["x_max"], "inspection.detail_request.x_max")
-        y_max = _number(detail["y_max"], "inspection.detail_request.y_max")
-        if x_min >= x_max or y_min >= y_max:
-            raise EvidenceValidationError("inspection detail ROI is empty or reversed")
-        normalized_detail = {
-            "x_min": x_min,
-            "y_min": y_min,
-            "x_max": x_max,
-            "y_max": y_max,
-            "reason": _enum(
-                detail["reason"],
-                "inspection.detail_request.reason",
-                DETAIL_REASONS,
-            ),
-        }
-    if needs_detail != (normalized_detail is not None):
-        raise EvidenceValidationError(
-            "inspection needs_detail and detail_request must agree"
-        )
+    detail = _exact_object(
+        record["detail_request"],
+        "inspection.detail_request",
+        {"x_min", "y_min", "x_max", "y_max"},
+    )
+    x_min = _number(detail["x_min"], "inspection.detail_request.x_min")
+    y_min = _number(detail["y_min"], "inspection.detail_request.y_min")
+    x_max = _number(detail["x_max"], "inspection.detail_request.x_max")
+    y_max = _number(detail["y_max"], "inspection.detail_request.y_max")
+    if x_min >= x_max or y_min >= y_max:
+        raise EvidenceValidationError("inspection detail ROI is empty or reversed")
     return {
         "motion_summary": motion_summary,
         "interaction_window": {
             "start_frame": start_frame,
             "end_frame": end_frame,
         },
-        "needs_detail": needs_detail,
-        "detail_request": normalized_detail,
+        "detail_request": {
+            "x_min": x_min,
+            "y_min": y_min,
+            "x_max": x_max,
+            "y_max": y_max,
+        },
     }
 
 
@@ -236,9 +209,7 @@ def _normalize_transition_fields(
     record: dict[str, Any],
     field: str,
 ) -> dict[str, Any]:
-    detail = record["detail_observation"]
-    if detail is not None:
-        detail = _text(detail, f"{field}.detail_observation")
+    detail = _text(record["detail_observation"], f"{field}.detail_observation")
     interpretation = _exact_object(
         record["unit_interpretation"],
         f"{field}.unit_interpretation",
@@ -345,7 +316,7 @@ def mock_call2_record(
             else None
         ),
         "boundary_conflicts": {"before": None, "after": None},
-        "detail_observation": None,
+        "detail_observation": "The mandatory detail sheet remains inconclusive.",
         "unit_interpretation": {
             "action_description": "The mock backend does not infer the demonstrated action.",
             "task_role": "The mock backend does not infer what this Evidence Unit contributes to the task.",
@@ -368,8 +339,12 @@ def mock_inspection_record() -> dict[str, Any]:
     return {
         "motion_summary": "The mock backend does not summarize the demonstrated motion.",
         "interaction_window": {"start_frame": 0, "end_frame": 25},
-        "needs_detail": False,
-        "detail_request": None,
+        "detail_request": {
+            "x_min": 0.1,
+            "y_min": 0.1,
+            "x_max": 0.85,
+            "y_max": 0.85,
+        },
     }
 
 

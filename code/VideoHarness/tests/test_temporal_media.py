@@ -205,14 +205,12 @@ def test_boundary_images_are_six_labeled_jpegs_in_before_then_after_order() -> N
 
 def test_detail_request_expands_valid_roi_and_uses_cam_high_only() -> None:
     inspection = {
-        "needs_detail": True,
         "interaction_window": {"start_frame": 3, "end_frame": 9},
         "detail_request": {
             "x_min": 0.25,
             "y_min": 0.25,
             "x_max": 0.75,
             "y_max": 0.75,
-            "reason": "fine_spatial_detail",
         },
     }
     request = validate_detail_request(inspection)
@@ -227,12 +225,12 @@ def test_detail_request_expands_valid_roi_and_uses_cam_high_only() -> None:
     assert _open(payload.data).width > 1900
 
 
-def test_detail_request_is_optional_and_invalid_requests_fail_closed() -> None:
-    assert validate_detail_request({"needs_detail": False}) is None
+def test_detail_request_is_required_and_invalid_requests_fail_closed() -> None:
+    with pytest.raises(TypeError, match="missing"):
+        validate_detail_request({})
     with pytest.raises(ValueError, match="outside accepted bounds"):
         validate_detail_request(
             {
-                "needs_detail": True,
                 "interaction_window": {"start_frame": 0, "end_frame": 2},
                 "detail_request": {
                     "x_min": 0.0,
@@ -245,7 +243,6 @@ def test_detail_request_is_optional_and_invalid_requests_fail_closed() -> None:
     with pytest.raises(ValueError, match="within"):
         validate_detail_request(
             {
-                "needs_detail": True,
                 "interaction_window": {"start_frame": 0, "end_frame": 26},
                 "detail_request": {
                     "x_min": 0.1,

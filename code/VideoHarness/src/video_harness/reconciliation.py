@@ -403,7 +403,7 @@ def _quality_provenance(
         "prompt_version": (
             audit.prompt_version
             if audit is not None
-            else "video-harness.sequence-audit.v4"
+            else "video-harness.sequence-audit.v5"
         ),
         "audit_attempts": audit_attempts,
         "repair_rounds": repair_rounds,

@@ -72,7 +72,6 @@ def _call2(
     status: str,
     *,
     action: str = "The robot approaches the object.",
-    detail: bool = False,
     include_before_boundary: bool = True,
     include_after_boundary: bool = True,
     boundary_conflicts: dict[str, str | None] | None = None,
@@ -84,8 +83,6 @@ def _call2(
     record["motion_summary"] = "The revised motion is grounded in Call 2 evidence."
     record["detail_observation"] = (
         "The detail sheet shows the gripper closing near the object."
-        if detail
-        else None
     )
     record["unit_interpretation"] = {
         "action_description": action,
@@ -169,8 +166,7 @@ class FakeInspectionBackend:
     provider = "test"
     model = "inspection"
 
-    def __init__(self, *, needs_detail: bool, failures: int = 0) -> None:
-        self.needs_detail = needs_detail
+    def __init__(self, *, failures: int = 0) -> None:
         self.remaining_failures = failures
         self.calls = 0
         self.requests = []
@@ -182,23 +178,16 @@ class FakeInspectionBackend:
             self.remaining_failures -= 1
             raise AnnotationError("transient inspection failure")
         assert len(request.overviews) == len(request.keyframe_sheets) == 3
-        detail = (
-            {
-                "x_min": 0.2,
-                "y_min": 0.2,
-                "x_max": 0.5,
-                "y_max": 0.5,
-                "reason": "fine_spatial_detail",
-            }
-            if self.needs_detail
-            else None
-        )
         return InspectionResult(
             inspection={
                 "motion_summary": "The right gripper approaches a visible object.",
                 "interaction_window": {"start_frame": 4, "end_frame": 10},
-                "needs_detail": self.needs_detail,
-                "detail_request": detail,
+                "detail_request": {
+                    "x_min": 0.2,
+                    "y_min": 0.2,
+                    "x_max": 0.5,
+                    "y_max": 0.5,
+                },
             },
             provider=self.provider,
             requested_model=self.model,
@@ -245,13 +234,13 @@ class FakeRepairBackend:
         raise AssertionError(request)
 
 
-def test_pipeline_passes_call1_motion_boundaries_and_optional_detail_to_call2() -> None:
+def test_pipeline_passes_call1_motion_boundaries_and_detail_to_call2() -> None:
     document, unit = _document_and_unit()
     media = FakeMediaBuilder()
-    revised_call2 = _call2("pass", detail=True)
+    revised_call2 = _call2("pass")
     evidence = FakeEvidenceBackend([revised_call2])
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=True),
+        inspection_backend=FakeInspectionBackend(),
         evidence_backend=evidence,
         media_builder=media,
         config=HarnessConfig(),
@@ -282,7 +271,7 @@ def test_pipeline_reuses_accepted_shared_boundary_without_describing_it_again() 
     }
     evidence = FakeEvidenceBackend([_call2("pass", include_before_boundary=False)])
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=False),
+        inspection_backend=FakeInspectionBackend(),
         evidence_backend=evidence,
         media_builder=FakeMediaBuilder(),
         config=HarnessConfig(),
@@ -315,7 +304,7 @@ def test_pipeline_resume_reuses_both_accepted_boundaries() -> None:
         ]
     )
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=False),
+        inspection_backend=FakeInspectionBackend(),
         evidence_backend=evidence,
         media_builder=FakeMediaBuilder(),
         config=HarnessConfig(),
@@ -351,7 +340,7 @@ def test_pipeline_flags_conflicting_shared_boundary_without_duplicating_it() -> 
         ]
     )
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=False),
+        inspection_backend=FakeInspectionBackend(),
         evidence_backend=evidence,
         media_builder=FakeMediaBuilder(),
         config=HarnessConfig(),
@@ -402,7 +391,7 @@ def test_pipeline_passes_only_accepted_previous_task_blind_motion_context() -> N
             for order in range(3)
         ],
     }
-    inspection = FakeInspectionBackend(needs_detail=False)
+    inspection = FakeInspectionBackend()
     EvidenceUnitPipeline(
         inspection_backend=inspection,
         evidence_backend=FakeEvidenceBackend(),
@@ -434,7 +423,7 @@ def test_retry_enters_targeted_repair_and_commits_resolved_transition() -> None:
         ]
     )
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=False),
+        inspection_backend=FakeInspectionBackend(),
         evidence_backend=FakeEvidenceBackend([unresolved]),
         repair_backend=repair,
         media_builder=FakeMediaBuilder(),
@@ -456,17 +445,6 @@ def test_retry_enters_targeted_repair_and_commits_resolved_transition() -> None:
     assert len(repair.requests[0].boundary_images) == 6
 
 
-def test_call2_rejects_detail_description_without_supplied_media() -> None:
-    document, unit = _document_and_unit()
-    with pytest.raises(AnnotationError, match="detail observation"):
-        EvidenceUnitPipeline(
-            inspection_backend=FakeInspectionBackend(needs_detail=True),
-            evidence_backend=FakeEvidenceBackend([_call2("pass")]),
-            media_builder=FakeMediaBuilder(),
-            config=HarnessConfig(call2_retries=0),
-        ).run(document, unit)
-
-
 def test_unresolved_targeted_repairs_quarantine_transition() -> None:
     document, unit = _document_and_unit()
     unresolved = _call2("retry", action="The transition remains inconsistent.")
@@ -481,7 +459,7 @@ def test_unresolved_targeted_repairs_quarantine_transition() -> None:
         ]
     )
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=False),
+        inspection_backend=FakeInspectionBackend(),
         evidence_backend=FakeEvidenceBackend([unresolved]),
         repair_backend=repair,
         media_builder=FakeMediaBuilder(),
@@ -497,7 +475,7 @@ def test_unresolved_targeted_repairs_quarantine_transition() -> None:
 
 def test_debug_mode_saves_call2_repair_and_final_selection(tmp_path: Path) -> None:
     document, unit = _document_and_unit()
-    resolved = _call2("pass", detail=True)
+    resolved = _call2("pass")
     repair = FakeRepairBackend(
         [
             {
@@ -508,8 +486,8 @@ def test_debug_mode_saves_call2_repair_and_final_selection(tmp_path: Path) -> No
         ]
     )
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=True),
-        evidence_backend=FakeEvidenceBackend([_call2("retry", detail=True)]),
+        inspection_backend=FakeInspectionBackend(),
+        evidence_backend=FakeEvidenceBackend([_call2("retry")]),
         repair_backend=repair,
         media_builder=FakeMediaBuilder(),
         config=HarnessConfig(debug=True, debug_root=tmp_path),
@@ -530,7 +508,7 @@ def test_call2_provider_error_fails_with_scoped_debug(tmp_path: Path) -> None:
     document, unit = _document_and_unit()
     with pytest.raises(AnnotationError, match="provider failure"):
         EvidenceUnitPipeline(
-            inspection_backend=FakeInspectionBackend(needs_detail=False),
+            inspection_backend=FakeInspectionBackend(),
             evidence_backend=FakeEvidenceBackend(
                 [AnnotationError("provider failure") for _ in range(3)]
             ),
@@ -555,7 +533,7 @@ def test_call2_retries_malformed_output_without_rebuilding_media(tmp_path: Path)
     )
 
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=False),
+        inspection_backend=FakeInspectionBackend(),
         evidence_backend=evidence,
         media_builder=media,
         config=HarnessConfig(debug=True, debug_root=tmp_path),
@@ -575,7 +553,7 @@ def test_inspection_retry_and_fallback_do_not_repeat_media_decode(
     document, unit = _document_and_unit()
     media = FakeMediaBuilder()
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=True, failures=2),
+        inspection_backend=FakeInspectionBackend(failures=2),
         evidence_backend=FakeEvidenceBackend(),
         media_builder=media,
         config=HarnessConfig(
@@ -586,13 +564,13 @@ def test_inspection_retry_and_fallback_do_not_repeat_media_decode(
     ).run(document, unit)
 
     assert media.base_calls == 1
-    assert result.detail_status == "inspection-failed-omitted"
+    assert result.detail_status == "inspection-failed-fallback"
     assert result.inspection.provider == "harness-fallback"
     assert result.quality_status == "quarantined"
     assert result.evidence.evidence["causal_validation"]["status"] == "retry"
     root = Path(result.debug_root or "")
     assert (root / "call1-error.json").is_file()
-    assert not (root / "sheets/cam_high-detail.png").exists()
+    assert (root / "sheets/cam_high-detail.png").is_file()
 
 
 def test_inspection_failure_can_be_recovered_from_full_temporal_evidence() -> None:
@@ -612,7 +590,7 @@ def test_inspection_failure_can_be_recovered_from_full_temporal_evidence() -> No
         ]
     )
     result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(needs_detail=False, failures=2),
+        inspection_backend=FakeInspectionBackend(failures=2),
         evidence_backend=FakeEvidenceBackend([_call2("pass")]),
         repair_backend=repair,
         media_builder=FakeMediaBuilder(),

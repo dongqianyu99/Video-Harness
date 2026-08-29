@@ -155,8 +155,8 @@ subprocesses and provider clients have explicit configurable timeouts.
 - Call 1 Motion Summary is passed to Call 2 as task-blind intermediate evidence;
   it is one concise sentence and does not repeat the static scene;
 - Call 2 revises that draft using task context, high-resolution Boundary images,
-  accepted Boundary descriptions, the same gripper aperture samples, and optional
-  detail, and only the revised
+  accepted Boundary descriptions, the same gripper aperture samples, and detail,
+  and only the revised
   Motion Summary is stored in canonical evidence;
 - Call 2 receives no overview or keyframe sheets;
 - Call 2 receives Boundary/detail images before the fallible Call 1 Motion
@@ -165,7 +165,7 @@ subprocesses and provider clients have explicit configurable timeouts.
   for a Boundary that has no accepted canonical description;
 - a material conflict with an accepted Boundary is recorded and enters Targeted
   Reprocessing without creating a second canonical description;
-- Call 2 may use the optional `cam_high` detail sheet;
+- Call 2 always uses the `cam_high` detail sheet;
 - Call 2 emits one sentence per new Boundary view, one revised Motion Summary,
   one Action Description, one Task Role, and one causal-reason sentence;
 - grasp, hold, release, and contact require direct supporting evidence from the

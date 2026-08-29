@@ -47,6 +47,7 @@ def _repair_request(call2: dict) -> RepairRequest:
             left=(1.0,) * 6,
             right=(1.0, 0.8, 0.4, 0.4, 0.8, 1.0),
         ),
+        detail=_image("DETAIL", "cam_high"),
     )
 
 
@@ -79,7 +80,7 @@ def test_openai_targeted_repair_uses_full_temporal_evidence(call2_record) -> Non
     ).repair(_repair_request(call2_record))
 
     content = responses.kwargs["input"][0]["content"]
-    assert sum(item["type"] == "input_image" for item in content) == 12
+    assert sum(item["type"] == "input_image" for item in content) == 13
     assert result.repair["evidence_sufficient"] is True
     assert result.repair["resolved_call2"]["causal_validation"]["status"] == "pass"
 

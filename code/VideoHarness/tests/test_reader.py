@@ -42,7 +42,7 @@ def _changed_evidence() -> dict[str, Any]:
                 view: "The bread slice is inside the toaster." for view in views
             },
             "boundary_conflicts": {"before": None, "after": None},
-            "detail_observation": None,
+            "detail_observation": "The detail sheet supports the insertion motion.",
             "unit_interpretation": {
                 "action_description": "The robot inserts the bread slice into the toaster.",
                 "task_role": "This Evidence Unit loads one bread slice for the toasting task.",

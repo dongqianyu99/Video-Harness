@@ -33,7 +33,7 @@ def test_canonical_evidence_uses_call2_motion_summary(call2_record) -> None:
         call2_record,
         quality_status="accepted",
     )
-    assert EVIDENCE_SCHEMA_VERSION == "video-harness.evidence.v3"
+    assert EVIDENCE_SCHEMA_VERSION == "video-harness.evidence.v5"
     assert evidence["motion_summary"] == call2_record["motion_summary"]
     assert evidence["quality_status"] == "accepted"
     assert validate_evidence_record(copy.deepcopy(evidence)) == evidence
@@ -108,22 +108,20 @@ def test_inspection_record_validates_detail_contract() -> None:
     record = {
         "motion_summary": "The left gripper approaches one small yellow object.",
         "interaction_window": {"start_frame": 7, "end_frame": 19},
-        "needs_detail": True,
         "detail_request": {
             "x_min": 0.05,
             "y_min": 0.25,
             "x_max": 0.40,
             "y_max": 0.80,
-            "reason": "fine_spatial_detail",
         },
     }
     assert validate_inspection_record(record) == record
 
 
-def test_inspection_needs_detail_and_roi_must_agree() -> None:
+def test_inspection_requires_detail_roi() -> None:
     record = mock_inspection_record()
-    record["needs_detail"] = True
-    with pytest.raises(EvidenceValidationError, match="must agree"):
+    record["detail_request"] = None
+    with pytest.raises(EvidenceValidationError, match="must have exactly"):
         validate_inspection_record(record)
 
 

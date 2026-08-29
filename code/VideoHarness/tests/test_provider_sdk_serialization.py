@@ -58,7 +58,7 @@ def _evidence_request() -> EvidenceRequest:
         before_boundary_observation=None,
         after_boundary_observation=None,
         task_instruction="Put bread into the toaster.",
-        detail=None,
+        detail=_camera_image("DETAIL", "cam_high"),
         boundary_images=(
             _camera_image("BOUNDARY_BEFORE", "cam_high"),
             _camera_image("BOUNDARY_BEFORE", "cam_left_wrist"),
@@ -139,7 +139,7 @@ def test_openai_sdk_serializes_evidence_images_and_task_last() -> None:
         for index, item in enumerate(content)
         if item["type"] == "input_text" and "motion summary" in item["text"].lower()
     )
-    assert len(image_positions) == 6
+    assert len(image_positions) == 7
     assert content[0]["text"].startswith("EVIDENCE=BOUNDARY_BEFORE")
     assert max(image_positions) < motion_position < len(content) - 1
     assert "Task instruction" in content[-1]["text"]
@@ -213,7 +213,7 @@ def test_anthropic_sdk_serializes_multiview_evidence() -> None:
         for index, item in enumerate(content)
         if item["type"] == "text" and "motion summary" in item["text"].lower()
     )
-    assert len(image_positions) == 6
+    assert len(image_positions) == 7
     assert content[0]["text"].startswith("EVIDENCE=BOUNDARY_BEFORE")
     assert max(image_positions) < motion_position < len(content) - 1
     assert "Task instruction" in content[-1]["text"]

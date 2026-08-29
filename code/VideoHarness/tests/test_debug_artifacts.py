@@ -28,7 +28,7 @@ def test_enabled_store_writes_scoped_artifacts_and_manifest(tmp_path: Path) -> N
         unit_id="u0000",
     )
     store.write_bytes("frames/cam_high/frame-00.jpg", b"jpeg")
-    store.write_json("call1.json", {"needs_detail": False})
+    store.write_json("call1.json", {"detail_request": {"x_min": 0.1}})
     root = store.finalize({"status": "complete"})
 
     assert root is not None

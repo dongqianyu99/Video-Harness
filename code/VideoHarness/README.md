@@ -12,11 +12,11 @@ calls:
 
 1. **Motion analysis** receives one 5×5 overview and one higher-resolution 2×3
    keyframe sheet per camera plus measured gripper aperture aligned to the six
-   keyframes. It is task-blind, preserves a Motion Summary, and may request one
-   fixed `cam_high` detail crop.
+   keyframes. It is task-blind, preserves a Motion Summary, and selects one fixed
+   `cam_high` detail crop.
 2. **Task interpretation** receives that Motion Summary, six original-resolution
    BEFORE/AFTER Boundary images, any accepted shared Boundary descriptions, the
-   optional detail sheet, the same gripper aperture samples, and finally the coarse
+   required detail sheet, the same gripper aperture samples, and finally the coarse
    Task Instruction. It creates only
    missing Boundary descriptions, interprets the Evidence Unit transition, and
    performs a permissive causal self-check.
@@ -444,7 +444,7 @@ debug/<document>/<unit>/
 ├── frames/<view>/frame-00.jpg ... frame-25.jpg
 ├── sheets/<view>-overview.png
 ├── sheets/<view>-keyframes.png
-├── sheets/cam_high-detail.png  # only when requested
+├── sheets/cam_high-detail.png
 ├── gripper-state.json
 ├── call2-attempt-XX-error.json # only for failed attempts before retry/success
 └── boundaries/*.jpg
@@ -465,8 +465,8 @@ Canonical annotations are separated into two records:
 Transition evidence contains:
 
 - the final `motion_summary` revised by Call 2 from Call 1, task context,
-  Boundary images, accepted Boundary descriptions, and optional detail;
-- an optional `detail_observation`;
+  Boundary images, accepted Boundary descriptions, and required detail;
+- a `detail_observation`;
 - any detected conflict with an already accepted shared Boundary;
 - one-sentence `action_description` and one-sentence `task_role` from Call 2;
 - Call 2 `causal_validation`;

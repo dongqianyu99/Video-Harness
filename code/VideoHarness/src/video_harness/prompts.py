@@ -4,24 +4,22 @@ import json
 from typing import Any
 
 from .camera_contract import CAMERA_VIEWS, camera_spec, system_prompt_camera_contract
-from .evidence import (
-    CAUSAL_VALIDATION_STATUSES,
-    DETAIL_REASONS,
-)
+from .evidence import CAUSAL_VALIDATION_STATUSES
 
-PROMPT_VERSION = "video-harness.evidence.v6"
-INSPECTION_PROMPT_VERSION = "video-harness.inspection.v4"
+PROMPT_VERSION = "video-harness.evidence.v8"
+INSPECTION_PROMPT_VERSION = "video-harness.inspection.v6"
 TOOL_NAME = "record_transition_evidence"
 INSPECTION_TOOL_NAME = "locate_temporal_detail"
 REPAIR_TOOL_NAME = "resolve_transition_repair"
 SEQUENCE_AUDIT_TOOL_NAME = "audit_sequence_consistency"
-REPAIR_PROMPT_VERSION = "video-harness.repair.v7"
-SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v4"
+REPAIR_PROMPT_VERSION = "video-harness.repair.v9"
+SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v5"
 CAMERA_CONTRACT = system_prompt_camera_contract()
 ACTION_EVIDENCE_CONTRACT = """Action-evidence contract:
 - Claims of grasp, hold, release, or contact require direct supporting visual evidence from the corresponding wrist camera.
 - Before returning causal status=pass, decompose motion_summary and action_description into their key atomic actions and find corresponding visual evidence from the appropriate camera view for each action.
 - The causal reason must summarize the action-to-view evidence mapping in one sentence. Weaken or remove any action that lacks visual support; use retry only when a material contradiction remains."""
+PHYSICAL_CONTINUITY_CONTRACT = """Maintain one physically coherent account of persistent entities and their relations to the end effectors across the supplied evidence. Any inferred state change must be supported by the temporal and multimodal evidence; otherwise preserve uncertainty."""
 GRIPPER_STATE_CONTRACT = """Use the synchronized gripper state together with the visual evidence to determine the gripper-object interaction throughout the Evidence Unit. Do not speculate about, quote, or reproduce any numerical gripper-state values in the output; describe the interaction only in qualitative terms."""
 
 REPAIR_SCHEMA: dict[str, Any] = {
@@ -97,7 +95,7 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
     "properties": {
         "motion_summary": {
             "type": "string",
-            "description": "Exactly one concise sentence revising Call 1's task-blind motion summary using the task context, high-resolution BEFORE and AFTER Boundary images, accepted Boundary descriptions, and optional detail evidence.",
+            "description": "Exactly one concise sentence revising Call 1's task-blind motion summary using the task context, high-resolution BEFORE and AFTER Boundary images, accepted Boundary descriptions, and detail evidence.",
         },
         "before_boundary_observation": {
             "anyOf": [_view_string_schema(), {"type": "null"}],
@@ -118,8 +116,8 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
             "description": "A concise conflict explanation only when an accepted shared Boundary description materially contradicts its current images; otherwise both values are null.",
         },
         "detail_observation": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-            "description": "A direct description of the optional cam_high detail sheet, or null when no detail sheet is supplied.",
+            "type": "string",
+            "description": "A direct description of the mandatory cam_high detail sheet.",
         },
         "unit_interpretation": {
             "type": "object",
@@ -128,7 +126,7 @@ EVIDENCE_SCHEMA: dict[str, Any] = {
             "properties": {
                 "action_description": {
                     "type": "string",
-                    "description": "Exactly one concise sentence stating what the robot physically does during this Evidence Unit, grounded in motion, Boundary images, and optional detail.",
+                    "description": "Exactly one concise, task-grounded restatement of the finalized motion_summary without adding physical claims beyond it.",
                 },
                 "task_role": {
                     "type": "string",
@@ -164,7 +162,6 @@ INSPECTION_SCHEMA: dict[str, Any] = {
     "required": [
         "motion_summary",
         "interaction_window",
-        "needs_detail",
         "detail_request",
     ],
     "properties": {
@@ -182,26 +179,16 @@ INSPECTION_SCHEMA: dict[str, Any] = {
             },
             "description": "The shortest continuous interval that preserves the precondition, primary visible change, and immediate outcome; when no localized interaction is resolved, the most informative motion interval.",
         },
-        "needs_detail": {"type": "boolean"},
         "detail_request": {
-            "anyOf": [
-                {"type": "null"},
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["x_min", "y_min", "x_max", "y_max", "reason"],
-                    "properties": {
-                        "x_min": {"type": "number"},
-                        "y_min": {"type": "number"},
-                        "x_max": {"type": "number"},
-                        "y_max": {"type": "number"},
-                        "reason": {
-                            "type": "string",
-                            "enum": list(DETAIL_REASONS),
-                        },
-                    },
-                },
-            ]
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["x_min", "y_min", "x_max", "y_max"],
+            "properties": {
+                "x_min": {"type": "number"},
+                "y_min": {"type": "number"},
+                "x_max": {"type": "number"},
+                "y_max": {"type": "number"},
+            },
         },
     },
 }
@@ -213,30 +200,34 @@ INSPECTION_SYSTEM_PROMPT = f"""You are the Video Harness task-blind temporal mot
 
 {ACTION_EVIDENCE_CONTRACT}
 
+{PHYSICAL_CONTINUITY_CONTRACT}
+
 Produce motion_summary as exactly one concise sentence describing the task-blind qualitative motion, interaction, and final persistent state across the Evidence Unit. Describe only the temporal progression and spatial relations needed to understand what moves or changes, while distinguishing wrist-camera ego-motion from physical motion in the scene. Do not inventory or repeat the static scene; mention an unchanged entity or view only when necessary to disambiguate the motion. A globally stable view does not rule out a meaningful local interaction. Calibrate the sentence to the evidence and preserve uncertainty instead of turning an unresolved observation into either a positive or negative claim.
 
 {GRIPPER_STATE_CONTRACT}
 
-Do not infer task intent, task outcome, or future behavior. Do not estimate or invent precise physical quantities; use qualitative descriptions grounded in the supplied visual evidence. Normalized image coordinates are used only to specify an optional detail ROI.
+Do not infer task intent, task outcome, or future behavior. Do not estimate or invent precise physical quantities; use qualitative descriptions grounded in the supplied visual evidence. Normalized image coordinates are used only to specify the detail ROI.
 
 Always locate one meaningful interaction_window. Use the shortest continuous interval that still preserves the visible precondition, primary change, and immediate outcome. If no localized interaction can be resolved, locate the most informative motion interval instead.
 
-Decide whether one fixed high-resolution crop from cam_high could add evidence that is present but too small, temporally dense, or partly occluded in the supplied sheets. Do not request detail when the existing evidence is sufficient or when enlarging cam_high cannot resolve the uncertainty. If detail is useful, return one normalized cam_high ROI covering the relevant entities and enough surrounding context to interpret their relation.
+Always select one cam_high ROI over the interaction_window, using the smallest region that preserves the physical context needed to interpret the observed motion.
 
 When task-blind context from the immediately preceding Evidence Unit is supplied, treat it as a fallible continuity hypothesis. Its final frame and the current Evidence Unit's first frame refer to the shared temporal boundary. Use current visual evidence to confirm, qualify, or correct whether an interaction persists, changes, or ends; never invent continuity merely to agree with the prior summary.
 
 Return exactly one locate_temporal_detail tool call and no other text."""
 
 
-SYSTEM_PROMPT = f"""You are the Video Harness task-conditioned evidence compiler and lightweight causal validator. You receive a task-blind motion_summary from Call 1, synchronized original-resolution BEFORE and AFTER Boundary images from cam_high, cam_left_wrist, and cam_right_wrist, measured gripper aperture aligned with Call 1 keyframes, optional accepted descriptions of those Boundary States, an optional cam_high detail sheet, and a coarse task instruction.
+SYSTEM_PROMPT = f"""You are the Video Harness task-conditioned evidence compiler and lightweight causal validator. You receive a task-blind motion_summary from Call 1, synchronized original-resolution BEFORE and AFTER Boundary images from cam_high, cam_left_wrist, and cam_right_wrist, measured gripper aperture aligned with Call 1 keyframes, optional accepted descriptions of those Boundary States, a cam_high detail sheet, and a coarse task instruction.
 
 {CAMERA_CONTRACT}
 
 {ACTION_EVIDENCE_CONTRACT}
 
+{PHYSICAL_CONTINUITY_CONTRACT}
+
 Describe each Boundary State once, using exactly one concise sentence per camera view. When an accepted Boundary description is supplied, verify it against the corresponding current images and return null for that boundary output; do not create a second description of the same shared state. If the existing description materially contradicts the images, explain the conflict in boundary_conflicts and use causal status=retry. When no accepted description is supplied, produce it from the corresponding images and leave its conflict null. Boundary descriptions report the visible state at that instant rather than inferring an interval event from one image. Keep the three views separate and follow their evidence authority.
 
-If a detail sheet is supplied, describe only the fine interaction evidence that it directly shows. Return motion_summary as exactly one concise sentence that revises Call 1's task-blind draft using the task context, the high-resolution static BEFORE and AFTER Boundary images, accepted Boundary descriptions, and optional detail evidence. Write action_description as exactly one concise sentence stating the physical action. Write task_role as exactly one concise sentence stating only what that action contributes to the task. Treat Call 1 and prior text as useful but fallible evidence; correct them when the Boundary or detail evidence disagrees.
+Describe only the fine interaction evidence that the detail sheet directly shows. Return motion_summary as exactly one concise sentence that revises Call 1's task-blind draft using the task context, the high-resolution static BEFORE and AFTER Boundary images, accepted Boundary descriptions, and detail evidence. Write action_description as exactly one concise, task-grounded restatement of the finalized motion_summary without adding physical claims beyond it. Write task_role as exactly one concise sentence stating only what that action contributes to the task. Treat Call 1 and prior text as useful but fallible evidence; correct them when the Boundary or detail evidence disagrees.
 
 {GRIPPER_STATE_CONTRACT}
 
@@ -251,6 +242,8 @@ REPAIR_SYSTEM_PROMPT = f"""You are the Video Harness automatic transition repair
 
 {ACTION_EVIDENCE_CONTRACT}
 
+{PHYSICAL_CONTINUITY_CONTRACT}
+
 Resolve only the identified Evidence Unit. If the visual evidence supports one coherent account, return evidence_sufficient=true and a complete corrected Call 2 record that follows the same motion_summary, Boundary, action_description, task_role, and causal-reason sentence contract with causal status=pass. Return a replacement Boundary observation only when the detected issue explicitly requires correcting that shared Boundary; otherwise reuse its supplied description with a null observation. If the supplied evidence cannot resolve the issue, return evidence_sufficient=false with a null resolved_call2. Do not preserve a prior claim merely for consistency, and do not invent precise physical quantities or unseen events.
 
 {GRIPPER_STATE_CONTRACT}
@@ -258,7 +251,7 @@ Resolve only the identified Evidence Unit. If the visual evidence supports one c
 Return exactly one resolve_transition_repair tool call and no other text."""
 
 
-SEQUENCE_AUDIT_SYSTEM_PROMPT = """You are the Video Harness automatic sequence auditor. Check whether every Boundary State change is explained by its connecting Evidence Unit, whether persistent interactions remain coherent across adjacent Units, and whether motion evidence materially conflicts with the transition interpretation. Report only material issues that require automatic reprocessing. Target a Boundary when its static description is the likely source of contradictions across adjacent Units; report that shared Boundary once rather than reporting both neighboring Units. Otherwise target the specific Evidence Unit. An empty issue list means the complete canonical sequence is coherent. Return exactly one audit_sequence_consistency tool call and no other text."""
+SEQUENCE_AUDIT_SYSTEM_PROMPT = """You are the Video Harness automatic sequence auditor. Check whether every Boundary State change is explained by its connecting Evidence Unit, whether persistent entities and their relations to the end effectors evolve coherently across adjacent Boundaries and Units, whether each action_description is entailed by its motion_summary, and whether motion evidence materially conflicts with the transition interpretation. Report only material issues that require automatic reprocessing. Target a Boundary when its static description is the likely source of contradictions across adjacent Units; report that shared Boundary once rather than reporting both neighboring Units. Otherwise target the specific Evidence Unit. An empty issue list means the complete canonical sequence is coherent. Return exactly one audit_sequence_consistency tool call and no other text."""
 
 
 def inspection_user_prompt(
@@ -327,14 +320,13 @@ def evidence_user_prompt(
     episode_start_frame: int,
     episode_end_frame: int,
     task_instruction: str,
-    detail_supplied: bool,
     before_boundary_supplied: bool,
     after_boundary_supplied: bool,
 ) -> str:
     return (
         f"Document={document_id} | EvidenceUnit={unit_id} | FPS=25 | "
         f"episode_frames={episode_start_frame}..{episode_end_frame}. "
-        f"Detail sheet supplied: {'yes' if detail_supplied else 'no'}. "
+        "A cam_high detail sheet is supplied for this Evidence Unit. "
         f"Accepted BEFORE Boundary description supplied: {'yes' if before_boundary_supplied else 'no'}. "
         f"Accepted AFTER Boundary description supplied: {'yes' if after_boundary_supplied else 'no'}. "
         f"Task instruction (context for interpretation, not visual evidence): {task_instruction}. "

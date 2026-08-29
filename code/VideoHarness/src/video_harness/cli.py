@@ -591,7 +591,7 @@ def _annotate_document(
         document["quality_provenance"] = {
             "provider": context.repair_backend.provider,
             "model": context.repair_backend.model,
-            "prompt_version": "video-harness.sequence-audit.v4",
+            "prompt_version": "video-harness.sequence-audit.v5",
             "audit_attempts": 0,
             "repair_rounds": 0,
             "sequence_sha256": sequence_projection_sha256(document),

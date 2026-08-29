@@ -434,9 +434,7 @@ def validate_detail_request(
     context_margin: float = 0.15,
     min_area: float = 0.02,
     max_area: float = 0.60,
-) -> DetailRequest | None:
-    if not inspection.get("needs_detail"):
-        return None
+) -> DetailRequest:
     detail = inspection.get("detail_request")
     window = inspection.get("interaction_window")
     if not isinstance(detail, Mapping) or not isinstance(window, Mapping):
