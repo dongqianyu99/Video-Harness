@@ -4,16 +4,13 @@ import dataclasses
 from pathlib import Path
 
 import flax.nnx as nnx
-import pytest
-
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.models.pi0_config import Pi0Config
 from openpi.training import config as stock_config
-from openpi.training.guide_train_config import GuidedTrainRunConfig
-from openpi.training.guide_train_config import make_guide_pi0_config
-from openpi.training.guide_train_config import resolve_guided_train_config
+from openpi.training.guide_train_config import GuidedTrainRunConfig, make_guide_pi0_config, resolve_guided_train_config
 from openpi.training.guide_weight_loaders import GuidePi0BaseWeightLoader
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
+import pytest
 
 
 def _guided_data(tmp_path: Path, *, batch_size: int = 4) -> RoboDojoGuidedDataConfig:
@@ -21,7 +18,7 @@ def _guided_data(tmp_path: Path, *, batch_size: int = 4) -> RoboDojoGuidedDataCo
         repo_id="fake",
         dataset_root=tmp_path / "dataset",
         dataset_artifact_path=tmp_path / "dataset.json",
-        documents_artifact_path=tmp_path / "documents.jsonl",
+        documents_root=tmp_path / "documents",
         pairs_artifact_path=tmp_path / "pairs.jsonl",
         batch_size=batch_size,
         seed=7,

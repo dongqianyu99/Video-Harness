@@ -74,12 +74,12 @@ fi
 
 GUIDANCE_OVERRIDES=()
 if [[ "${PI05_GUIDANCE_ENABLED:-0}" == "1" ]]; then
-    : "${PI05_GUIDANCE_DOCUMENTS_PATH:?Set PI05_GUIDANCE_DOCUMENTS_PATH}"
+    : "${PI05_GUIDANCE_DOCUMENTS_ROOT:?Set PI05_GUIDANCE_DOCUMENTS_ROOT}"
     : "${PI05_GUIDANCE_EPISODES_PATH:?Set PI05_GUIDANCE_EPISODES_PATH}"
     : "${PI05_GUIDANCE_DATASET_ROOT:?Set PI05_GUIDANCE_DATASET_ROOT}"
     GUIDANCE_OVERRIDES+=(
         guidance_enabled=true
-        "guidance_documents_path=${PI05_GUIDANCE_DOCUMENTS_PATH}"
+        "guidance_documents_root=${PI05_GUIDANCE_DOCUMENTS_ROOT}"
         "guidance_episodes_path=${PI05_GUIDANCE_EPISODES_PATH}"
         "guidance_dataset_root=${PI05_GUIDANCE_DATASET_ROOT}"
         "guidance_profile=${PI05_GUIDANCE_PROFILE:-actuator}"

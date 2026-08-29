@@ -21,7 +21,7 @@ repo_id: arx_x5_sim
 
 # Optional task-level Behavior Document evaluation. All paths must be absolute.
 guidance_enabled: false
-guidance_documents_path: null
+guidance_documents_root: null
 guidance_episodes_path: null
 guidance_dataset_root: null
 guidance_profile: actuator

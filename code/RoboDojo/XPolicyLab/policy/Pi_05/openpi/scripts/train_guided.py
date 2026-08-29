@@ -12,21 +12,20 @@ from typing import Any
 import flax.nnx as nnx
 import jax
 import numpy as np
-
-from openpi.models.guide_inputs import GuideConditionedBatch
-from openpi.models.guide_inputs import validate_guide_conditioned_batch
+from openpi.models.guide_inputs import GuideConditionedBatch, validate_guide_conditioned_batch
 from openpi.models.guide_pi0 import GuidePi0
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.training.guide_buckets import parse_guide_length_bucket
 from openpi.training.guide_data_loader import prefetch_guided_batches
-from openpi.training.guide_run import GuidedRunLayout
-from openpi.training.guide_run import configure_guided_run_logging
-from openpi.training.guide_run import finish_guided_wandb
-from openpi.training.guide_run import init_guided_wandb
-from openpi.training.guide_run import prepare_guided_run_layout
-from openpi.training.guide_run import write_guided_run_manifest
-from openpi.training.guide_train_config import GuidedTrainRunConfig
-from openpi.training.guide_train_config import resolve_guided_train_config
+from openpi.training.guide_run import (
+    GuidedRunLayout,
+    configure_guided_run_logging,
+    finish_guided_wandb,
+    init_guided_wandb,
+    prepare_guided_run_layout,
+    write_guided_run_manifest,
+)
+from openpi.training.guide_train_config import GuidedTrainRunConfig, resolve_guided_train_config
 from openpi.training.guide_train_sharding import make_guided_batch_sharding
 from openpi.training.guide_train_step import guided_accumulated_train_step
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
@@ -64,9 +63,7 @@ def _validate_runtime_config(run_config: GuidedTrainRunConfig, resolved_config: 
     effective_batch_size = run_config.effective_global_batch_size
     if run_config.enforce_reference_batch_size:
         if run_config.guided_data.remainder_strategy != "drop":
-            raise ValueError(
-                "strict reference batch alignment requires remainder_strategy='drop'"
-            )
+            raise ValueError("strict reference batch alignment requires remainder_strategy='drop'")
         if effective_batch_size != run_config.reference_global_batch_size:
             raise ValueError(
                 "effective global batch does not match the reference: "
@@ -82,9 +79,7 @@ def _validate_runtime_config(run_config: GuidedTrainRunConfig, resolved_config: 
 def _require_checkpoint_data_config(data_loader: Any) -> Any:
     data_config = getattr(data_loader, "data_config", None)
     if not callable(data_config):
-        raise ValueError(
-            "GuidedDataLoader must provide data_config() before checkpoint save/restore"
-        )
+        raise ValueError("GuidedDataLoader must provide data_config() before checkpoint save/restore")
     try:
         return data_config()
     except Exception as exc:
@@ -210,9 +205,7 @@ def _run_guided_training_impl(
     wandb_config = getattr(wandb_run, "config", None)
     update_wandb_config = getattr(wandb_config, "update", None)
     if callable(update_wandb_config):
-        update_wandb_config(
-            {"runtime": runtime_metadata}, allow_val_change=True
-        )
+        update_wandb_config({"runtime": runtime_metadata}, allow_val_change=True)
 
     mesh_module = importlib.import_module("openpi.training.sharding")
     mesh = mesh_module.make_mesh(resolved_config.fsdp_devices)
@@ -253,9 +246,7 @@ def _run_guided_training_impl(
 
     accumulation_steps = run_config.gradient_accumulation_steps
     ptrain_step = jax.jit(
-        lambda step_rng, state, batches: guided_accumulated_train_step(
-            resolved_config, step_rng, state, batches
-        ),
+        lambda step_rng, state, batches: guided_accumulated_train_step(resolved_config, step_rng, state, batches),
         in_shardings=(
             replicated_sharding,
             train_state_sharding,
@@ -283,9 +274,7 @@ def _run_guided_training_impl(
 
         if step < resolved_config.num_train_steps - 1:
             data_wait_start = time.perf_counter()
-            batches = tuple(
-                next(device_batches) for _ in range(accumulation_steps)
-            )
+            batches = tuple(next(device_batches) for _ in range(accumulation_steps))
             accumulated_data_wait_s += time.perf_counter() - data_wait_start
 
         if step % resolved_config.log_interval == 0:
@@ -298,15 +287,9 @@ def _run_guided_training_impl(
                 "train/loss": host_info["loss"],
                 "train/grad_norm": host_info["grad_norm"],
                 "train/param_norm": host_info["param_norm"],
-                "train/guide_encoder_grad_norm": host_info[
-                    "guide_encoder_grad_norm"
-                ],
-                "train/native_backbone_grad_norm": host_info[
-                    "native_backbone_grad_norm"
-                ],
-                "train/learning_rate": float(
-                    jax.device_get(lr_schedule(step))
-                ),
+                "train/guide_encoder_grad_norm": host_info["guide_encoder_grad_norm"],
+                "train/native_backbone_grad_norm": host_info["native_backbone_grad_norm"],
+                "train/learning_rate": float(jax.device_get(lr_schedule(step))),
                 "batch/groups": int(info["G"]),
                 "batch/queries_per_guide": int(info["Q"]),
                 "batch/valid_queries": int(info["valid_queries"]),
@@ -314,9 +297,7 @@ def _run_guided_training_impl(
                 "batch/effective_capacity": run_config.effective_global_batch_size,
                 "batch/reference_global_batch": run_config.reference_global_batch_size,
                 "performance/optimizer_steps_per_s": interval_steps / interval_s,
-                "performance/data_wait_ms_per_step": (
-                    accumulated_data_wait_s / interval_steps * 1000.0
-                ),
+                "performance/data_wait_ms_per_step": (accumulated_data_wait_s / interval_steps * 1000.0),
                 "system/device_count": jax.device_count(),
             }
             logger.info(
@@ -341,7 +322,9 @@ def _run_guided_training_impl(
             last_log_step = step + 1
             accumulated_data_wait_s = 0.0
 
-        if (step % resolved_config.save_interval == 0 and step > start_step) or step == resolved_config.num_train_steps - 1:
+        if (
+            step % resolved_config.save_interval == 0 and step > start_step
+        ) or step == resolved_config.num_train_steps - 1:
             save_guided_state(checkpoint_manager, train_state, data_loader, step)
 
     checkpoint_manager.wait_until_finished()
@@ -396,7 +379,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--dataset-artifact", type=Path, required=True)
-    parser.add_argument("--documents-artifact", type=Path, required=True)
+    parser.add_argument("--documents-root", type=Path, required=True)
     parser.add_argument("--pairs-artifact", type=Path, required=True)
     parser.add_argument("--split-manifest", type=Path)
     parser.add_argument(
@@ -455,9 +438,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _run_from_args(args: argparse.Namespace) -> Any:
     bucket_specs = getattr(args, "guide_length_bucket", [])
-    guide_length_buckets = tuple(
-        parse_guide_length_bucket(spec) for spec in bucket_specs
-    ) or None
+    guide_length_buckets = tuple(parse_guide_length_bucket(spec) for spec in bucket_specs) or None
     accumulation_steps = getattr(args, "gradient_accumulation_steps", 1)
     raw_query_indices = args.query_episode_index
     if raw_query_indices is None:
@@ -470,20 +451,14 @@ def _run_from_args(args: argparse.Namespace) -> Any:
     split_manifest = getattr(args, "split_manifest", None)
     if split_manifest is None and query_episode_indices is None:
         raise ValueError(
-            "formal training requires --split-manifest; use "
-            "--debug-query-episode-index only for an explicit smoke run"
+            "formal training requires --split-manifest; use --debug-query-episode-index only for an explicit smoke run"
         )
     run_dir = getattr(args, "run_dir", None)
     checkpoint_dir = getattr(args, "checkpoint_dir", None)
     if run_dir is not None:
         expected_checkpoint_dir = run_dir / "checkpoints"
-        if (
-            checkpoint_dir is not None
-            and checkpoint_dir.resolve() != expected_checkpoint_dir.resolve()
-        ):
-            raise ValueError(
-                "--checkpoint-dir must equal --run-dir/checkpoints when both are set"
-            )
+        if checkpoint_dir is not None and checkpoint_dir.resolve() != expected_checkpoint_dir.resolve():
+            raise ValueError("--checkpoint-dir must equal --run-dir/checkpoints when both are set")
         checkpoint_dir = expected_checkpoint_dir
     elif checkpoint_dir is None:
         raise ValueError("provide --run-dir for a tracked run")
@@ -492,7 +467,7 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
         dataset_artifact_path=args.dataset_artifact,
-        documents_artifact_path=args.documents_artifact,
+        documents_root=args.documents_root,
         pairs_artifact_path=args.pairs_artifact,
         batch_size=args.batch_size,
         seed=args.seed,
@@ -530,12 +505,9 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         resume=args.resume,
         wandb_enabled=args.wandb_enabled,
         gradient_accumulation_steps=accumulation_steps,
-        reference_global_batch_size=getattr(
-            args, "reference_global_batch_size", 256
-        ),
+        reference_global_batch_size=getattr(args, "reference_global_batch_size", 256),
         enforce_reference_batch_size=(
-            split_manifest is not None
-            and not getattr(args, "allow_effective_batch_mismatch", False)
+            split_manifest is not None and not getattr(args, "allow_effective_batch_mismatch", False)
         ),
         run_dir=run_dir,
     )

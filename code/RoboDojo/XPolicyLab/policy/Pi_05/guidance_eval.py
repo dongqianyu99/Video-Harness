@@ -18,7 +18,7 @@ class TaskGuideSession:
     def __init__(
         self,
         *,
-        documents_path: Path,
+        documents_root: Path,
         episodes_path: Path,
         dataset_root: Path,
         profile: str = "actuator",
@@ -30,7 +30,7 @@ class TaskGuideSession:
         tokenizer: Any | None = None,
     ) -> None:
         for name, path, directory in (
-            ("documents_path", documents_path, False),
+            ("documents_root", documents_root, True),
             ("episodes_path", episodes_path, False),
             ("dataset_root", dataset_root, True),
         ):
@@ -42,7 +42,7 @@ class TaskGuideSession:
                 raise FileNotFoundError(f"{name} file does not exist: {path}")
 
         self._catalog = catalog or load_eval_guidance_catalog(
-            documents_path,
+            documents_root,
             episodes_path=episodes_path,
         )
         self._frame_loader = frame_loader or FFmpegFrameLoader(dataset_root)

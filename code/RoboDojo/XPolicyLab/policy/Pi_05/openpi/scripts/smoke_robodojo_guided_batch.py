@@ -9,20 +9,16 @@ import sys
 from typing import Any
 
 import numpy as np
-
-from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
-from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
+from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig, create_robodojo_guided_data_loader
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Read one real RoboDojo Guide-conditioned Pi0.5 batch."
-    )
+    parser = argparse.ArgumentParser(description="Read one real RoboDojo Guide-conditioned Pi0.5 batch.")
     parser.add_argument("--native-config-name", required=True)
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--dataset-artifact", type=Path, required=True)
-    parser.add_argument("--documents-artifact", type=Path, required=True)
+    parser.add_argument("--documents-root", type=Path, required=True)
     parser.add_argument("--pairs-artifact", type=Path, required=True)
     parser.add_argument("--query-episode-index", type=int, required=True)
     parser.add_argument("--batch-size", type=int, required=True)
@@ -69,18 +65,13 @@ def _support_summary(
     reader = importlib.import_module("video_harness.reader")
     bundle = reader.load_guide_artifact_bundle(
         dataset_path=config.dataset_artifact_path,
-        documents_path=config.documents_artifact_path,
+        documents_path=config.documents_root,
         pairs_path=config.pairs_artifact_path,
     )
-    matches = [
-        binding
-        for binding in bundle.support_bindings
-        if binding.query_episode_index == query_episode_index
-    ]
+    matches = [binding for binding in bundle.support_bindings if binding.query_episode_index == query_episode_index]
     if len(matches) != 1:
         raise ValueError(
-            f"expected one support binding for query_episode_index={query_episode_index}, "
-            f"found {len(matches)}"
+            f"expected one support binding for query_episode_index={query_episode_index}, found {len(matches)}"
         )
     binding = matches[0]
     return {
@@ -96,7 +87,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
         dataset_artifact_path=args.dataset_artifact,
-        documents_artifact_path=args.documents_artifact,
+        documents_root=args.documents_root,
         pairs_artifact_path=args.pairs_artifact,
         batch_size=args.batch_size,
         seed=args.seed,
@@ -123,9 +114,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         **_support_summary(guided_config, args.query_episode_index),
         "G": int(batch.actions.shape[0]),
         "Q": int(batch.actions.shape[1]),
-        "observation_image_shapes": {
-            key: _shape(value) for key, value in batch.observation.images.items()
-        },
+        "observation_image_shapes": {key: _shape(value) for key, value in batch.observation.images.items()},
         "state_shape": _shape(batch.observation.state),
         "action_shape": _shape(batch.actions),
         "guide_image_shape": _shape(batch.guide.images),

@@ -13,9 +13,9 @@ from PIL import Image, ImageDraw
 
 from .camera_contract import CAMERA_VIEWS, image_label
 from .gripper_state import (
+    STANDARD_KEYFRAME_INDICES,
     GripperState,
     GripperStateReader,
-    STANDARD_KEYFRAME_INDICES,
     keyframe_indices,
 )
 from .hdf5_source import HDF5_SOURCE_DATASET, decode_hdf5_frames
@@ -212,115 +212,50 @@ def decode_unit_frames(
     )
 
 
-def _ffmpeg_tile(
-    frames: Sequence[np.ndarray],
-    *,
-    columns: int,
-    cell_size: tuple[int, int],
-    ffmpeg: str,
-    runner: Runner,
-    timeout_s: float,
-) -> bytes:
-    if not frames or columns <= 0:
-        raise ValueError("tile requires frames and positive columns")
-    source_shape = frames[0].shape
-    if any(frame.shape != source_shape or frame.dtype != np.uint8 for frame in frames):
-        raise ValueError("tile frames must share uint8 H,W,3 shape")
-    rows = (len(frames) + columns - 1) // columns
-    padded = list(frames)
-    black = np.zeros(source_shape, dtype=np.uint8)
-    padded.extend(black for _ in range(columns * rows - len(padded)))
-    source_height, source_width, _ = source_shape
-    cell_width, cell_height = cell_size
-    filter_graph = (
-        f"scale={cell_width}:{cell_height}:force_original_aspect_ratio=decrease,"
-        f"pad={cell_width}:{cell_height}:(ow-iw)/2:(oh-ih)/2:black,"
-        f"tile={columns}x{rows}:padding=2:margin=2:color=black"
-    )
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-video_size",
-        f"{source_width}x{source_height}",
-        "-framerate",
-        "25",
-        "-i",
-        "pipe:0",
-        "-vf",
-        filter_graph,
-        "-frames:v",
-        "1",
-        "-f",
-        "image2pipe",
-        "-vcodec",
-        "png",
-        "pipe:1",
-    ]
-    payload = _run_process(
-        command,
-        runner=runner,
-        input_bytes=np.stack(padded).tobytes(),
-        timeout_s=timeout_s,
-    )
-    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise TemporalMediaError("FFmpeg tile renderer did not return PNG")
-    return payload
-
-
-def _label_tiled_png(
-    png: bytes,
-    *,
-    labels: Sequence[str],
-    columns: int,
-    cell_size: tuple[int, int],
-) -> bytes:
-    image = Image.open(BytesIO(png)).convert("RGB")
-    draw = ImageDraw.Draw(image)
-    cell_width, cell_height = cell_size
-    margin = 2
-    padding = 2
-    for index, label in enumerate(labels):
-        x = margin + (index % columns) * (cell_width + padding)
-        y = margin + (index // columns) * (cell_height + padding)
-        draw.rectangle((x, y, x + cell_width, y + 22), fill="black")
-        draw.text((x + 4, y + 4), label, fill="white")
-    output = BytesIO()
-    image.save(output, format="PNG", optimize=False)
-    return output.getvalue()
-
-
 def render_sheet(
     frames: Sequence[np.ndarray],
     *,
     labels: Sequence[str],
     columns: int,
     cell_size: tuple[int, int],
-    ffmpeg: str = "ffmpeg",
-    runner: Runner = subprocess.run,
-    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> bytes:
+    if not frames or columns <= 0:
+        raise ValueError("sheet requires frames and positive columns")
     if len(frames) != len(labels):
         raise ValueError("sheet labels must match frame count")
-    tiled = _ffmpeg_tile(
-        frames,
-        columns=columns,
-        cell_size=cell_size,
-        ffmpeg=ffmpeg,
-        runner=runner,
-        timeout_s=timeout_s,
+    source_shape = frames[0].shape
+    if any(frame.shape != source_shape or frame.dtype != np.uint8 for frame in frames):
+        raise ValueError("sheet frames must share uint8 H,W,3 shape")
+    rows = (len(frames) + columns - 1) // columns
+    cell_width, cell_height = cell_size
+    margin = 2
+    padding = 2
+    canvas = Image.new(
+        "RGB",
+        (
+            margin * 2 + columns * cell_width + (columns - 1) * padding,
+            margin * 2 + rows * cell_height + (rows - 1) * padding,
+        ),
+        "black",
     )
-    return _label_tiled_png(
-        tiled,
-        labels=labels,
-        columns=columns,
-        cell_size=cell_size,
-    )
+    draw = ImageDraw.Draw(canvas)
+    for index, (frame, label) in enumerate(zip(frames, labels, strict=True)):
+        x = margin + (index % columns) * (cell_width + padding)
+        y = margin + (index // columns) * (cell_height + padding)
+        image = Image.fromarray(frame).convert("RGB")
+        image.thumbnail((cell_width, cell_height), Image.Resampling.LANCZOS)
+        canvas.paste(
+            image,
+            (
+                x + (cell_width - image.width) // 2,
+                y + (cell_height - image.height) // 2,
+            ),
+        )
+        draw.rectangle((x, y, x + cell_width, y + 22), fill="black")
+        draw.text((x + 4, y + 4), label, fill="white")
+    output = BytesIO()
+    canvas.save(output, format="PNG", optimize=False)
+    return output.getvalue()
 
 
 def _frame_label(unit: EvidenceUnitFrames, view: str, unit_frame: int) -> str:
@@ -334,10 +269,6 @@ def _frame_label(unit: EvidenceUnitFrames, view: str, unit_frame: int) -> str:
 def overview_payload(
     unit: EvidenceUnitFrames,
     view: str,
-    *,
-    ffmpeg: str = "ffmpeg",
-    runner: Runner = subprocess.run,
-    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> ImagePayload:
     if view not in VIEWS:
         raise ValueError(f"unknown view {view!r}")
@@ -347,9 +278,6 @@ def overview_payload(
         labels=[_frame_label(unit, view, index) for index in indices],
         columns=5,
         cell_size=(320, 240),
-        ffmpeg=ffmpeg,
-        runner=runner,
-        timeout_s=timeout_s,
     )
     return ImagePayload(
         label=image_label(
@@ -368,10 +296,6 @@ def overview_payload(
 def keyframe_sheet_payload(
     unit: EvidenceUnitFrames,
     view: str,
-    *,
-    ffmpeg: str = "ffmpeg",
-    runner: Runner = subprocess.run,
-    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> ImagePayload:
     if view not in VIEWS:
         raise ValueError(f"unknown view {view!r}")
@@ -381,9 +305,6 @@ def keyframe_sheet_payload(
         labels=[_frame_label(unit, view, index) for index in indices],
         columns=3,
         cell_size=(512, 384),
-        ffmpeg=ffmpeg,
-        runner=runner,
-        timeout_s=timeout_s,
     )
     return ImagePayload(
         label=image_label(
@@ -469,10 +390,6 @@ def validate_detail_request(
 def detail_payload(
     unit: EvidenceUnitFrames,
     request: DetailRequest,
-    *,
-    ffmpeg: str = "ffmpeg",
-    runner: Runner = subprocess.run,
-    timeout_s: float = DEFAULT_FFMPEG_TIMEOUT_S,
 ) -> ImagePayload:
     if request.end_frame >= unit.frame_count:
         raise ValueError("detail request exceeds decoded Evidence Unit frame count")
@@ -491,9 +408,6 @@ def detail_payload(
         labels=[_frame_label(unit, "cam_high", index) for index in request.indices],
         columns=5,
         cell_size=(384, 384),
-        ffmpeg=ffmpeg,
-        runner=runner,
-        timeout_s=timeout_s,
     )
     return ImagePayload(
         label=image_label(
@@ -635,26 +549,8 @@ class TemporalMediaBuilder:
                 runner=self.runner,
                 timeout_s=self.timeout_s,
             )
-        overviews = tuple(
-            overview_payload(
-                frames,
-                view,
-                ffmpeg=self.ffmpeg,
-                runner=self.runner,
-                timeout_s=self.timeout_s,
-            )
-            for view in VIEWS
-        )
-        keyframe_sheets = tuple(
-            keyframe_sheet_payload(
-                frames,
-                view,
-                ffmpeg=self.ffmpeg,
-                runner=self.runner,
-                timeout_s=self.timeout_s,
-            )
-            for view in VIEWS
-        )
+        overviews = tuple(overview_payload(frames, view) for view in VIEWS)
+        keyframe_sheets = tuple(keyframe_sheet_payload(frames, view) for view in VIEWS)
         return BaseMedia(
             unit_frames=frames,
             overviews=overviews,
@@ -668,13 +564,7 @@ class TemporalMediaBuilder:
         )
 
     def build_detail(self, base: BaseMedia, request: DetailRequest) -> ImagePayload:
-        return detail_payload(
-            base.unit_frames,
-            request,
-            ffmpeg=self.ffmpeg,
-            runner=self.runner,
-            timeout_s=self.timeout_s,
-        )
+        return detail_payload(base.unit_frames, request)
 
     def debug_media(
         self,

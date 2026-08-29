@@ -27,6 +27,21 @@ def _freeze_json(value: Any) -> Any:
 
 
 def _read_json_records(path: Path) -> list[dict[str, Any]]:
+    if path.is_dir():
+        files = sorted(path.glob("*/*.document.jsonl"))
+        if not files:
+            raise FileNotFoundError(
+                f"Eval guidance directory contains no episode files: {path}"
+            )
+        records: list[dict[str, Any]] = []
+        for file in files:
+            values = _read_json_records(file)
+            if len(values) != 1:
+                raise ValueError(
+                    f"Episode guidance file must contain exactly one record: {file}"
+                )
+            records.append(values[0])
+        return records
     if not path.is_file():
         raise FileNotFoundError(f"Eval guidance artifact does not exist: {path}")
 
@@ -325,6 +340,10 @@ def load_eval_guidance_catalog(
     *,
     episodes_path: Path | None = None,
 ) -> EvalGuidanceCatalog:
+    if not documents_path.is_dir():
+        raise FileNotFoundError(
+            f"Evaluation Documents must be a task-grouped directory: {documents_path}"
+        )
     documents = _read_json_records(documents_path)
     episodes = _read_json_records(episodes_path) if episodes_path is not None else None
     return build_eval_guidance_catalog(documents, episodes=episodes)

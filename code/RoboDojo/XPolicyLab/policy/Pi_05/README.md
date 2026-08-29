@@ -72,7 +72,7 @@ artifact paths:
 
 ```bash
 export PI05_GUIDANCE_ENABLED=1
-export PI05_GUIDANCE_DOCUMENTS_PATH=/path/to/documents.annotated.jsonl
+export PI05_GUIDANCE_DOCUMENTS_ROOT=/path/to/documents-openai
 export PI05_GUIDANCE_EPISODES_PATH=/path/to/episodes.jsonl
 export PI05_GUIDANCE_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
 export PI05_GUIDANCE_MAX_FRAMES=64
@@ -101,7 +101,7 @@ Environment variables used by the adapter scripts:
 | `OPENPI_DATA_MODE` | Data-processing mode passed to `openpi/scripts/process_data.py`; defaults to `image`. |
 | `OPENPI_LOCAL_CACHE_ROOT` | Per-host local cache root for the HF datasets / JAX compilation caches; defaults to `/tmp/openpi-cache-$(hostname)`. |
 | `PI05_GUIDANCE_ENABLED` | Set to `1` to enable task-level Behavior Document evaluation. |
-| `PI05_GUIDANCE_DOCUMENTS_PATH` | Absolute annotated document JSON/JSONL path. |
+| `PI05_GUIDANCE_DOCUMENTS_ROOT` | Absolute task-grouped per-episode Document directory. |
 | `PI05_GUIDANCE_EPISODES_PATH` | Absolute `episodes.jsonl` path used to prove dataset-first selection. |
 | `PI05_GUIDANCE_DATASET_ROOT` | Absolute LeRobot dataset root used to decode support frames. |
 | `PI05_GUIDANCE_MAX_FRAMES` / `MAX_UNITS` / `MAX_TEXT_TOKENS` | Fixed Guide capacity limits. |

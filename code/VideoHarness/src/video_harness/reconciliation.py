@@ -14,7 +14,7 @@ from .annotations import (
 from .config import HarnessConfig
 from .pipeline import EvidenceUnitPipeline, ExistingRepairOutcome
 from .run_tracking import ApiCallBudgetExceeded
-from .sampling import unit_boundary_states
+from .sampling import MIN_ACCEPTED_UNIT_RATIO, unit_boundary_states
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class DocumentReconciliationResult:
     audit_attempts: int
     repair_rounds: int
     audit: SequenceAuditResult | None
+    technical_failures: tuple[dict[str, str], ...] = ()
 
 
 def build_sequence_projection(document: dict[str, Any]) -> str:
@@ -97,11 +98,13 @@ def sequence_projection_sha256(document: dict[str, Any]) -> str:
 
 def _intrinsic_issues(document: dict[str, Any]) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
+    unit_issues: list[dict[str, str]] = []
+    accepted_units = 0
     for unit in document["evidence_units"]:
         annotation = unit["annotation"]
         record = annotation.get("record")
         if annotation["status"] != "complete" or not isinstance(record, dict):
-            issues.append(
+            unit_issues.append(
                 {
                     "target_type": "unit",
                     "target_id": unit["unit_id"],
@@ -110,13 +113,17 @@ def _intrinsic_issues(document: dict[str, Any]) -> list[dict[str, str]]:
             )
             continue
         if record["quality_status"] != "accepted":
-            issues.append(
+            unit_issues.append(
                 {
                     "target_type": "unit",
                     "target_id": unit["unit_id"],
                     "reason": record["causal_validation"]["reason"],
                 }
             )
+        else:
+            accepted_units += 1
+    if accepted_units / len(document["evidence_units"]) < MIN_ACCEPTED_UNIT_RATIO:
+        issues.extend(unit_issues)
     for boundary in document["boundary_states"]:
         boundary_record = boundary["annotation"].get("record")
         if (
@@ -208,6 +215,7 @@ def _repair_boundary_window(
     boundary_id: str,
     issue_reason: str,
     pipeline: EvidenceUnitPipeline,
+    technical_failures: list[dict[str, str]],
 ) -> dict[str, Any] | None:
     candidate = copy.deepcopy(document)
     adjacent = [
@@ -228,6 +236,13 @@ def _repair_boundary_window(
         allowed_boundary_replacements=frozenset({role}),
         required_boundary_replacements=frozenset({role}),
     )
+    if outcome.error is not None:
+        technical_failures.append(
+            {
+                "target_id": boundary_id,
+                "error": f"Boundary repair provider failed: {outcome.error}",
+            }
+        )
     replacement = (
         outcome.after_boundary_record
         if role == "after"
@@ -246,6 +261,13 @@ def _repair_boundary_window(
             ),
             allowed_boundary_replacements=frozenset(),
         )
+        if outcome.error is not None:
+            technical_failures.append(
+                {
+                    "target_id": unit["unit_id"],
+                    "error": f"Adjacent Unit repair provider failed: {outcome.error}",
+                }
+            )
         if outcome.canonical_evidence is None:
             return None
         _apply_repair(candidate, unit, issue_reason, outcome)
@@ -264,6 +286,7 @@ def reconcile_document(
     last_audit: SequenceAuditResult | None = None
     last_issues: list[dict[str, str]] = []
     repair_rounds = 0
+    technical_failures: list[dict[str, str]] = []
 
     for round_index in range(config.sequence_repair_rounds + 1):
         audit, attempts = _audit_document(working, backend, config)
@@ -321,6 +344,7 @@ def reconcile_document(
                 total_audit_attempts,
                 repair_rounds,
                 last_audit,
+                tuple(technical_failures),
             )
         if round_index >= config.sequence_repair_rounds:
             break
@@ -335,6 +359,7 @@ def reconcile_document(
                 issue["target_id"],
                 issue["reason"],
                 pipeline,
+                technical_failures,
             )
             if candidate is None:
                 continue
@@ -359,6 +384,13 @@ def reconcile_document(
                 unit,
                 issue_reason=issue["reason"],
             )
+            if outcome.error is not None:
+                technical_failures.append(
+                    {
+                        "target_id": unit["unit_id"],
+                        "error": f"Unit repair provider failed: {outcome.error}",
+                    }
+                )
             if outcome.canonical_evidence is None:
                 continue
             _apply_repair(working, unit, issue["reason"], outcome)
@@ -382,6 +414,7 @@ def reconcile_document(
         total_audit_attempts,
         repair_rounds,
         last_audit,
+        tuple(technical_failures),
     )
 
 

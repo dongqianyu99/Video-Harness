@@ -33,9 +33,7 @@ class _Catalog:
                 GuideFrameRef("doc-3", 3, 0, 0.0),
                 GuideFrameRef("doc-3", 3, 25, 1.0),
             ),
-            units=(
-                GuidePlanUnit("u0000", 0, 0, 1, "Visible change: bread is in toaster.", {}),
-            ),
+            units=(GuidePlanUnit("u0000", 0, 0, 1, "Visible change: bread is in toaster.", {}),),
         )
 
 
@@ -57,15 +55,15 @@ class _Tokenizer:
 
 
 def _session(tmp_path):
-    documents = tmp_path / "documents.jsonl"
+    documents = tmp_path / "documents"
     episodes = tmp_path / "episodes.jsonl"
     dataset = tmp_path / "dataset"
-    documents.touch()
+    documents.mkdir()
     episodes.touch()
     dataset.mkdir()
     loader = _FrameLoader()
     session = TaskGuideSession(
-        documents_path=documents,
+        documents_root=documents,
         episodes_path=episodes,
         dataset_root=dataset,
         max_frames=2,

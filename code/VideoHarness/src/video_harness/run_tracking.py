@@ -5,13 +5,15 @@ import json
 import os
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 STATE_SCHEMA_VERSION = "video-harness.run-state"
+RUN_SUMMARY_SCHEMA_VERSION = "video-harness.run-summary"
 
 
 class ApiCallBudgetExceeded(RuntimeError):
@@ -221,3 +223,148 @@ class TrackingBackend:
 
     def audit_sequence(self, request: Any) -> Any:
         return self._call("sequence_audit", request, self.backend.audit_sequence)
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return round(ordered[lower] * (1 - weight) + ordered[upper] * weight, 3)
+
+
+def _numeric_usage(value: Any, *, prefix: str = "") -> Iterator[tuple[str, float]]:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            yield from _numeric_usage(item, prefix=path)
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        yield prefix, float(value)
+
+
+def summarize_run(root: Path) -> dict[str, Any]:
+    """Aggregate the append-only run log into one compact operational report."""
+
+    root = Path(root)
+    events_path = root / "events.jsonl"
+    state_path = root / "run-state.json"
+    if not events_path.is_file() or not state_path.is_file():
+        raise FileNotFoundError(f"Run log/state is incomplete under {root}")
+
+    event_counts: Counter[str] = Counter()
+    stage_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    stage_latencies: dict[str, list[float]] = defaultdict(list)
+    usage_totals: Counter[str] = Counter()
+    errors: Counter[str] = Counter()
+    document_status: dict[str, str] = {}
+    document_task: dict[str, str] = {}
+    interrupted_documents: set[str] = set()
+    task_plans: dict[tuple[int, int], dict[str, int]] = {}
+
+    with events_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid run event at {events_path}:{line_number}"
+                ) from exc
+            if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+                raise TypeError(f"Invalid run event at {events_path}:{line_number}")
+            event_name = event["event"]
+            event_counts[event_name] += 1
+            if event_name == "task_plan" and isinstance(event.get("tasks"), dict):
+                task_plans[
+                    (int(event.get("num_shards", 1)), int(event.get("shard_index", 0)))
+                ] = {str(key): int(value) for key, value in event["tasks"].items()}
+            document_id = event.get("document_id")
+            task_name = event.get("task_name")
+            if isinstance(document_id, str) and isinstance(task_name, str):
+                document_task[document_id] = task_name
+            if event_name in {"document_completed", "document_reused"} and isinstance(
+                document_id, str
+            ):
+                quality = event.get("quality_status")
+                if isinstance(quality, str):
+                    document_status[document_id] = quality
+            elif event_name == "document_interrupted" and isinstance(document_id, str):
+                interrupted_documents.add(document_id)
+
+            if event_name.startswith("provider_call_"):
+                stage = str(event.get("stage", "unknown"))
+                outcome = event_name.removeprefix("provider_call_")
+                stage_counts[stage][outcome] += 1
+                duration = event.get("duration_ms")
+                if isinstance(duration, (int, float)) and not isinstance(
+                    duration, bool
+                ):
+                    stage_latencies[stage].append(float(duration))
+                if outcome == "completed":
+                    usage_totals.update(dict(_numeric_usage(event.get("usage"))))
+            if event_name.endswith(("failed", "interrupted")):
+                errors[str(event.get("error_type", event_name))] += 1
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    task_totals: Counter[str] = Counter()
+    for plan in task_plans.values():
+        task_totals.update(plan)
+    tasks = []
+    for task_name in sorted(set(task_totals) | set(document_task.values())):
+        task_documents = {
+            document_id
+            for document_id, known_task in document_task.items()
+            if known_task == task_name
+        }
+        statuses = Counter(
+            document_status[document_id]
+            for document_id in task_documents
+            if document_id in document_status
+        )
+        tasks.append(
+            {
+                "task_name": task_name,
+                "total_documents": task_totals[task_name],
+                "completed_documents": sum(statuses.values()),
+                "accepted_documents": statuses["accepted"],
+                "quarantined_documents": statuses["quarantined"],
+            }
+        )
+    provider_calls = {
+        stage: {
+            **dict(sorted(counts.items())),
+            "latency_ms": {
+                "p50": _percentile(stage_latencies[stage], 0.50),
+                "p95": _percentile(stage_latencies[stage], 0.95),
+                "max": (
+                    round(max(stage_latencies[stage]), 3)
+                    if stage_latencies[stage]
+                    else None
+                ),
+            },
+        }
+        for stage, counts in sorted(stage_counts.items())
+    }
+    quality = Counter(document_status.values())
+    return {
+        "schema_version": RUN_SUMMARY_SCHEMA_VERSION,
+        "checkpoint_root": str(root),
+        "events": sum(event_counts.values()),
+        "api_calls_reserved": int(state["api_calls_reserved"]),
+        "documents": {
+            "planned": sum(task_totals.values()),
+            "completed": len(document_status),
+            "accepted": quality["accepted"],
+            "quarantined": quality["quarantined"],
+            "interrupted": len(interrupted_documents - set(document_status)),
+        },
+        "tasks": tasks,
+        "provider_calls": provider_calls,
+        "usage_totals": {
+            key: round(value, 3) for key, value in sorted(usage_totals.items())
+        },
+        "errors": dict(sorted(errors.items())),
+        "event_counts": dict(sorted(event_counts.items())),
+    }

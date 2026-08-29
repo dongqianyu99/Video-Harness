@@ -10,6 +10,7 @@ class HarnessConfig:
     debug: bool = False
     debug_root: Path | None = None
     inspection_retries: int = 1
+    media_retries: int = 2
     call2_retries: int = 2
     repair_max_attempts: int = 2
     sequence_audit_max_attempts: int = 2
@@ -28,6 +29,7 @@ class HarnessConfig:
             raise ValueError("debug_root must be omitted when debug mode is disabled")
         for field in (
             "inspection_retries",
+            "media_retries",
             "call2_retries",
             "repair_max_attempts",
             "sequence_audit_max_attempts",
@@ -40,6 +42,7 @@ class HarnessConfig:
                 if field
                 in {
                     "inspection_retries",
+                    "media_retries",
                     "call2_retries",
                     "sequence_repair_rounds",
                     "provider_max_retries",

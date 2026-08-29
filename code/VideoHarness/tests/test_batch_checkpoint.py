@@ -82,9 +82,7 @@ def test_legacy_gripper_evidence_is_migrated(changed_evidence: dict) -> None:
     assert migrated["evidence_units"][0]["annotation"]["schema_version"] == (
         EVIDENCE_SCHEMA_VERSION
     )
-    assert "gripper_state" not in migrated["evidence_units"][0]["annotation"][
-        "record"
-    ]
+    assert "gripper_state" not in migrated["evidence_units"][0]["annotation"]["record"]
     assert migrated["quality_status"] == "pending"
     assert migrated["quality_provenance"] is None
     validate_document(migrated)
@@ -124,6 +122,7 @@ def test_document_workers_shard_checkpoint_and_merge(
     tmp_path: Path,
     monkeypatch,
     changed_evidence: dict,
+    capsys,
 ) -> None:
     originals = [_planned_document(index) for index in range(20)]
     accepted = {
@@ -185,6 +184,17 @@ def test_document_workers_shard_checkpoint_and_merge(
     assert shard_ids[1]
     assert not shard_ids[0] & shard_ids[1]
     assert shard_ids[0] | shard_ids[1] == set(accepted)
+
+    final_files = sorted((tmp_path / "documents-mock").glob("*/*.document.jsonl"))
+    assert len(final_files) == len(originals)
+    assert len({path.parent for path in final_files}) == 1
+    assert final_files[0].parent.name == "place-the-visible-object-on-the-target"
+    assert {json.loads(path.read_text())["document_id"] for path in final_files} == set(
+        accepted
+    )
+    progress_output = capsys.readouterr().err
+    assert "Place the visible object on the target." in progress_output
+    assert "[####################]" in progress_output
 
     merged = tmp_path / "merged.jsonl"
     assert (
@@ -248,6 +258,73 @@ def test_resume_reuses_terminal_document_checkpoint(
     args.workers = 1
     args.resume = True
     assert cli._annotate(args) == 0
+    assert (
+        json.loads(output.read_text(encoding="utf-8"))["quality_status"] == "accepted"
+    )
+
+
+def test_resume_retries_technical_quarantine(
+    tmp_path: Path,
+    monkeypatch,
+    changed_evidence: dict,
+) -> None:
+    original = _planned_document(0)
+    quarantined = _accepted_document(original, changed_evidence)
+    set_document_quality(quarantined, "quarantined")
+    documents_path = tmp_path / "documents.jsonl"
+    documents_path.write_text(json.dumps(original) + "\n", encoding="utf-8")
+    checkpoint_root = tmp_path / "checkpoints"
+    config = cli.HarnessConfig(inspection_retries=0)
+    cli._ensure_checkpoint_run(
+        checkpoint_root,
+        documents_path=documents_path,
+        dataset_root=tmp_path / "dataset",
+        provider="mock",
+        model="deterministic-insufficient-evidence",
+        num_shards=1,
+        config=config,
+    )
+    cli._write_document_checkpoint(
+        checkpoint_root,
+        cli.DocumentAnnotationResult(
+            quarantined,
+            0,
+            1,
+            (
+                {
+                    "document_id": quarantined["document_id"],
+                    "unit_id": "u0000",
+                    "error": "provider timeout",
+                },
+            ),
+        ),
+    )
+    retried = []
+
+    def fake_annotate(document, **_kwargs):
+        retried.append(document["document_id"])
+        return cli.DocumentAnnotationResult(
+            _accepted_document(original, changed_evidence),
+            1,
+            0,
+            (),
+        )
+
+    monkeypatch.setattr(cli, "_make_worker_context", lambda *_args: object())
+    monkeypatch.setattr(cli, "_annotate_document", fake_annotate)
+    output = tmp_path / "resumed.jsonl"
+    args = _args(
+        documents=documents_path,
+        output=output,
+        dataset_root=tmp_path / "dataset",
+        checkpoint_root=checkpoint_root,
+        shard_index=0,
+    )
+    args.num_shards = 1
+    args.workers = 1
+    args.resume = True
+    assert cli._annotate(args) == 0
+    assert retried == [original["document_id"]]
     assert (
         json.loads(output.read_text(encoding="utf-8"))["quality_status"] == "accepted"
     )

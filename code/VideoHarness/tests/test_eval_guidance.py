@@ -165,12 +165,18 @@ def test_plan_requires_at_least_one_trainable_unit(changed_evidence):
         catalog.build_plan(task_index=3)
 
 
-def test_loader_accepts_single_json(tmp_path: Path, changed_evidence):
-    path = tmp_path / "annotated-document.json"
+def test_loader_accepts_task_grouped_episode_directory(
+    tmp_path: Path, changed_evidence
+):
+    root = tmp_path / "documents"
+    task_root = root / "put-bread-into-the-toaster"
+    task_root.mkdir(parents=True)
+    path = task_root / "episode-0000010.document.jsonl"
     path.write_text(
-        json.dumps(_document(10, changed_evidence=changed_evidence)), encoding="utf-8"
+        json.dumps(_document(10, changed_evidence=changed_evidence)) + "\n",
+        encoding="utf-8",
     )
 
-    catalog = load_eval_guidance_catalog(path)
+    catalog = load_eval_guidance_catalog(root)
 
     assert catalog.resolve(task_index=3).source_episode_index == 10

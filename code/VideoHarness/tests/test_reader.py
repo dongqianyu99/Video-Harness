@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import json
 import re
+import shutil
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -226,14 +227,18 @@ def _write_bundle(
     dataset: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, Path]:
     dataset_path = tmp_path / "dataset.json"
-    documents_path = tmp_path / "documents.openai.jsonl"
+    documents_path = tmp_path / "documents-openai"
     pairs_path = tmp_path / "pairs.jsonl"
 
     _write_json(dataset_path, dataset or _dataset())
-    _write_jsonl(
-        documents_path,
-        documents or [_document(1), _document(10)],
-    )
+    for position, document in enumerate(documents or [_document(1), _document(10)]):
+        task_root = documents_path / f"task-{document['source']['task_index']}"
+        task_root.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(
+            task_root
+            / f"episode-{document['source']['episode_index']:07d}-{position}.document.jsonl",
+            [document],
+        )
     _write_jsonl(pairs_path, pairs or [_pair()])
     return dataset_path, documents_path, pairs_path
 
@@ -266,7 +271,7 @@ def test_load_artifact_bundle_is_typed_and_read_only(tmp_path: Path) -> None:
 
 def test_loader_rejects_missing_artifact_file(tmp_path: Path) -> None:
     paths = _write_bundle(tmp_path)
-    paths[1].unlink()
+    shutil.rmtree(paths[1])
 
     with pytest.raises(FileNotFoundError, match=re.escape(str(paths[1]))):
         load_guide_artifact_bundle(
@@ -278,12 +283,13 @@ def test_loader_rejects_missing_artifact_file(tmp_path: Path) -> None:
 
 def test_loader_reports_malformed_jsonl_with_path_and_line(tmp_path: Path) -> None:
     paths = _write_bundle(tmp_path)
-    paths[1].write_text(
+    document_file = next(paths[1].glob("*/*.document.jsonl"))
+    document_file.write_text(
         json.dumps(_document(10)) + "\n" + "{malformed\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=f"{re.escape(str(paths[1]))}.*line 2"):
+    with pytest.raises(ValueError, match=f"{re.escape(str(document_file))}.*line 2"):
         load_guide_artifact_bundle(
             dataset_path=paths[0],
             documents_path=paths[1],

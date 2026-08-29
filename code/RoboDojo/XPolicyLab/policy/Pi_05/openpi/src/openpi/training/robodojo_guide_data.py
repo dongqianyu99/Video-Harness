@@ -9,24 +9,16 @@ import statistics
 from typing import Any
 
 import jax
-
 from openpi.models.guide_materializer import GuideMaterializerConfig
-from openpi.training.guide_buckets import GuideLengthBucket
-from openpi.training.guide_buckets import assign_guide_length_buckets
-from openpi.training.guide_buckets import normalize_guide_length_buckets
-from openpi.training.guide_cache import ConstantResolverFactory
-from openpi.training.guide_cache import ProcessLocalGuideResolver
+from openpi.training.guide_buckets import GuideLengthBucket, assign_guide_length_buckets, normalize_guide_length_buckets
+from openpi.training.guide_cache import ConstantResolverFactory, ProcessLocalGuideResolver
 from openpi.training.guide_collator import MultiGuideBatchCollator
 from openpi.training.guide_data_loader import GuidedDataLoader
-from openpi.training.guide_dataset import GuideBindingIndex
-from openpi.training.guide_dataset import GuideBoundDataset
+from openpi.training.guide_dataset import GuideBindingIndex, GuideBoundDataset
 from openpi.training.guide_native_dataset import transform_dataset_preserving_identity
-from openpi.training.guide_sampler import GroupedBindingBatchSampler
-from openpi.training.guide_sampler import QueryEpisodeRange
-from openpi.training.guide_sampler import build_binding_to_sample_indices
+from openpi.training.guide_sampler import GroupedBindingBatchSampler, QueryEpisodeRange, build_binding_to_sample_indices
 from openpi.training.guide_split import load_and_validate_training_split
-from openpi.training.robodojo_guide_resolver import RoboDojoGuideResolverFactory
-from openpi.training.robodojo_guide_resolver import VideoHarnessGuideResolver
+from openpi.training.robodojo_guide_resolver import RoboDojoGuideResolverFactory, VideoHarnessGuideResolver
 
 
 @dataclass(frozen=True)
@@ -36,7 +28,7 @@ class RoboDojoGuidedDataConfig:
     repo_id: str
     dataset_root: Path
     dataset_artifact_path: Path
-    documents_artifact_path: Path
+    documents_root: Path
     pairs_artifact_path: Path
     batch_size: int
     seed: int
@@ -66,14 +58,12 @@ class RoboDojoGuidedDataConfig:
         for name in (
             "dataset_root",
             "dataset_artifact_path",
-            "documents_artifact_path",
+            "documents_root",
             "pairs_artifact_path",
         ):
             if not isinstance(getattr(self, name), Path):
                 raise ValueError(f"{name} must be an explicit pathlib.Path")
-        if self.split_manifest_path is not None and not isinstance(
-            self.split_manifest_path, Path
-        ):
+        if self.split_manifest_path is not None and not isinstance(self.split_manifest_path, Path):
             raise ValueError("split_manifest_path must be pathlib.Path or None")
 
         for name in (
@@ -98,8 +88,7 @@ class RoboDojoGuidedDataConfig:
             raise ValueError("num_workers must be a non-negative integer")
         if self.batch_size % self.guides_per_batch != 0:
             raise ValueError(
-                "batch_size must be divisible by guides_per_batch: "
-                f"{self.batch_size} % {self.guides_per_batch} != 0"
+                f"batch_size must be divisible by guides_per_batch: {self.batch_size} % {self.guides_per_batch} != 0"
             )
         if not isinstance(self.persistent_workers, bool):
             raise ValueError("persistent_workers must be bool")
@@ -107,7 +96,11 @@ class RoboDojoGuidedDataConfig:
             raise ValueError("require_all_tasks must be bool")
         if self.remainder_strategy not in {"drop", "pad_mask"}:
             raise ValueError("remainder_strategy must be 'drop' or 'pad_mask'")
-        if isinstance(self.worker_timeout_s, bool) or not isinstance(self.worker_timeout_s, (int, float)) or self.worker_timeout_s < 0:
+        if (
+            isinstance(self.worker_timeout_s, bool)
+            or not isinstance(self.worker_timeout_s, (int, float))
+            or self.worker_timeout_s < 0
+        ):
             raise ValueError("worker_timeout_s must be non-negative")
         for name in ("guide_cache_entries", "guide_cache_max_bytes"):
             value = getattr(self, name)
@@ -116,23 +109,15 @@ class RoboDojoGuidedDataConfig:
 
         if self.guide_length_buckets is not None:
             buckets = normalize_guide_length_buckets(self.guide_length_buckets)
-            if (
-                buckets[-1].max_units > self.max_units
-                or buckets[-1].max_frames > self.max_frames
-            ):
-                raise ValueError(
-                    "the largest Guide bucket must fit within max_units/max_frames"
-                )
+            if buckets[-1].max_units > self.max_units or buckets[-1].max_frames > self.max_frames:
+                raise ValueError("the largest Guide bucket must fit within max_units/max_frames")
             object.__setattr__(self, "guide_length_buckets", buckets)
 
         if self.query_episode_indices is not None:
             indices = tuple(self.query_episode_indices)
             if not indices:
                 raise ValueError("query_episode_indices must not be empty")
-            if any(
-                isinstance(index, bool) or not isinstance(index, int) or index < 0
-                for index in indices
-            ):
+            if any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in indices):
                 raise ValueError("query_episode_indices must contain non-negative integers")
             if len(set(indices)) != len(indices):
                 raise ValueError("query_episode_indices must be unique")
@@ -173,7 +158,7 @@ def _load_artifact_bundle(
         artifact_loader = reader.load_guide_artifact_bundle
     return artifact_loader(
         dataset_path=config.dataset_artifact_path,
-        documents_path=config.documents_artifact_path,
+        documents_path=config.documents_root,
         pairs_path=config.pairs_artifact_path,
     )
 
@@ -213,9 +198,7 @@ def _camera_path(record: Any, camera_key: str) -> str:
     videos = getattr(record, "videos", ())
     matches = [video for video in videos if video.key == camera_key]
     if len(matches) != 1:
-        raise ValueError(
-            f"episode_index={record.episode_index} must provide exactly one {camera_key} video"
-        )
+        raise ValueError(f"episode_index={record.episode_index} must provide exactly one {camera_key} video")
     return str(matches[0].path)
 
 
@@ -231,17 +214,12 @@ def _validate_artifact_dataset_contract(bundle: Any, records: list[Any]) -> None
         raise ValueError("artifact document_camera must be observation.images.cam_high")
 
     records_by_episode = _record_by_episode(records)
-    documents_by_id = {
-        source.document_id: source
-        for source in getattr(bundle, "documents", ())
-    }
+    documents_by_id = {source.document_id: source for source in getattr(bundle, "documents", ())}
     for binding in getattr(bundle, "support_bindings", ()):
         query_record = records_by_episode.get(binding.query_episode_index)
         support_record = records_by_episode.get(binding.support_episode_index)
         if query_record is None:
-            raise ValueError(
-                f"artifact query episode {binding.query_episode_index} is absent from dataset metadata"
-            )
+            raise ValueError(f"artifact query episode {binding.query_episode_index} is absent from dataset metadata")
         if support_record is None:
             raise ValueError(
                 f"artifact support episode {binding.support_episode_index} is absent from dataset metadata"
@@ -259,17 +237,11 @@ def _validate_artifact_dataset_contract(bundle: Any, records: list[Any]) -> None
 
         source = documents_by_id.get(binding.support_document_id)
         if source is None:
-            raise ValueError(
-                f"binding support document {binding.support_document_id!r} is absent"
-            )
+            raise ValueError(f"binding support document {binding.support_document_id!r} is absent")
         if source.episode_index != support_record.episode_index:
-            raise ValueError(
-                f"support document {source.document_id!r} episode mismatch"
-            )
+            raise ValueError(f"support document {source.document_id!r} episode mismatch")
         if source.task_index != support_record.task_index:
-            raise ValueError(
-                f"support document {source.document_id!r} task mismatch"
-            )
+            raise ValueError(f"support document {source.document_id!r} task mismatch")
 
         source_metadata = source.document.get("source")
         if not isinstance(source_metadata, dict) and not hasattr(source_metadata, "get"):
@@ -296,11 +268,7 @@ def _select_bindings(bundle: Any, query_episode_indices: tuple[int, ...] | None)
     if query_episode_indices is None:
         return bindings
 
-    selected = tuple(
-        binding
-        for binding in bindings
-        if binding.query_episode_index in query_episode_indices
-    )
+    selected = tuple(binding for binding in bindings if binding.query_episode_index in query_episode_indices)
     found = {binding.query_episode_index for binding in selected}
     missing = sorted(set(query_episode_indices) - found)
     if missing:
@@ -359,14 +327,20 @@ def create_robodojo_guided_data_loader(
 
     if jax.process_count() != 1:
         raise ValueError("RoboDojo guided data requires jax.process_count() == 1")
-    if num_batches is not None and (isinstance(num_batches, bool) or not isinstance(num_batches, int) or num_batches < 0):
+    if num_batches is not None and (
+        isinstance(num_batches, bool) or not isinstance(num_batches, int) or num_batches < 0
+    ):
         raise ValueError(f"num_batches must be a non-negative integer or None, got {num_batches!r}")
     if skip_norm_stats and guided_data_config.repo_id != "fake":
         raise ValueError("skip_norm_stats=True is allowed only for repo_id='fake' unit tests")
 
     _require_path(guided_data_config.dataset_root, name="dataset_root", directory=True)
     _require_path(guided_data_config.dataset_artifact_path, name="dataset_artifact_path", directory=False)
-    _require_path(guided_data_config.documents_artifact_path, name="documents_artifact_path", directory=False)
+    _require_path(
+        guided_data_config.documents_root,
+        name="documents_root",
+        directory=True,
+    )
     _require_path(guided_data_config.pairs_artifact_path, name="pairs_artifact_path", directory=False)
     if guided_data_config.split_manifest_path is not None:
         _require_path(
@@ -380,11 +354,7 @@ def create_robodojo_guided_data_loader(
         native_train_config.model,
     )
     guided_native_config = _replace_repo_id(native_data_config, guided_data_config.repo_id)
-    if (
-        not skip_norm_stats
-        and guided_data_config.repo_id != "fake"
-        and guided_native_config.norm_stats is None
-    ):
+    if not skip_norm_stats and guided_data_config.repo_id != "fake" and guided_native_config.norm_stats is None:
         raise ValueError(
             "Normalization stats are required for the real guided dataset: "
             f"asset_id={guided_native_config.asset_id!r}, "
@@ -425,9 +395,7 @@ def create_robodojo_guided_data_loader(
             requested = set(guided_data_config.query_episode_indices)
             missing = sorted(requested - manifest_queries)
             if missing:
-                raise ValueError(
-                    f"debug query episodes are absent from the training split: {missing}"
-                )
+                raise ValueError(f"debug query episodes are absent from the training split: {missing}")
             query_episode_indices = guided_data_config.query_episode_indices
     else:
         query_episode_indices = guided_data_config.query_episode_indices
@@ -478,8 +446,7 @@ def create_robodojo_guided_data_loader(
     )
 
     custom_worker_dependencies = any(
-        dependency is not None
-        for dependency in (artifact_loader, tokenizer, frame_loader, plan_builder)
+        dependency is not None for dependency in (artifact_loader, tokenizer, frame_loader, plan_builder)
     )
     if guided_data_config.num_workers > 0 and custom_worker_dependencies:
         raise ValueError(
@@ -490,14 +457,12 @@ def create_robodojo_guided_data_loader(
     if guided_data_config.num_workers > 0:
         resolver_factory = RoboDojoGuideResolverFactory(
             dataset_artifact_path=guided_data_config.dataset_artifact_path,
-            documents_artifact_path=guided_data_config.documents_artifact_path,
+            documents_root=guided_data_config.documents_root,
             pairs_artifact_path=guided_data_config.pairs_artifact_path,
             dataset_root=guided_data_config.dataset_root,
             binding_records=binding_index.records,
             materializer_config=materializer_config,
-            materializer_configs_by_binding=tuple(
-                bucket_assignment.binding_to_materializer_config.items()
-            ),
+            materializer_configs_by_binding=tuple(bucket_assignment.binding_to_materializer_config.items()),
             profile=guided_data_config.profile,
         )
     else:
@@ -507,9 +472,7 @@ def create_robodojo_guided_data_loader(
             dataset_root=guided_data_config.dataset_root,
             tokenizer=_make_tokenizer(tokenizer, guided_data_config.max_text_tokens),
             materializer_config=materializer_config,
-            materializer_configs_by_binding=(
-                bucket_assignment.binding_to_materializer_config
-            ),
+            materializer_configs_by_binding=(bucket_assignment.binding_to_materializer_config),
             profile=guided_data_config.profile,
             frame_loader=frame_loader,
             plan_builder=plan_builder,
@@ -541,13 +504,9 @@ def create_robodojo_guided_data_loader(
         binding_index=binding_index,
         host_metadata={
             "artifact_build_id": getattr(bundle, "build_id", None),
-            "training_split_id": (
-                None if validated_split is None else validated_split.split_id
-            ),
+            "training_split_id": (None if validated_split is None else validated_split.split_id),
             "training_split_path": (
-                None
-                if guided_data_config.split_manifest_path is None
-                else str(guided_data_config.split_manifest_path)
+                None if guided_data_config.split_manifest_path is None else str(guided_data_config.split_manifest_path)
             ),
             "repo_id": guided_data_config.repo_id,
             "guides_per_batch": guided_data_config.guides_per_batch,
@@ -559,15 +518,9 @@ def create_robodojo_guided_data_loader(
             "guide_cache_max_bytes": guided_data_config.guide_cache_max_bytes,
             "sampler_stats": dataclasses.asdict(sampler.stats),
             "guide_binding_bucket_counts": bucket_assignment.bucket_counts,
-            "guide_document_bucket_counts": (
-                bucket_assignment.document_bucket_counts
-            ),
-            "guide_length_summary": _guide_length_summary(
-                bucket_assignment.document_lengths
-            ),
+            "guide_document_bucket_counts": (bucket_assignment.document_bucket_counts),
+            "guide_length_summary": _guide_length_summary(bucket_assignment.document_lengths),
             "remainder_strategy": guided_data_config.remainder_strategy,
-            "gradient_accumulation_steps": (
-                guided_data_config.gradient_accumulation_steps
-            ),
+            "gradient_accumulation_steps": (guided_data_config.gradient_accumulation_steps),
         },
     )

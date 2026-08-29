@@ -9,16 +9,11 @@ from typing import Any
 
 import jax
 import numpy as np
-
 from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_pi0_config import GuidePi0Config
-from openpi.training.guide_train_config import GuidedTrainRunConfig
-from openpi.training.guide_train_config import resolve_guided_train_config
-from openpi.training.guide_train_sharding import make_guided_batch_sharding
-from openpi.training.guide_train_sharding import put_guided_batch
-from openpi.training.guide_train_step import _prefix_norm
-from openpi.training.guide_train_step import guided_loss_and_grad
-from openpi.training.guide_train_step import guided_train_step
+from openpi.training.guide_train_config import GuidedTrainRunConfig, resolve_guided_train_config
+from openpi.training.guide_train_sharding import make_guided_batch_sharding, put_guided_batch
+from openpi.training.guide_train_step import _prefix_norm, guided_loss_and_grad, guided_train_step
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 
 
@@ -29,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-artifact", type=Path, required=True)
-    parser.add_argument("--documents-artifact", type=Path, required=True)
+    parser.add_argument("--documents-root", type=Path, required=True)
     parser.add_argument("--pairs-artifact", type=Path, required=True)
     parser.add_argument("--query-episode-index", type=int, required=True)
     parser.add_argument("--batch-size", type=int, required=True)
@@ -65,11 +60,7 @@ def _memory_stats() -> dict[str, int] | None:
         return None
     if stats is None:
         return None
-    return {
-        key: int(value)
-        for key, value in stats.items()
-        if isinstance(value, (int, np.integer))
-    }
+    return {key: int(value) for key, value in stats.items() if isinstance(value, (int, np.integer))}
 
 
 def _gradient_sharding(train_state_sharding: Any, trainable_filter: Any) -> Any:
@@ -88,7 +79,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
         dataset_artifact_path=args.dataset_artifact,
-        documents_artifact_path=args.documents_artifact,
+        documents_root=args.documents_root,
         pairs_artifact_path=args.pairs_artifact,
         batch_size=args.batch_size,
         seed=args.seed,
@@ -137,12 +128,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         mesh,
         resume=False,
     )
-    replicated_sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec()
-    )
-    grad_sharding = _gradient_sharding(
-        train_state_sharding, resolved_config.trainable_filter
-    )
+    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    grad_sharding = _gradient_sharding(train_state_sharding, resolved_config.trainable_filter)
     with mesh_module.set_mesh(mesh):
         if args.no_optimizer_update:
             pforward = jax.jit(
@@ -158,25 +145,19 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                     replicated_sharding,
                 ),
             )
-            loss, grads, groups, queries, valid_queries = pforward(
-                rng, train_state, batch
-            )
+            loss, grads, groups, queries, valid_queries = pforward(rng, train_state, batch)
             jax.block_until_ready((loss, grads))
             info = {
                 "loss": loss,
                 "guide_encoder_grad_norm": _prefix_norm(grads, ("guide_encoder",)),
-                "native_backbone_grad_norm": _prefix_norm(
-                    grads, ("guide_encoder",), complement=True
-                ),
+                "native_backbone_grad_norm": _prefix_norm(grads, ("guide_encoder",), complement=True),
                 "G": groups,
                 "Q": queries,
                 "valid_queries": valid_queries,
             }
         else:
             ptrain_step = jax.jit(
-                lambda step_rng, state, guided_batch: guided_train_step(
-                    resolved_config, step_rng, state, guided_batch
-                ),
+                lambda step_rng, state, guided_batch: guided_train_step(resolved_config, step_rng, state, guided_batch),
                 in_shardings=(replicated_sharding, train_state_sharding, batch_sharding),
                 out_shardings=(train_state_sharding, replicated_sharding),
                 donate_argnums=(1,),
@@ -193,9 +174,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "dtype": str(resolved_config.model.dtype),
         "G": groups,
         "Q": queries,
-        "observation_image_shapes": {
-            key: _shape(value) for key, value in batch.observation.images.items()
-        },
+        "observation_image_shapes": {key: _shape(value) for key, value in batch.observation.images.items()},
         "state_shape": _shape(batch.observation.state),
         "action_shape": _shape(batch.actions),
         "guide_image_shape": _shape(batch.guide.images),

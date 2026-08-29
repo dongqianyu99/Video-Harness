@@ -26,7 +26,7 @@ export VIDEO_HARNESS_DIR=/path/to/VideoHarness
 export HF_LEROBOT_HOME=/path/to/lerobot-datasets
 export ROBODOJO_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
 export GUIDE_ARTIFACT_ROOT=/path/to/Guidance-Documents/RoboDojo
-export GUIDE_DOCUMENTS=/path/to/annotated-documents.jsonl
+export GUIDE_DOCUMENTS_ROOT=/path/to/documents-openai
 export GUIDE_SPLIT_ROOT=/path/to/video-harness-split-seed0
 export GUIDE_TRAIN_SPLIT="$GUIDE_SPLIT_ROOT/training-split.json"
 export GUIDE_TRAIN_PAIRS="$GUIDE_SPLIT_ROOT/train-pairs.jsonl"
@@ -131,7 +131,7 @@ remain fail-closed—there is no silent truncation.
 
 1. **M4d real batch.** Run `smoke_robodojo_guided_batch.py` with explicit
    `--dataset-root`, `--repo-id`, `--dataset-artifact`,
-   `--documents-artifact`, `--pairs-artifact`, and one
+   `--documents-root`, `--pairs-artifact`, and one
    `--query-episode-index`. Confirm support-only decoding, native norm stats,
    `G=1,Q=batch_size`, frame/text/unit masks, and finite shapes.
 2. **M5 forward/backward.** After the batch gate passes, run
@@ -164,7 +164,7 @@ uv run python scripts/smoke_robodojo_guided_batch.py \
   --repo-id RoboDojo_lerobot_v30_video \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
-  --documents-artifact "$GUIDE_DOCUMENTS" \
+  --documents-root "$GUIDE_DOCUMENTS_ROOT" \
   --pairs-artifact "$GUIDE_ARTIFACT_ROOT/pairs.jsonl" \
   --query-episode-index "$GUIDE_QUERY_EPISODE" \
   --batch-size "$GUIDE_BATCH_SIZE" \
@@ -183,7 +183,7 @@ uv run python scripts/smoke_guided_forward_backward.py \
   --repo-id RoboDojo_lerobot_v30_video \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
-  --documents-artifact "$GUIDE_DOCUMENTS" \
+  --documents-root "$GUIDE_DOCUMENTS_ROOT" \
   --pairs-artifact "$GUIDE_ARTIFACT_ROOT/pairs.jsonl" \
   --query-episode-index "$GUIDE_QUERY_EPISODE" \
   --batch-size "$GUIDE_BATCH_SIZE" \
@@ -208,7 +208,7 @@ uv run python scripts/train_guided.py \
   --repo-id RoboDojo_lerobot_v30_video \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
-  --documents-artifact "$GUIDE_DOCUMENTS" \
+  --documents-root "$GUIDE_DOCUMENTS_ROOT" \
   --pairs-artifact "$GUIDE_TRAIN_PAIRS" \
   --split-manifest "$GUIDE_TRAIN_SPLIT" \
   --debug-query-episode-index "$GUIDE_QUERY_EPISODE" \
@@ -240,7 +240,7 @@ uv run python scripts/train_guided.py \
   --repo-id RoboDojo_lerobot_v30_video \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
-  --documents-artifact "$GUIDE_DOCUMENTS" \
+  --documents-root "$GUIDE_DOCUMENTS_ROOT" \
   --pairs-artifact "$GUIDE_TRAIN_PAIRS" \
   --split-manifest "$GUIDE_TRAIN_SPLIT" \
   --batch-size 16 \
@@ -276,7 +276,7 @@ uv run python scripts/benchmark_guided_data_loader.py \
   --repo-id RoboDojo_lerobot_v30_video \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --dataset-artifact "$GUIDE_ARTIFACT_ROOT/dataset.json" \
-  --documents-artifact "$GUIDE_DOCUMENTS" \
+  --documents-root "$GUIDE_DOCUMENTS_ROOT" \
   --pairs-artifact "$GUIDE_TRAIN_PAIRS" \
   --split-manifest "$GUIDE_TRAIN_SPLIT" \
   --batch-size 16 \

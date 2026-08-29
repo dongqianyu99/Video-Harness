@@ -11,12 +11,9 @@ from typing import Any
 
 import jax
 import numpy as np
-
-from openpi.models.guide_inputs import query_mask_or_ones
-from openpi.models.guide_inputs import validate_guide_conditioned_batch
+from openpi.models.guide_inputs import query_mask_or_ones, validate_guide_conditioned_batch
 from openpi.training.guide_buckets import parse_guide_length_bucket
-from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
-from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
+from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig, create_robodojo_guided_data_loader
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -85,14 +82,12 @@ def benchmark_loader(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Benchmark the real grouped Guide data path without loading Pi0.5."
-    )
+    parser = argparse.ArgumentParser(description="Benchmark the real grouped Guide data path without loading Pi0.5.")
     parser.add_argument("--native-config-name", required=True)
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--dataset-artifact", type=Path, required=True)
-    parser.add_argument("--documents-artifact", type=Path, required=True)
+    parser.add_argument("--documents-root", type=Path, required=True)
     parser.add_argument("--pairs-artifact", type=Path, required=True)
     parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, required=True)
@@ -102,9 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-torch-threads", type=int, default=1)
     parser.add_argument("--guide-cache-entries", type=int, default=2)
     parser.add_argument("--guide-cache-max-bytes", type=int, default=256 * 1024 * 1024)
-    parser.add_argument(
-        "--remainder-strategy", choices=("drop", "pad_mask"), default="drop"
-    )
+    parser.add_argument("--remainder-strategy", choices=("drop", "pad_mask"), default="drop")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument(
         "--guide-length-bucket",
@@ -125,14 +118,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    native_config = importlib.import_module("openpi.training.config").get_config(
-        args.native_config_name
-    )
+    native_config = importlib.import_module("openpi.training.config").get_config(args.native_config_name)
     config = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
         dataset_artifact_path=args.dataset_artifact,
-        documents_artifact_path=args.documents_artifact,
+        documents_root=args.documents_root,
         pairs_artifact_path=args.pairs_artifact,
         batch_size=args.batch_size,
         guides_per_batch=args.guides_per_batch,
@@ -148,13 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         guide_cache_max_bytes=args.guide_cache_max_bytes,
         split_manifest_path=args.split_manifest,
         require_all_tasks=True,
-        guide_length_buckets=(
-            tuple(
-                parse_guide_length_bucket(spec)
-                for spec in args.guide_length_bucket
-            )
-            or None
-        ),
+        guide_length_buckets=(tuple(parse_guide_length_bucket(spec) for spec in args.guide_length_bucket) or None),
         remainder_strategy=args.remainder_strategy,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
     )

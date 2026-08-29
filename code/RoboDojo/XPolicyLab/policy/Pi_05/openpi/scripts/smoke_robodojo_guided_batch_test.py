@@ -36,7 +36,7 @@ def test_smoke_cli_scopes_loader_to_requested_query_episode(monkeypatch):
         repo_id="RoboDojo_lerobot_v30_video",
         dataset_root=Path("dataset"),
         dataset_artifact=Path("dataset.json"),
-        documents_artifact=Path("documents.jsonl"),
+        documents_root=Path("documents"),
         pairs_artifact=Path("pairs.jsonl"),
         query_episode_index=37,
         batch_size=2,

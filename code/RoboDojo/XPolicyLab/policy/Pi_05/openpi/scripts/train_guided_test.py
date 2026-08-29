@@ -9,17 +9,15 @@ from types import SimpleNamespace
 import flax.nnx as nnx
 import jax
 import numpy as np
-import pytest
-
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.shared.normalize import NormStats
 from openpi.training import checkpoints
 from openpi.training.guide_train_config import GuidedTrainRunConfig
-from openpi.training.guide_train_step_test import _make_batch
-from openpi.training.guide_train_step_test import _make_state
-from openpi.training.guide_train_step_test import _TinyGuidedModel
+from openpi.training.guide_train_step_test import _make_batch, _make_state, _TinyGuidedModel
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 import openpi.training.sharding as stock_sharding
+import pytest
+
 from scripts import train_guided as _train
 
 
@@ -28,7 +26,7 @@ def _guided_data(tmp_path: Path) -> RoboDojoGuidedDataConfig:
         repo_id="fake",
         dataset_root=tmp_path / "dataset",
         dataset_artifact_path=tmp_path / "dataset.json",
-        documents_artifact_path=tmp_path / "documents.jsonl",
+        documents_root=tmp_path / "documents",
         pairs_artifact_path=tmp_path / "pairs.jsonl",
         batch_size=2,
         seed=0,
@@ -68,7 +66,7 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
         repo_id="RoboDojo",
         dataset_root=tmp_path / "dataset",
         dataset_artifact=tmp_path / "dataset.json",
-        documents_artifact=tmp_path / "documents.jsonl",
+        documents_root=tmp_path / "documents",
         pairs_artifact=tmp_path / "pairs.jsonl",
         query_episode_index=37,
         batch_size=2,

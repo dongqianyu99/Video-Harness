@@ -260,6 +260,25 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _read_document_directory(path: Path) -> list[dict[str, Any]]:
+    """Read one single-record Document JSONL per episode, grouped by task."""
+
+    if not path.is_dir():
+        raise FileNotFoundError(f"Document directory does not exist: {path}")
+    files = sorted(path.glob("*/*.document.jsonl"))
+    if not files:
+        raise FileNotFoundError(f"Document directory contains no episode files: {path}")
+    documents: list[dict[str, Any]] = []
+    for file in files:
+        records = _read_jsonl(file)
+        if len(records) != 1:
+            raise ValueError(
+                f"Episode Document file must contain exactly one record: {file}"
+            )
+        documents.append(records[0])
+    return documents
+
+
 @dataclass(frozen=True)
 class GuideFrameRef:
     """One support-document frame referenced by a token-neutral GuidePlan."""
@@ -449,7 +468,7 @@ def load_guide_artifact_bundle(
     build_id = dataset["build_id"]
 
     documents = _index_document_sources(
-        _read_jsonl(documents_path),
+        _read_document_directory(documents_path),
         build_id=build_id,
     )
 

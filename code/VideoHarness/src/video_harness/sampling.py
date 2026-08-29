@@ -15,6 +15,7 @@ from .hdf5_source import HDF5_SOURCE_DATASET, HDF5_VIEW_KEYS
 from .robodojo import EpisodeRecord
 
 BEHAVIOR_DOCUMENT_SCHEMA_VERSION = "video-harness.behavior-document"
+MIN_ACCEPTED_UNIT_RATIO = 0.90
 
 _VIEW_ALIASES = {
     "observation.images.cam_high": "cam_high",
@@ -313,7 +314,9 @@ def validate_document(document: Any) -> dict[str, Any]:
             raise ValueError("document.source.data_path must be a relative path")
         pure_data_path = PurePosixPath(data_path)
         if pure_data_path.is_absolute() or ".." in pure_data_path.parts:
-            raise ValueError("document.source.data_path must stay within the dataset root")
+            raise ValueError(
+                "document.source.data_path must stay within the dataset root"
+            )
         dataset_from = source["dataset_from_index"]
         dataset_to = source["dataset_to_index"]
         if (
@@ -660,12 +663,17 @@ def validate_document(document: Any) -> dict[str, Any]:
         if value["status"] != "annotated":
             raise ValueError("only fully annotated real documents can be accepted")
         if any(
-            item["annotation"]["record"]["quality_status"] != "accepted"
-            for collection in (boundaries, units)
-            for item in collection
+            boundary["annotation"]["record"]["quality_status"] != "accepted"
+            for boundary in boundaries
         ):
+            raise ValueError("accepted documents require accepted Boundary States")
+        accepted_units = sum(
+            unit["annotation"]["record"]["quality_status"] == "accepted"
+            for unit in units
+        )
+        if accepted_units / len(units) < MIN_ACCEPTED_UNIT_RATIO:
             raise ValueError(
-                "accepted documents require accepted Boundaries and Evidence Units"
+                "accepted documents require at least 90% accepted Evidence Units"
             )
     if quality_status == "quarantined" and value["status"] not in {
         "annotated",

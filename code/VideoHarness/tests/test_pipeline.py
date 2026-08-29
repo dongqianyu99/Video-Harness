@@ -25,6 +25,7 @@ from video_harness.temporal_media import (
     BaseMedia,
     DetailRequest,
     EvidenceUnitFrames,
+    TemporalMediaError,
 )
 
 
@@ -525,7 +526,9 @@ def test_call2_provider_error_fails_with_scoped_debug(tmp_path: Path) -> None:
     assert manifest["status"] == "failed"
 
 
-def test_call2_retries_malformed_output_without_rebuilding_media(tmp_path: Path) -> None:
+def test_call2_retries_malformed_output_without_rebuilding_media(
+    tmp_path: Path,
+) -> None:
     document, unit = _document_and_unit()
     media = FakeMediaBuilder()
     evidence = FakeEvidenceBackend(
@@ -545,6 +548,32 @@ def test_call2_retries_malformed_output_without_rebuilding_media(tmp_path: Path)
     assert media.base_calls == 1
     assert (root / "call2-attempt-01-error.json").is_file()
     assert (root / "call2.json").is_file()
+
+
+def test_media_failure_retries_before_quarantining_unit() -> None:
+    class FlakyMedia(FakeMediaBuilder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failures = 2
+
+        def build_base(self, document, unit):
+            self.base_calls += 1
+            if self.failures:
+                self.failures -= 1
+                raise TemporalMediaError("transient decode failure")
+            return self.base
+
+    document, unit = _document_and_unit()
+    media = FlakyMedia()
+    result = EvidenceUnitPipeline(
+        inspection_backend=FakeInspectionBackend(),
+        evidence_backend=FakeEvidenceBackend(),
+        media_builder=media,
+        config=HarnessConfig(media_retries=2),
+    ).run(document, unit)
+
+    assert media.base_calls == 3
+    assert result.quality_status == "accepted"
 
 
 def test_inspection_retry_and_fallback_do_not_repeat_media_decode(
@@ -567,6 +596,7 @@ def test_inspection_retry_and_fallback_do_not_repeat_media_decode(
     assert result.detail_status == "inspection-failed-fallback"
     assert result.inspection.provider == "harness-fallback"
     assert result.quality_status == "quarantined"
+    assert result.retryable_failure is not None
     assert result.evidence.evidence["causal_validation"]["status"] == "retry"
     root = Path(result.debug_root or "")
     assert (root / "call1-error.json").is_file()
@@ -598,6 +628,7 @@ def test_inspection_failure_can_be_recovered_from_full_temporal_evidence() -> No
     ).run(document, unit)
 
     assert result.quality_status == "accepted"
+    assert result.retryable_failure is None
     assert result.repair_attempts == 1
     assert result.evidence.evidence["motion_summary"] == (
         "Recovered task-conditioned motion evidence."

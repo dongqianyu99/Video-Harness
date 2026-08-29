@@ -189,6 +189,20 @@ def test_all_views_get_overview_and_keyframe_sheets() -> None:
     assert all(_open(payload.data).width > 1500 for payload in keyframe_sheets)
 
 
+def test_sheet_rendering_uses_pillow_without_ffmpeg(monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise AssertionError("sheet rendering must not invoke FFmpeg")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    unit = _unit()
+    assert overview_payload(unit, "cam_high").data.startswith(b"\x89PNG")
+    assert keyframe_sheet_payload(unit, "cam_high").data.startswith(b"\x89PNG")
+    assert detail_payload(
+        unit,
+        DetailRequest((0.1, 0.1, 0.5, 0.5), 2, 5),
+    ).data.startswith(b"\x89PNG")
+
+
 def test_boundary_images_are_six_labeled_jpegs_in_before_then_after_order() -> None:
     boundary_images = boundary_image_payloads(_unit())
     assert [payload.label.split(" | ", 1)[0] for payload in boundary_images] == [

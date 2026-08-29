@@ -1,6 +1,8 @@
 # Video Harness Architecture
 
-Video Harness is an evidence-compilation harness, not a captioning script. Its architecture borrows the useful repository-level separation visible in Codex—CLI, core orchestration, configuration, protocol, diagnostics, scripts, and documentation—without copying Codex's language or monorepo scale.
+Video Harness is an evidence-compilation system rather than a captioning script. The
+implementation separates CLI orchestration, media processing, provider calls, evidence
+validation, quality reconciliation, storage, and downstream readers.
 
 ## Dependency direction
 
@@ -51,10 +53,12 @@ src/video_harness/
 ├── reconciliation.py      # automatic Sequence Audit and document repair
 ├── temporal_media.py      # multiview decode and temporal image products
 ├── gripper_state.py       # keyframe-aligned measured aperture
+├── hdf5_source.py         # standalone RoboDojo HDF5 adapter
 ├── annotations.py         # provider protocols and SDK adapters
 ├── prompts.py             # versioned strict tools and prompts
 ├── evidence.py            # evidence validation
 ├── debug_artifacts.py     # disabled sink / filesystem debug sink
+├── run_tracking.py        # shared call budget, event log, and run summary
 ├── sampling.py            # canonical Evidence Unit/source planning
 ├── robodojo.py            # source dataset adapter
 ├── reader.py              # canonical document consumer boundary
@@ -70,7 +74,7 @@ PLANNED
   → DECODED
   → BASE_PACK_READY
   → MOTION_ANALYZED
-  → DETAIL_READY | DETAIL_SKIPPED
+  → DETAIL_READY
   → TASK_INTERPRETED
   → CAUSAL_PASS → COMMITTED
   → CAUSAL_RETRY → TARGETED_REPROCESS
@@ -94,6 +98,11 @@ NORMAL_COMPILE
 Readers and training splits require a complete `ACCEPTED` document. Human review
 is reserved for sampled Harness evaluation and does not block corpus generation.
 
+Document acceptance uses a 90% Evidence-Unit coverage threshold rather than requiring
+every Unit to pass. Unit annotations keep their original quality labels; accepted
+Readers skip non-accepted Units. Boundary States remain strict, and Sequence Audit may
+still reject a Document when sparse missing Units make the overall sequence incoherent.
+
 The pipeline writes canonical output only after the final evidence validates. Intermediate output belongs to the debug sink and may be absent by design.
 
 ## Batch execution
@@ -103,6 +112,12 @@ different Documents are assigned to deterministic shards and may run through ind
 worker-local provider clients. A completed Document is written to an atomic checkpoint.
 Resume reuses terminal checkpoints and continues nonterminal ones, while final merge
 requires one terminal checkpoint for every source Document and restores source order.
+The CLI maintains one task-local Document progress bar per shard.
+
+Canonical final storage is materialized per episode under a task-grouped directory:
+`documents-<provider>/<robodojo-task-name>/episode-<index>.document.jsonl`. Each file
+contains exactly one Behavior Document, and this directory is the Pi0.5 Guidance input.
+The aggregate JSONL is retained only as a merge/report compatibility index.
 
 This layer uses local or shared files and the Python standard library. It deliberately
 does not require a database, message broker, or external scheduler.
@@ -113,6 +128,8 @@ usage, and failure details. An optional shared API-call cap is reserved before e
 provider invocation; budget exhaustion interrupts the shard without converting pending
 evidence into failed or quarantined data. Without an explicit cap, accounting remains
 enabled but enforcement is disabled.
+`summarize-run` derives per-task completion/quality, provider-stage latency, usage, and
+error totals from those files without a separate monitoring service.
 
 Failure handling follows scope rather than one global catch policy. Configuration,
 source contract, and artifact-write errors are run-level and stop the shard. Budget
@@ -122,9 +139,15 @@ Document, and the corpus continues. Call 1 fallback is never sufficient for acce
 it must be replaced by successful full-temporal repair or remain quarantined. All FFmpeg
 subprocesses and provider clients have explicit configurable timeouts.
 
+Checkpoint failure records distinguish technical quarantine from semantic quarantine.
+Resume requeues the former and reuses the latter. Media decoding/rendering is retried
+locally before an Evidence Unit is marked failed, so a transient FFmpeg error does not
+immediately quarantine its Document.
+
 ## Debug modes
 
-`debug=false` uses an in-memory/no-op sink. Decoded frames, Evidence Unit clips, sheets, crops, Call 1 output, and request payloads are released after the Evidence Unit finishes.
+`debug=false` uses an in-memory/no-op sink. Decoded frames, sheets, crops, Call 1 output,
+and request payloads are released after the Evidence Unit finishes.
 
 `debug=true` uses a filesystem sink rooted at an explicit new directory. Per Evidence Unit it records the three Evidence Unit clips, decoded frames, overview/keyframe/detail sheets, sampled gripper state, Call 1 and Call 2 outputs, automatic repair attempts, the final decision, payload hashes, and a manifest. Debug artifacts are diagnostic evidence, not canonical documents and not training inputs.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -25,12 +26,14 @@ from .evidence import (
     compose_evidence_record,
     mock_inspection_record,
 )
+from .media import FrameDecodeError
 from .run_tracking import ApiCallBudgetExceeded
 from .sampling import unit_boundary_states
 from .temporal_media import (
     BaseMedia,
     DetailRequest,
     TemporalMediaBuilder,
+    TemporalMediaError,
     validate_detail_request,
 )
 
@@ -47,6 +50,7 @@ class EvidenceUnitPipelineResult:
     repair_attempts: int
     repair: RepairResult | None
     quality_status: str
+    retryable_failure: str | None
     debug_root: str | None
 
 
@@ -57,6 +61,7 @@ class RepairOutcome:
     after_boundary_record: dict[str, Any] | None
     attempts: int
     result: RepairResult | None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,7 @@ class ExistingRepairOutcome:
     after_boundary_record: dict[str, Any] | None
     attempts: int
     result: RepairResult | None
+    error: str | None = None
 
 
 class EvidenceUnitPipeline:
@@ -83,6 +89,16 @@ class EvidenceUnitPipeline:
         self.repair_backend = repair_backend
         self.media_builder = media_builder
         self.config = config
+
+    def _retry_media(self, operation: Callable[[], Any]) -> Any:
+        for attempt in range(self.config.media_retries + 1):
+            try:
+                return operation()
+            except (FrameDecodeError, TemporalMediaError, OSError):
+                if attempt < self.config.media_retries:
+                    continue
+                raise
+        raise AssertionError("unreachable media retry state")
 
     def _store(
         self,
@@ -369,6 +385,7 @@ class EvidenceUnitPipeline:
         )
         max_attempts = attempts or self.config.repair_max_attempts
         last_result: RepairResult | None = None
+        last_error: str | None = None
         for attempt in range(1, max_attempts + 1):
             request = RepairRequest(
                 document_id=document["document_id"],
@@ -397,6 +414,7 @@ class EvidenceUnitPipeline:
             except ApiCallBudgetExceeded:
                 raise
             except Exception as exc:  # noqa: BLE001 - provider failure is data-local
+                last_error = f"{type(exc).__name__}: {exc}"
                 if store is not None and store.enabled:
                     store.write_json(
                         f"repair-attempt-{attempt:02d}-error.json",
@@ -451,7 +469,14 @@ class EvidenceUnitPipeline:
                 attempt,
                 result,
             )
-        return RepairOutcome(None, None, None, max_attempts, last_result)
+        return RepairOutcome(
+            None,
+            None,
+            None,
+            max_attempts,
+            last_result,
+            last_error,
+        )
 
     def run(
         self,
@@ -459,15 +484,19 @@ class EvidenceUnitPipeline:
         unit: dict[str, Any],
     ) -> EvidenceUnitPipelineResult:
         store = self._store(document, unit)
-        base = self.media_builder.build_base(document, unit)
+        base = self._retry_media(lambda: self.media_builder.build_base(document, unit))
         inspection, detail_request, detail_status, inspection_error = self._inspect(
             document,
             unit,
             base,
         )
-        detail = self.media_builder.build_detail(base, detail_request)
+        detail = self._retry_media(
+            lambda: self.media_builder.build_detail(base, detail_request)
+        )
         if store.enabled:
-            store.write_many(self.media_builder.debug_media(base, detail))
+            store.write_many(
+                self._retry_media(lambda: self.media_builder.debug_media(base, detail))
+            )
             store.write_json("call1.json", asdict(inspection))
             if inspection_error is not None:
                 store.write_json(
@@ -502,7 +531,7 @@ class EvidenceUnitPipeline:
                 )
             except ApiCallBudgetExceeded:
                 raise
-            except Exception as exc:  # noqa: BLE001 - Call 2 failure is data-local
+            except Exception as exc:
                 error = {"type": type(exc).__name__, "message": str(exc)}
                 if store.enabled:
                     store.write_json(f"call2-attempt-{attempt:02d}-error.json", error)
@@ -548,9 +577,7 @@ class EvidenceUnitPipeline:
             ).strip()
             conflicted_roles = frozenset(
                 role
-                for role, reason in last_result.evidence[
-                    "boundary_conflicts"
-                ].items()
+                for role, reason in last_result.evidence["boundary_conflicts"].items()
                 if reason is not None
             )
             repair_outcome = self._run_repair(
@@ -585,6 +612,12 @@ class EvidenceUnitPipeline:
 
         causal_status = last_result.evidence["causal_validation"]["status"]
         quality_status = "accepted" if causal_status == "pass" else "quarantined"
+        retryable_reasons = []
+        if inspection_failed and repair_outcome.evidence is None:
+            retryable_reasons.append(f"Call 1 failed after retries: {inspection_error}")
+        if repair_outcome.evidence is None and repair_outcome.error is not None:
+            retryable_reasons.append(f"Repair provider failed: {repair_outcome.error}")
+        retryable_failure = " ".join(retryable_reasons) or None
         boundary_quality_status = (
             "quarantined" if last_result.provider == "mock" else "accepted"
         )
@@ -664,6 +697,7 @@ class EvidenceUnitPipeline:
             repair_attempts=repair_outcome.attempts,
             repair=repair_outcome.result,
             quality_status=quality_status,
+            retryable_failure=retryable_failure,
             debug_root=None if debug_root is None else str(debug_root),
         )
 
@@ -717,6 +751,7 @@ class EvidenceUnitPipeline:
                 None,
                 repair.attempts,
                 repair.result,
+                repair.error,
             )
         canonical = compose_evidence_record(
             repair.evidence.evidence,

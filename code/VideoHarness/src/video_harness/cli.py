@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -35,7 +36,12 @@ from .pairing import build_pairs
 from .pipeline import EvidenceUnitPipeline
 from .reconciliation import reconcile_document, sequence_projection_sha256
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
-from .run_tracking import ApiCallBudgetExceeded, RunTracker, TrackingBackend
+from .run_tracking import (
+    ApiCallBudgetExceeded,
+    RunTracker,
+    TrackingBackend,
+    summarize_run,
+)
 from .sampling import (
     plan_document,
     plan_document_from_source,
@@ -99,9 +105,10 @@ def _migrate_legacy_gripper_evidence(document: dict[str, Any]) -> dict[str, Any]
     changed = False
     for unit in migrated.get("evidence_units", []):
         annotation = unit.get("annotation")
-        if not isinstance(annotation, dict) or annotation.get(
-            "schema_version"
-        ) != "video-harness.evidence.v4":
+        if (
+            not isinstance(annotation, dict)
+            or annotation.get("schema_version") != "video-harness.evidence.v4"
+        ):
             continue
         record = annotation.get("record")
         if isinstance(record, dict):
@@ -137,6 +144,85 @@ def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
+
+
+def _path_slug(value: str, *, max_length: int = 56) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:max_length].rstrip("-") or "unnamed"
+
+
+def _document_task_name(document: dict[str, Any]) -> str:
+    source = document["source"]
+    return str(source.get("task_name") or document["task_instruction"])
+
+
+def _final_document_path(root: Path, document: dict[str, Any]) -> Path:
+    source = document["source"]
+    task_folder = _path_slug(_document_task_name(document))
+    episode_index = source.get("episode_index")
+    if isinstance(episode_index, int) and not isinstance(episode_index, bool):
+        episode_name = f"episode-{episode_index:07d}"
+    else:
+        episode_name = _path_slug(document["document_id"])
+    return root / task_folder / f"{episode_name}.document.jsonl"
+
+
+class _TaskProgress:
+    def __init__(
+        self,
+        documents: list[dict[str, Any]],
+        completed_documents: list[dict[str, Any]],
+    ) -> None:
+        self.totals = Counter(_document_task_name(document) for document in documents)
+        self.completed = Counter(
+            _document_task_name(document) for document in completed_documents
+        )
+        self._tty = sys.stderr.isatty()
+        self._rendered_lines = 0
+
+    @staticmethod
+    def _line(task_name: str, completed: int, total: int) -> str:
+        width = 20
+        filled = width if total == 0 else round(width * completed / total)
+        bar = "#" * filled + "-" * (width - filled)
+        label = task_name if len(task_name) <= 48 else task_name[:45] + "..."
+        return f"[{bar}] {completed:3d}/{total:<3d} {label}"
+
+    def render(self, changed_task: str | None = None) -> None:
+        if self._tty:
+            if self._rendered_lines:
+                sys.stderr.write(f"\x1b[{self._rendered_lines}F")
+            lines = [
+                self._line(task, self.completed[task], total)
+                for task, total in sorted(self.totals.items())
+            ]
+            for line in lines:
+                sys.stderr.write("\r\x1b[2K" + line + "\n")
+            sys.stderr.flush()
+            self._rendered_lines = len(lines)
+            return
+        if changed_task is not None:
+            print(
+                self._line(
+                    changed_task,
+                    self.completed[changed_task],
+                    self.totals[changed_task],
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def advance(self, document: dict[str, Any]) -> None:
+        task_name = _document_task_name(document)
+        self.completed[task_name] += 1
+        self.render(task_name)
+
+
+def _write_final_document(root: Path, document: dict[str, Any]) -> Path:
+    validate_document(document)
+    path = _final_document_path(root, document)
+    _write_jsonl(path, [document])
+    return path
 
 
 def _file_sha256(path: Path) -> str:
@@ -550,6 +636,14 @@ def _annotate_document(
             boundary_record = boundary_by_role[role]["annotation"].get("record")
             if isinstance(boundary_record, dict):
                 boundary_record["quality_status"] = "quarantined"
+        if result.retryable_failure is not None:
+            failures.append(
+                {
+                    "document_id": document["document_id"],
+                    "unit_id": unit["unit_id"],
+                    "error": result.retryable_failure,
+                }
+            )
         document_annotations += 1
         annotated_units += 1
 
@@ -569,12 +663,29 @@ def _annotate_document(
     document["quality_status"] = "pending"
     document["quality_provenance"] = None
     if document["status"] in {"annotated", "mock-annotated"}:
-        document = reconcile_document(
+        reconciliation = reconcile_document(
             document,
             backend=context.repair_backend,
             pipeline=context.pipeline,
             config=config,
-        ).document
+        )
+        document = reconciliation.document
+        if reconciliation.audit is None:
+            failures.append(
+                {
+                    "document_id": document["document_id"],
+                    "unit_id": "<document>",
+                    "error": "Sequence audit provider failed after retries.",
+                }
+            )
+        failures.extend(
+            {
+                "document_id": document["document_id"],
+                "unit_id": failure["target_id"],
+                "error": failure["error"],
+            }
+            for failure in reconciliation.technical_failures
+        )
     elif any(
         unit["annotation"]["status"] == "failed" for unit in document["evidence_units"]
     ):
@@ -645,6 +756,7 @@ def _annotate(args: argparse.Namespace) -> int:
         debug=args.debug,
         debug_root=debug_root,
         inspection_retries=args.inspection_retries,
+        media_retries=getattr(args, "media_retries", 2),
         call2_retries=getattr(args, "call2_retries", 2),
         repair_max_attempts=getattr(args, "repair_max_attempts", 2),
         sequence_audit_max_attempts=getattr(args, "sequence_audit_max_attempts", 2),
@@ -662,6 +774,12 @@ def _annotate(args: argparse.Namespace) -> int:
         Path(checkpoint_root)
         if checkpoint_root is not None
         else args.output.with_name(args.output.name + ".checkpoints")
+    )
+    document_root = getattr(args, "document_root", None)
+    document_root = (
+        Path(document_root)
+        if document_root is not None
+        else args.output.parent / f"documents-{args.provider}"
     )
     model_name = (
         "deterministic-insufficient-evidence" if args.provider == "mock" else args.model
@@ -699,6 +817,8 @@ def _annotate(args: argparse.Namespace) -> int:
         if args.limit_documents < 0:
             raise ValueError("--limit-documents must be non-negative")
         assigned = assigned[: args.limit_documents]
+    task_totals = Counter(_document_task_name(document) for _, document in assigned)
+    tracker.log("task_plan", tasks=dict(sorted(task_totals.items())))
 
     results: dict[int, DocumentAnnotationResult] = {}
     pending: list[tuple[int, dict[str, Any]]] = []
@@ -719,11 +839,19 @@ def _annotate(args: argparse.Namespace) -> int:
             raise ValueError(
                 f"Checkpoint source mismatch for {original['document_id']}"
             )
-        if checkpoint.document["quality_status"] in {"accepted", "quarantined"}:
+        terminal_semantic_result = checkpoint.document[
+            "quality_status"
+        ] == "accepted" or (
+            checkpoint.document["quality_status"] == "quarantined"
+            and not checkpoint.failures
+        )
+        if terminal_semantic_result:
             results[index] = checkpoint
+            _write_final_document(document_root, checkpoint.document)
             tracker.log(
                 "document_reused",
                 document_id=checkpoint.document["document_id"],
+                task_name=_document_task_name(checkpoint.document),
                 quality_status=checkpoint.document["quality_status"],
             )
         else:
@@ -739,7 +867,12 @@ def _annotate(args: argparse.Namespace) -> int:
         if context is None:
             context = _make_worker_context(args, config, tracker)
             local.context = context
-        tracker.log("document_started", document_id=document["document_id"])
+        task_name = _document_task_name(document)
+        tracker.log(
+            "document_started",
+            document_id=document["document_id"],
+            task_name=task_name,
+        )
         try:
             result = _annotate_document(
                 document,
@@ -752,41 +885,38 @@ def _annotate(args: argparse.Namespace) -> int:
             tracker.log(
                 "document_interrupted",
                 document_id=document["document_id"],
+                task_name=task_name,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
             raise
         _write_document_checkpoint(checkpoint_root, result)
+        final_document = result.document["quality_status"] == "accepted" or (
+            result.document["quality_status"] == "quarantined" and not result.failures
+        )
+        if final_document:
+            _write_final_document(document_root, result.document)
         for failure in result.failures:
             tracker.log("unit_failed", **failure)
         tracker.log(
             "document_completed",
             document_id=document["document_id"],
+            task_name=task_name,
             quality_status=result.document["quality_status"],
             units_annotated=result.annotated_units,
             units_failed=result.failed_units,
         )
         return index, result
 
-    completed = len(results)
-    total = len(assigned)
+    progress = _TaskProgress(
+        [document for _, document in assigned],
+        [result.document for result in results.values()],
+    )
+    progress.render()
 
     def record(index: int, result: DocumentAnnotationResult) -> None:
-        nonlocal completed
         results[index] = result
-        completed += 1
-        print(
-            json.dumps(
-                {
-                    "progress": f"{completed}/{total}",
-                    "document_id": result.document["document_id"],
-                    "quality_status": result.document["quality_status"],
-                    "reused": result.reused,
-                }
-            ),
-            file=sys.stderr,
-            flush=True,
-        )
+        progress.advance(result.document)
 
     try:
         if workers == 1:
@@ -859,6 +989,7 @@ def _annotate(args: argparse.Namespace) -> int:
                 "api_budget": budget,
                 "events": str(tracker.events_path),
                 "checkpoint_root": str(checkpoint_root),
+                "document_root": str(document_root),
                 "debug_root": None if debug_root is None else str(debug_root),
                 "output": str(args.output),
             },
@@ -918,6 +1049,12 @@ def _merge_checkpoints(args: argparse.Namespace) -> int:
         or run.get("documents_sha256") != _file_sha256(args.documents)
     ):
         raise ValueError("Checkpoint run does not match --documents")
+    document_root = getattr(args, "document_root", None)
+    document_root = (
+        Path(document_root)
+        if document_root is not None
+        else args.output.parent / f"documents-{run['provider']}"
+    )
 
     merged: list[dict[str, Any]] = []
     missing: list[str] = []
@@ -938,9 +1075,13 @@ def _merge_checkpoints(args: argparse.Namespace) -> int:
             raise ValueError(
                 f"Checkpoint source mismatch for {original['document_id']}"
             )
+        if checkpoint.failures:
+            nonterminal.append(original["document_id"])
+            continue
         if document["quality_status"] not in {"accepted", "quarantined"}:
             nonterminal.append(original["document_id"])
             continue
+        _write_final_document(document_root, document)
         merged.append(document)
     if missing or nonterminal:
         raise ValueError(
@@ -955,6 +1096,7 @@ def _merge_checkpoints(args: argparse.Namespace) -> int:
             {
                 "documents": len(merged),
                 "document_quality_status": dict(sorted(quality.items())),
+                "document_root": str(document_root),
                 "output": str(args.output),
             },
             indent=2,
@@ -1094,6 +1236,14 @@ def _report(args: argparse.Namespace) -> int:
     return 1 if invalid else 0
 
 
+def _summarize_run(args: argparse.Namespace) -> int:
+    summary = summarize_run(args.checkpoint_root)
+    output = args.output or args.checkpoint_root / "run-summary.json"
+    _write_json(output, summary)
+    print(json.dumps({**summary, "output": str(output)}, indent=2))
+    return 0
+
+
 def _decode_smoke(args: argparse.Namespace) -> int:
     documents = _read_jsonl(args.documents)
     video_loader = FFmpegFrameLoader(args.dataset_root)
@@ -1205,6 +1355,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="shared atomic Document checkpoint directory",
     )
     annotate.add_argument(
+        "--document-root",
+        type=Path,
+        help="task-grouped per-episode final Document directory",
+    )
+    annotate.add_argument(
         "--resume",
         action="store_true",
         help="reuse terminal checkpoints and continue nonterminal Documents",
@@ -1217,6 +1372,7 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--debug", action="store_true")
     annotate.add_argument("--debug-root", type=Path)
     annotate.add_argument("--inspection-retries", type=int, default=1)
+    annotate.add_argument("--media-retries", type=int, default=2)
     annotate.add_argument("--call2-retries", type=int, default=2)
     annotate.add_argument("--provider-timeout-s", type=float, default=300.0)
     annotate.add_argument("--provider-max-retries", type=int, default=2)
@@ -1232,6 +1388,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     merge.add_argument("--documents", type=Path, required=True)
     merge.add_argument("--checkpoint-root", type=Path, required=True)
+    merge.add_argument("--document-root", type=Path)
     merge.add_argument("--output", type=Path, required=True)
     merge.set_defaults(handler=_merge_checkpoints)
 
@@ -1255,6 +1412,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--documents", type=Path, required=True)
     report.set_defaults(handler=_report)
+
+    summary = subparsers.add_parser(
+        "summarize-run",
+        help="aggregate events, usage, latency, errors, and per-task progress",
+    )
+    summary.add_argument("--checkpoint-root", type=Path, required=True)
+    summary.add_argument("--output", type=Path)
+    summary.set_defaults(handler=_summarize_run)
 
     decode = subparsers.add_parser(
         "decode-smoke", help="decode referenced frames without saving images"

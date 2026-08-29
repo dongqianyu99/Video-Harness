@@ -3,6 +3,7 @@
 """
 #!/usr/bin/python3
 """
+
 import importlib
 from pathlib import Path
 from typing import Any
@@ -121,7 +122,7 @@ class Model(ModelTemplate):
             return path
 
         return session_module.TaskGuideSession(
-            documents_path=absolute_path("guidance_documents_path"),
+            documents_root=absolute_path("guidance_documents_root"),
             episodes_path=absolute_path("guidance_episodes_path"),
             dataset_root=absolute_path("guidance_dataset_root"),
             profile=model_cfg.get("guidance_profile", "actuator"),
@@ -155,9 +156,7 @@ class Model(ModelTemplate):
         case_meta = {} if case_meta is None else dict(case_meta)
         task_name = case_meta.get("task_name")
         if task_name is not None and task_name != self.task_name:
-            raise ValueError(
-                f"Prepared task {task_name!r} does not match model task {self.task_name!r}"
-            )
+            raise ValueError(f"Prepared task {task_name!r} does not match model task {self.task_name!r}")
         self._prepared_case_id = case_meta.get("action_case_id")
         return {
             "task_name": self.task_name,
@@ -181,9 +180,7 @@ class Model(ModelTemplate):
     def update_obs_batch(self, obs_list):
         self._ensure_task_guide(obs_list)
         self._latest_env_idx_list = [obs.get("env_idx", index) for index, obs in enumerate(obs_list)]
-        encoded_obs_list = [
-            encode_obs(obs, self.action_type, self.robot_action_dim_info) for obs in obs_list
-        ]
+        encoded_obs_list = [encode_obs(obs, self.action_type, self.robot_action_dim_info) for obs in obs_list]
         self.observation_window = stack_obs(encoded_obs_list)
 
     def get_action(self, **kwargs):

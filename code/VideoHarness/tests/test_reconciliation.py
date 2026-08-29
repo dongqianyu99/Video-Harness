@@ -13,6 +13,7 @@ from video_harness.annotations import (
 from video_harness.config import HarnessConfig
 from video_harness.evidence import EVIDENCE_SCHEMA_VERSION
 from video_harness.pipeline import ExistingRepairOutcome
+from video_harness.quality import accepted_transition_chain
 from video_harness.reconciliation import (
     build_sequence_projection,
     reconcile_document,
@@ -22,22 +23,22 @@ from video_harness.robodojo import EpisodeRecord, VideoSlice
 from video_harness.sampling import plan_document, validate_document
 
 
-def _document(evidence: dict) -> dict:
+def _document(evidence: dict, *, length: int = 51) -> dict:
     record = EpisodeRecord(
         episode_index=0,
         task_index=0,
         task_instruction="Perform the task.",
         task_kind="benchmark",
-        length=51,
+        length=length,
         dataset_from_index=0,
-        dataset_to_index=51,
+        dataset_to_index=length,
         data_path="data/chunk-000/file-000.parquet",
         videos=tuple(
             VideoSlice(
                 key=key,
                 path=f"videos/{key}.mp4",
                 from_timestamp=0.0,
-                to_timestamp=51 / 25,
+                to_timestamp=length / 25,
             )
             for key in (
                 "observation.images.cam_high",
@@ -69,6 +70,15 @@ def _document(evidence: dict) -> dict:
         }
     document["status"] = "annotated"
     return document
+
+
+def _quarantine_unit(document: dict, order: int) -> None:
+    record = document["evidence_units"][order]["annotation"]["record"]
+    record["quality_status"] = "quarantined"
+    record["causal_validation"] = {
+        "status": "retry",
+        "reason": "This Unit remains unresolved.",
+    }
 
 
 class FakeAuditBackend:
@@ -171,6 +181,43 @@ def test_empty_sequence_audit_accepts_complete_document(changed_evidence):
     validate_document(outcome.document)
 
 
+def test_document_accepts_ninety_percent_units_and_preserves_unit_quality(
+    changed_evidence,
+):
+    document = _document(changed_evidence, length=251)
+    _quarantine_unit(document, 4)
+    outcome = reconcile_document(
+        document,
+        backend=FakeAuditBackend([{"issues": []}]),
+        pipeline=FakeRepairPipeline([]),
+        config=HarnessConfig(sequence_repair_rounds=0),
+    )
+
+    assert len(outcome.document["evidence_units"]) == 10
+    assert outcome.document["quality_status"] == "accepted"
+    assert (
+        outcome.document["evidence_units"][4]["annotation"]["record"]["quality_status"]
+        == "quarantined"
+    )
+    assert sum(1 for _ in accepted_transition_chain(outcome.document)) == 9
+    validate_document(outcome.document)
+
+
+def test_document_rejects_less_than_ninety_percent_units(changed_evidence):
+    document = _document(changed_evidence, length=251)
+    _quarantine_unit(document, 4)
+    _quarantine_unit(document, 5)
+    outcome = reconcile_document(
+        document,
+        backend=FakeAuditBackend([{"issues": []}]),
+        pipeline=FakeRepairPipeline([]),
+        config=HarnessConfig(sequence_repair_rounds=0),
+    )
+
+    assert outcome.document["quality_status"] == "quarantined"
+    assert {issue["target_id"] for issue in outcome.issues} == {"u0004", "u0005"}
+
+
 def test_sequence_issue_is_repaired_and_reaudited(changed_evidence):
     document = _document(changed_evidence)
     backend = FakeAuditBackend(
@@ -238,6 +285,36 @@ def test_unresolved_issue_quarantines_document_without_human_queue(changed_evide
     validate_document(outcome.document)
 
 
+def test_repair_provider_failure_is_exposed_for_resume(changed_evidence):
+    document = _document(changed_evidence)
+    backend = FakeAuditBackend(
+        [
+            {
+                "issues": [
+                    {"target_type": "unit", "target_id": "u0001", "reason": "Retry."}
+                ]
+            }
+        ]
+    )
+    pipeline = FakeRepairPipeline(
+        [ExistingRepairOutcome(None, None, None, 2, None, "TimeoutError: offline")]
+    )
+    outcome = reconcile_document(
+        document,
+        backend=backend,
+        pipeline=pipeline,
+        config=HarnessConfig(sequence_repair_rounds=1),
+    )
+
+    assert outcome.document["quality_status"] == "quarantined"
+    assert outcome.technical_failures == (
+        {
+            "target_id": "u0001",
+            "error": "Unit repair provider failed: TimeoutError: offline",
+        },
+    )
+
+
 def test_unit_only_repair_does_not_promote_quarantined_boundary(changed_evidence):
     document = _document(changed_evidence)
     document["boundary_states"][1]["annotation"]["record"]["quality_status"] = (
@@ -281,9 +358,7 @@ def test_boundary_issue_atomically_rebuilds_shared_boundary_and_adjacent_units(
     changed_evidence,
 ):
     document = _document(changed_evidence)
-    replacement = copy.deepcopy(
-        document["boundary_states"][1]["annotation"]["record"]
-    )
+    replacement = copy.deepcopy(document["boundary_states"][1]["annotation"]["record"])
     replacement["observation"]["cam_high"] = "Corrected shared state."
     backend = FakeAuditBackend(
         [
@@ -326,9 +401,7 @@ def test_boundary_issue_atomically_rebuilds_shared_boundary_and_adjacent_units(
 def test_boundary_window_discards_partial_repair(changed_evidence):
     document = _document(changed_evidence)
     original = copy.deepcopy(document)
-    replacement = copy.deepcopy(
-        document["boundary_states"][1]["annotation"]["record"]
-    )
+    replacement = copy.deepcopy(document["boundary_states"][1]["annotation"]["record"])
     replacement["observation"]["cam_high"] = "Corrected shared state."
     backend = FakeAuditBackend(
         [

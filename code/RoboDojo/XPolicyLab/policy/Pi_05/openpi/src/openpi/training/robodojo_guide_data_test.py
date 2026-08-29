@@ -8,15 +8,13 @@ from typing import Any
 
 import jax
 import numpy as np
-import pytest
-
 from openpi.models import model as _model
 from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.training import robodojo_guide_data as _guide_data
 from openpi.training.guide_buckets import GuideLengthBucket
 from openpi.training.guide_sampler import QueryEpisodeRange
-from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
-from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
+from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig, create_robodojo_guided_data_loader
+import pytest
 
 
 @dataclass(frozen=True)
@@ -79,8 +77,7 @@ class _NativeDataset:
     def __getitem__(self, index: int) -> dict[str, Any]:
         self.accessed.append(index)
         return {
-            key: value.copy() if isinstance(value, np.ndarray) else value
-            for key, value in self.samples[index].items()
+            key: value.copy() if isinstance(value, np.ndarray) else value for key, value in self.samples[index].items()
         }
 
 
@@ -155,14 +152,8 @@ def _rgb(value: int) -> np.ndarray:
 
 def _sample(index: int, *, episode_index: int, task_index: int) -> dict[str, Any]:
     return {
-        "image": {
-            key: np.full((2, 2, 3), index, dtype=np.float32)
-            for key in _model.IMAGE_KEYS
-        },
-        "image_mask": {
-            key: np.asarray(np.bool_(1), dtype=np.bool_)
-            for key in _model.IMAGE_KEYS
-        },
+        "image": {key: np.full((2, 2, 3), index, dtype=np.float32) for key in _model.IMAGE_KEYS},
+        "image_mask": {key: np.asarray(np.bool_(1), dtype=np.bool_) for key in _model.IMAGE_KEYS},
         "state": np.asarray([index, index + 1, index + 2, index + 3], dtype=np.float32),
         "actions": np.full((50, 32), index, dtype=np.float32),
         "episode_index": np.asarray(episode_index, dtype=np.int64),
@@ -173,11 +164,13 @@ def _sample(index: int, *, episode_index: int, task_index: int) -> dict[str, Any
 def _make_setup(tmp_path: Path):
     dataset_root = tmp_path / "dataset"
     dataset_root.mkdir()
-    artifact_paths = []
-    for name in ("dataset.json", "documents.jsonl", "pairs.jsonl"):
-        path = tmp_path / name
-        path.write_text("test\n", encoding="utf-8")
-        artifact_paths.append(path)
+    dataset_artifact = tmp_path / "dataset.json"
+    dataset_artifact.write_text("test\n", encoding="utf-8")
+    documents_root = tmp_path / "documents"
+    documents_root.mkdir()
+    pairs_artifact = tmp_path / "pairs.jsonl"
+    pairs_artifact.write_text("test\n", encoding="utf-8")
+    artifact_paths = [dataset_artifact, documents_root, pairs_artifact]
 
     bindings = (
         _ArtifactBinding(100, 101, 4, "doc-0"),
@@ -219,13 +212,10 @@ def _make_setup(tmp_path: Path):
         _Episode(201, 5, 4, 12, 16, (_Video("observation.images.cam_high", "videos/support-1.mp4"),)),
     )
     samples = [
-        _sample(index, episode_index=100 if index < 4 else 200, task_index=4 if index < 4 else 5)
-        for index in range(8)
+        _sample(index, episode_index=100 if index < 4 else 200, task_index=4 if index < 4 else 5) for index in range(8)
     ]
     native_dataset = _NativeDataset(samples)
-    native_factory = _NativeDataFactory(
-        _DataConfig(repo_id="native-repo", norm_stats={"state": "stats"})
-    )
+    native_factory = _NativeDataFactory(_DataConfig(repo_id="native-repo", norm_stats={"state": "stats"}))
     train_config = _NativeTrainConfig(native_factory, _ModelConfig(), tmp_path / "assets")
 
     plans = {
@@ -253,9 +243,7 @@ def _make_setup(tmp_path: Path):
 
         def tokenize_text(self, text: str):
             self.calls.append(text)
-            return np.asarray([1, 2, 0, 0], dtype=np.int32), np.asarray(
-                [True, True, False, False], dtype=np.bool_
-            )
+            return np.asarray([1, 2, 0, 0], dtype=np.int32), np.asarray([True, True, False, False], dtype=np.bool_)
 
     class _FrameLoader:
         def __init__(self):
@@ -272,7 +260,7 @@ def _make_setup(tmp_path: Path):
         repo_id="fake",
         dataset_root=dataset_root,
         dataset_artifact_path=artifact_paths[0],
-        documents_artifact_path=artifact_paths[1],
+        documents_root=artifact_paths[1],
         pairs_artifact_path=artifact_paths[2],
         batch_size=2,
         seed=7,
@@ -435,10 +423,7 @@ def test_factory_materializes_each_length_bucket_with_its_own_shape(tmp_path):
 
     batches = list(loader)
 
-    assert {
-        (batch.guide.images.shape[1], batch.guide.unit_mask.shape[1])
-        for batch in batches
-    } == {(2, 1), (4, 2)}
+    assert {(batch.guide.images.shape[1], batch.guide.unit_mask.shape[1]) for batch in batches} == {(2, 1), (4, 2)}
     assert loader.host_metadata["guide_binding_bucket_counts"] == (
         ("u1-f2", 1),
         ("u2-f4", 1),
@@ -451,9 +436,7 @@ def test_factory_materializes_each_length_bucket_with_its_own_shape(tmp_path):
     assert loader.host_metadata["guide_length_summary"]["units_max"] == 2
 
 
-def test_factory_uses_split_manifest_query_scope_before_optional_debug_subset(
-    tmp_path, monkeypatch
-):
+def test_factory_uses_split_manifest_query_scope_before_optional_debug_subset(tmp_path, monkeypatch):
     setup = _make_setup(tmp_path)
     config, train_config, _, bundle, episodes, plans, tokenizer, frame_loader, _ = setup
     split_path = tmp_path / "training-split.json"

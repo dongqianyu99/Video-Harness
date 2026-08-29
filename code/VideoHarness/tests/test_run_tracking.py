@@ -10,6 +10,7 @@ from video_harness.run_tracking import (
     ApiCallBudgetExceeded,
     RunTracker,
     TrackingBackend,
+    summarize_run,
 )
 
 
@@ -73,3 +74,48 @@ def test_tracking_backend_records_provider_trace_and_usage(tmp_path) -> None:
     assert completed["document_id"] == "doc-1"
     assert completed["request_id"] == "req-1"
     assert completed["usage"] == {"input_tokens": 10, "output_tokens": 2}
+
+
+def test_run_summary_aggregates_tasks_usage_latency_and_errors(tmp_path) -> None:
+    tracker = RunTracker(tmp_path, context={"shard_index": 0, "num_shards": 1})
+    tracker.log("task_plan", tasks={"make toast": 2})
+    tracker.log(
+        "document_completed",
+        document_id="doc-1",
+        task_name="make toast",
+        quality_status="accepted",
+    )
+    tracker.log(
+        "document_completed",
+        document_id="doc-2",
+        task_name="make toast",
+        quality_status="quarantined",
+    )
+    tracker.log(
+        "provider_call_completed",
+        stage="call2",
+        duration_ms=120.0,
+        usage={"input_tokens": 100, "output_tokens": 20},
+    )
+    tracker.log(
+        "provider_call_failed",
+        stage="call2",
+        duration_ms=200.0,
+        error_type="TimeoutError",
+    )
+
+    summary = summarize_run(tmp_path)
+
+    assert summary["documents"] == {
+        "planned": 2,
+        "completed": 2,
+        "accepted": 1,
+        "quarantined": 1,
+        "interrupted": 0,
+    }
+    assert summary["tasks"][0]["completed_documents"] == 2
+    assert summary["provider_calls"]["call2"]["completed"] == 1
+    assert summary["provider_calls"]["call2"]["failed"] == 1
+    assert summary["provider_calls"]["call2"]["latency_ms"]["p50"] == 160.0
+    assert summary["usage_totals"] == {"input_tokens": 100.0, "output_tokens": 20.0}
+    assert summary["errors"] == {"TimeoutError": 1}

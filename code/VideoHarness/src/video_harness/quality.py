@@ -27,7 +27,7 @@ def accepted_transition_chain(
         dict[str, Any],
     ]
 ]:
-    """Yield the complete accepted Boundary/transition chain or fail closed."""
+    """Yield accepted transitions from a quality-accepted document."""
 
     if document["quality_status"] != "accepted":
         raise ValueError(
@@ -37,7 +37,7 @@ def accepted_transition_chain(
         annotation = unit["annotation"]
         record = _plain_json(annotation["record"])
         if annotation["status"] != "complete" or not evidence_is_trainable(record):
-            raise ValueError(f"Evidence Unit {unit['unit_id']} is not accepted")
+            continue
         before, after = unit_boundary_states(document, unit)
         boundary_records = tuple(
             _plain_json(boundary["annotation"]["record"])

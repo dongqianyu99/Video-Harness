@@ -7,12 +7,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from openpi.models.guide_inputs import GuideInput
-from openpi.models.guide_materializer import GuideMaterializerConfig
-from openpi.models.guide_materializer import materialize_guide
-from openpi.training.guide_dataset import GuideBindingIndex
-from openpi.training.guide_dataset import GuideBindingRecord
+from openpi.models.guide_materializer import GuideMaterializerConfig, materialize_guide
+from openpi.training.guide_dataset import GuideBindingIndex, GuideBindingRecord
 
 
 @dataclass(frozen=True)
@@ -48,27 +45,23 @@ class RoboDojoGuideResolverFactory:
     """Pickle-safe factory for one worker-local VideoHarness resolver."""
 
     dataset_artifact_path: Path
-    documents_artifact_path: Path
+    documents_root: Path
     pairs_artifact_path: Path
     dataset_root: Path
     binding_records: tuple[GuideBindingRecord, ...]
     materializer_config: GuideMaterializerConfig
-    materializer_configs_by_binding: tuple[
-        tuple[int, GuideMaterializerConfig], ...
-    ] = ()
+    materializer_configs_by_binding: tuple[tuple[int, GuideMaterializerConfig], ...] = ()
     profile: str = "actuator"
 
     def __call__(self) -> VideoHarnessGuideResolver:
         reader = importlib.import_module("video_harness.reader")
         bundle = reader.load_guide_artifact_bundle(
             dataset_path=self.dataset_artifact_path,
-            documents_path=self.documents_artifact_path,
+            documents_path=self.documents_root,
             pairs_path=self.pairs_artifact_path,
         )
         tokenizer_module = importlib.import_module("openpi.models.tokenizer")
-        tokenizer = tokenizer_module.PaligemmaTokenizer(
-            self.materializer_config.max_text_tokens
-        )
+        tokenizer = tokenizer_module.PaligemmaTokenizer(self.materializer_config.max_text_tokens)
         binding_index = GuideBindingIndex.from_bindings(self.binding_records)
         return VideoHarnessGuideResolver(
             artifact_bundle=bundle,
@@ -76,9 +69,7 @@ class RoboDojoGuideResolverFactory:
             dataset_root=self.dataset_root,
             tokenizer=tokenizer,
             materializer_config=self.materializer_config,
-            materializer_configs_by_binding=dict(
-                self.materializer_configs_by_binding
-            ),
+            materializer_configs_by_binding=dict(self.materializer_configs_by_binding),
             profile=self.profile,
         )
 
@@ -104,28 +95,19 @@ def _find_support_source(bundle: Any, document_id: str) -> Any:
 
     matches = [source for source in sources if source.document_id == document_id]
     if len(matches) != 1:
-        raise ValueError(
-            f"expected exactly one canonical document {document_id!r}, found {len(matches)}"
-        )
+        raise ValueError(f"expected exactly one canonical document {document_id!r}, found {len(matches)}")
     return matches[0]
 
 
 def _validate_rgb_frame(payload: Any, *, context: str) -> np.ndarray:
     if not isinstance(payload, np.ndarray):
-        raise ValueError(
-            f"{context}: frame loader must return a numpy RGB array, "
-            f"got {type(payload).__name__}"
-        )
+        raise ValueError(f"{context}: frame loader must return a numpy RGB array, got {type(payload).__name__}")
     if payload.ndim != 3 or payload.shape[-1] != 3:
-        raise ValueError(
-            f"{context}: decoded frame is not RGB [H, W, 3], got {payload.shape}"
-        )
+        raise ValueError(f"{context}: decoded frame is not RGB [H, W, 3], got {payload.shape}")
     if payload.shape[0] <= 0 or payload.shape[1] <= 0:
         raise ValueError(f"{context}: decoded RGB frame has an empty spatial dimension")
     if payload.dtype != np.uint8:
-        raise ValueError(
-            f"{context}: decoded RGB frame must have dtype uint8, got {payload.dtype}"
-        )
+        raise ValueError(f"{context}: decoded RGB frame must have dtype uint8, got {payload.dtype}")
     return np.array(payload, copy=True)
 
 
@@ -139,8 +121,7 @@ def _load_frame_payload(frame_loader: Any, document: Any, frame_ref: dict[str, A
     if callable(frame_loader):
         return frame_loader(document, frame_ref)
     raise ValueError(
-        "frame_loader must provide load_rgb(document, frame_ref), "
-        "load(document, frame_ref), or be callable"
+        "frame_loader must provide load_rgb(document, frame_ref), load(document, frame_ref), or be callable"
     )
 
 
@@ -155,9 +136,7 @@ class VideoHarnessGuideResolver:
         dataset_root: Path,
         tokenizer: Any,
         materializer_config: GuideMaterializerConfig,
-        materializer_configs_by_binding: Mapping[
-            int, GuideMaterializerConfig
-        ] | None = None,
+        materializer_configs_by_binding: Mapping[int, GuideMaterializerConfig] | None = None,
         profile: str = "actuator",
         frame_loader: Any | None = None,
         plan_builder: Callable[..., Any] | None = None,
@@ -175,16 +154,10 @@ class VideoHarnessGuideResolver:
         self._tokenizer = tokenizer
         self._materializer_config = materializer_config
         self._materializer_configs_by_binding = (
-            {}
-            if materializer_configs_by_binding is None
-            else dict(materializer_configs_by_binding)
+            {} if materializer_configs_by_binding is None else dict(materializer_configs_by_binding)
         )
         self._profile = profile
-        self._frame_loader = (
-            _default_frame_loader(self._dataset_root)
-            if frame_loader is None
-            else frame_loader
-        )
+        self._frame_loader = _default_frame_loader(self._dataset_root) if frame_loader is None else frame_loader
         self._plan_builder = _default_plan_builder if plan_builder is None else plan_builder
 
     def __call__(self, record: GuideBindingRecord) -> GuideInput:
@@ -216,13 +189,9 @@ class VideoHarnessGuideResolver:
             def checked_frame_dict(frame_ref: Any) -> tuple[dict[str, Any], str]:
                 frame_context = f"{context}, unit/frame={frame_ref!r}"
                 if frame_ref.document_id != record.support_document_id:
-                    raise ValueError(
-                        f"{frame_context}: frame references a different document"
-                    )
+                    raise ValueError(f"{frame_context}: frame references a different document")
                 if frame_ref.episode_index != record.support_episode_index:
-                    raise ValueError(
-                        f"{frame_context}: frame references a different support episode"
-                    )
+                    raise ValueError(f"{frame_context}: frame references a different support episode")
 
                 episode_frame_index = frame_ref.episode_frame_index
                 timestamp_s = frame_ref.timestamp_s
@@ -253,6 +222,7 @@ class VideoHarnessGuideResolver:
             frames_decoder = None
             load_rgb_many = getattr(self._frame_loader, "load_rgb_many", None)
             if callable(load_rgb_many):
+
                 def decode_many(frame_refs: Sequence[Any]) -> tuple[np.ndarray, ...]:
                     checked = [checked_frame_dict(frame_ref) for frame_ref in frame_refs]
                     payloads = tuple(
@@ -268,9 +238,7 @@ class VideoHarnessGuideResolver:
                         )
                     return tuple(
                         _validate_rgb_frame(payload, context=frame_context)
-                        for payload, (_, frame_context) in zip(
-                            payloads, checked, strict=True
-                        )
+                        for payload, (_, frame_context) in zip(payloads, checked, strict=True)
                     )
 
                 frames_decoder = decode_many
@@ -280,14 +248,10 @@ class VideoHarnessGuideResolver:
                 frame_decoder=frame_decoder,
                 frames_decoder=frames_decoder,
                 tokenizer=self._tokenizer,
-                config=self._materializer_configs_by_binding.get(
-                    record.binding_index, self._materializer_config
-                ),
+                config=self._materializer_configs_by_binding.get(record.binding_index, self._materializer_config),
             )
             if not isinstance(guide, GuideInput):
-                raise ValueError(
-                    f"materialize_guide returned {type(guide).__name__}, expected GuideInput"
-                )
+                raise ValueError(f"materialize_guide returned {type(guide).__name__}, expected GuideInput")
             return guide
         except Exception as exc:
             raise ValueError(f"VideoHarness Guide resolution failed for {context}: {exc}") from exc
@@ -303,9 +267,7 @@ class VideoHarnessGuideResolver:
         for field, expected_value in expected.items():
             actual_value = getattr(plan, field, None)
             if actual_value != expected_value:
-                raise ValueError(
-                    f"GuidePlan {field} mismatch: expected {expected_value!r}, got {actual_value!r}"
-                )
+                raise ValueError(f"GuidePlan {field} mismatch: expected {expected_value!r}, got {actual_value!r}")
 
         units = getattr(plan, "units", None)
         if not units:
@@ -326,8 +288,7 @@ class VideoHarnessGuideResolver:
             actual_value = getattr(source, field, None)
             if actual_value != expected_value:
                 raise ValueError(
-                    f"canonical support document {field} mismatch: "
-                    f"expected {expected_value!r}, got {actual_value!r}"
+                    f"canonical support document {field} mismatch: expected {expected_value!r}, got {actual_value!r}"
                 )
         if source.document is None:
             raise ValueError("canonical support document has no document payload")
