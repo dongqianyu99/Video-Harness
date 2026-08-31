@@ -178,6 +178,94 @@ def test_deepseek_responses_disable_thinking_for_forced_tool_choice() -> None:
     assert bodies[0]["tool_choice"]["name"] == "locate_temporal_detail"
 
 
+def test_json_output_serializes_thinking_without_tools() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "intentional local mock",
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": None,
+                }
+            },
+        )
+
+    client = openai.OpenAI(
+        api_key="local-test-key",
+        base_url="https://local.test/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(openai.BadRequestError):
+        OpenAIBackend(
+            "vision-model",
+            client=client,
+            output_mode="json",
+            thinking=True,
+            reasoning_effort="max",
+        ).inspect(_inspection_request())
+
+    body = bodies[0]
+    assert body["response_format"] == {"type": "json_object"}
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "max"
+    assert body["max_tokens"] == 8192
+    assert "tools" not in body and "tool_choice" not in body
+    content = body["messages"][1]["content"]
+    assert sum(item["type"] == "image_url" for item in content) == 6
+    assert "JSON Schema" in body["messages"][0]["content"]
+
+
+def test_json_output_is_parsed_and_validated() -> None:
+    output = {
+        "motion_summary": "The left gripper approaches the object.",
+        "interaction_window": {"start_frame": 5, "end_frame": 25},
+        "detail_request": {"x_min": 0.1, "y_min": 0.2, "x_max": 0.6, "y_max": 0.8},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "vision-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(output),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    client = openai.OpenAI(
+        api_key="local-test-key",
+        base_url="https://local.test/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    result = OpenAIBackend(
+        "vision-model",
+        client=client,
+        output_mode="json",
+    ).inspect(_inspection_request())
+    assert result.inspection == output
+
+
 def test_anthropic_sdk_serializes_multiview_evidence() -> None:
     bodies: list[dict] = []
 

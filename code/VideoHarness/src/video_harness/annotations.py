@@ -505,6 +505,59 @@ def _openai_tool_call(
     raise AnnotationError(f"OpenAI response did not contain the {role} tool call")
 
 
+def _openai_json_call(
+    *,
+    client: Any,
+    model: str,
+    instructions: str,
+    content: list[dict[str, Any]],
+    tool_name: str,
+    description: str,
+    schema: dict[str, Any],
+    role: str,
+    max_output_tokens: int,
+    thinking: bool,
+    reasoning_effort: str,
+) -> tuple[dict[str, Any], ProviderTrace]:
+    del tool_name
+    chat_content = [
+        (
+            {"type": "text", "text": item["text"]}
+            if item["type"] == "input_text"
+            else {
+                "type": "image_url",
+                "image_url": {"url": item["image_url"]},
+            }
+        )
+        for item in content
+    ]
+    request_options: dict[str, Any] = {
+        "response_format": {"type": "json_object"},
+        "max_tokens": max(max_output_tokens, 8192) if thinking else max_output_tokens,
+        "extra_body": {
+            "thinking": {"type": "enabled" if thinking else "disabled"}
+        },
+    }
+    if thinking:
+        request_options["reasoning_effort"] = reasoning_effort
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    f"{instructions}\nReturn one JSON object for {description} "
+                    f"matching this JSON Schema: {json.dumps(schema)}"
+                ),
+            },
+            {"role": "user", "content": chat_content},
+        ],
+        **request_options,
+    )
+    message = response.choices[0].message
+    return _json_arguments(message.content, "OpenAI", role), _trace(response, model)
+
+
 def _anthropic_tool_call(
     *,
     client: Any,
@@ -552,10 +605,19 @@ class OpenAIBackend:
         *,
         timeout_s: float = 300.0,
         max_retries: int = 2,
+        output_mode: str = "tool",
+        thinking: bool = True,
+        reasoning_effort: str = "high",
         client: Any | None = None,
     ) -> None:
         if timeout_s <= 0 or max_retries < 0:
             raise ValueError("provider timeout/retries are invalid")
+        if output_mode not in {"tool", "json"}:
+            raise ValueError("output_mode must be 'tool' or 'json'")
+        if not isinstance(thinking, bool):
+            raise ValueError("thinking must be a boolean")
+        if reasoning_effort not in {"low", "high", "max"}:
+            raise ValueError("reasoning_effort must be low, high, or max")
         if client is None:
             try:
                 from openai import OpenAI
@@ -568,6 +630,20 @@ class OpenAIBackend:
             )
         self.client = client
         self.model = model
+        self.output_mode = output_mode
+        self.thinking = thinking
+        self.reasoning_effort = reasoning_effort
+
+    def _call(self, **kwargs: Any) -> tuple[dict[str, Any], ProviderTrace]:
+        if self.output_mode == "tool":
+            return _openai_tool_call(client=self.client, model=self.model, **kwargs)
+        return _openai_json_call(
+            client=self.client,
+            model=self.model,
+            thinking=self.thinking,
+            reasoning_effort=self.reasoning_effort,
+            **kwargs,
+        )
 
     def inspect(self, request: InspectionRequest) -> InspectionResult:
         content = [
@@ -584,9 +660,7 @@ class OpenAIBackend:
             },
             *_openai_image_content(_inspection_images(request)),
         ]
-        raw, trace = _openai_tool_call(
-            client=self.client,
-            model=self.model,
+        raw, trace = self._call(
             instructions=INSPECTION_SYSTEM_PROMPT,
             content=content,
             tool_name=INSPECTION_TOOL_NAME,
@@ -640,9 +714,7 @@ class OpenAIBackend:
                 ),
             }
         )
-        raw, trace = _openai_tool_call(
-            client=self.client,
-            model=self.model,
+        raw, trace = self._call(
             instructions=SYSTEM_PROMPT,
             content=content,
             tool_name=TOOL_NAME,
@@ -684,9 +756,7 @@ class OpenAIBackend:
             },
             *_openai_image_content(_repair_images(request)),
         ]
-        raw, trace = _openai_tool_call(
-            client=self.client,
-            model=self.model,
+        raw, trace = self._call(
             instructions=REPAIR_SYSTEM_PROMPT,
             content=content,
             tool_name=REPAIR_TOOL_NAME,
@@ -703,9 +773,7 @@ class OpenAIBackend:
         )
 
     def audit_sequence(self, request: SequenceAuditRequest) -> SequenceAuditResult:
-        raw, trace = _openai_tool_call(
-            client=self.client,
-            model=self.model,
+        raw, trace = self._call(
             instructions=SEQUENCE_AUDIT_SYSTEM_PROMPT,
             content=[
                 {
@@ -925,6 +993,9 @@ def make_backends(
     *,
     timeout_s: float = 300.0,
     max_retries: int = 2,
+    output_mode: str = "tool",
+    thinking: bool = True,
+    reasoning_effort: str = "high",
 ) -> tuple[InspectionBackend, EvidenceBackend, RepairBackend]:
     if provider == "mock":
         return MockInspectionBackend(), MockEvidenceBackend(), MockRepairBackend()
@@ -935,6 +1006,9 @@ def make_backends(
             model,
             timeout_s=timeout_s,
             max_retries=max_retries,
+            output_mode=output_mode,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
         )
         return backend, backend, backend
     if provider == "anthropic":
