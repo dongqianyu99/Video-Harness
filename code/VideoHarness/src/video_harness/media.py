@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from .camera_contract import CAMERA_VIEWS
 
 
 class FrameDecodeError(RuntimeError):
@@ -55,6 +57,8 @@ class FFmpegFrameLoader:
         self,
         document: dict[str, Any],
         frame_ref: dict[str, Any],
+        *,
+        view: str | None = None,
     ) -> tuple[Path, float]:
         source = document["source"]
         try:
@@ -80,7 +84,25 @@ class FFmpegFrameLoader:
                 "Frame reference timestamp disagrees with episode_frame_index/source FPS: "
                 f"stored={stored_timestamp:.6f}, expected={expected_timestamp:.6f}"
             )
-        relative_path = Path(source["video_path"])
+        view_source = source
+        if view is not None:
+            if view not in CAMERA_VIEWS:
+                raise FrameDecodeError(f"Unknown camera view: {view!r}")
+            views = source.get("views")
+            if not isinstance(views, Mapping) or not isinstance(
+                views.get(view), Mapping
+            ):
+                raise FrameDecodeError(
+                    f"Document source has no video route for camera view {view!r}"
+                )
+            view_source = views[view]
+        try:
+            relative_path = Path(view_source["video_path"])
+            video_from_timestamp = float(view_source["video_from_timestamp"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FrameDecodeError(
+                f"Invalid video route for camera view {view or 'primary'!r}"
+            ) from exc
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise FrameDecodeError(
                 f"Unsafe dataset-relative video path: {relative_path}"
@@ -88,7 +110,7 @@ class FFmpegFrameLoader:
         video_path = self.dataset_root / relative_path
         if not video_path.is_file():
             raise FrameDecodeError(f"Video shard does not exist: {video_path}")
-        timestamp = float(source["video_from_timestamp"]) + expected_timestamp
+        timestamp = video_from_timestamp + expected_timestamp
         return video_path, timestamp
 
     def load(self, document: dict[str, Any], frame_ref: dict[str, Any]) -> bytes:
@@ -125,7 +147,7 @@ class FFmpegFrameLoader:
         document: dict[str, Any],
         frame_ref: dict[str, Any],
     ) -> np.ndarray:
-        """Return one decoded uint8 RGB frame for an Actuator data path."""
+        """Return one decoded uint8 RGB frame for a policy data path."""
 
         video_path, timestamp = self._resolve_request(document, frame_ref)
         command = [
@@ -170,11 +192,21 @@ class FFmpegFrameLoader:
         preserved in the returned tuple while FFmpeg only emits unique frames.
         """
 
+        return self._load_rgb_many(document, frame_refs, view=None)
+
+    def _load_rgb_many(
+        self,
+        document: dict[str, Any],
+        frame_refs: Sequence[dict[str, Any]],
+        *,
+        view: str | None,
+    ) -> tuple[np.ndarray, ...]:
         if not frame_refs:
             return ()
 
         resolved = [
-            self._resolve_request(document, frame_ref) for frame_ref in frame_refs
+            self._resolve_request(document, frame_ref, view=view)
+            for frame_ref in frame_refs
         ]
         video_paths = {video_path for video_path, _ in resolved}
         if len(video_paths) != 1:
@@ -183,13 +215,11 @@ class FFmpegFrameLoader:
             )
         video_path = next(iter(video_paths))
 
-        source = document["source"]
-        fps = float(source["fps"])
         frame_indices = [
             int(frame_ref["episode_frame_index"]) for frame_ref in frame_refs
         ]
         first_index = min(frame_indices)
-        first_timestamp = float(source["video_from_timestamp"]) + first_index / fps
+        first_timestamp = min(timestamp for _, timestamp in resolved)
         unique_indices = sorted(set(frame_indices))
         relative_indices = [index - first_index for index in unique_indices]
         select_expression = "+".join(
@@ -238,3 +268,18 @@ class FFmpegFrameLoader:
         return tuple(
             np.array(by_index[frame_index], copy=True) for frame_index in frame_indices
         )
+
+    def load_views_rgb_many(
+        self,
+        document: dict[str, Any],
+        frame_refs: Sequence[dict[str, Any]],
+    ) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], ...]:
+        """Decode synchronized three-view Boundary frames in canonical view order."""
+
+        if not frame_refs:
+            return ()
+        frames_by_view = tuple(
+            self._load_rgb_many(document, frame_refs, view=view)
+            for view in CAMERA_VIEWS
+        )
+        return tuple(zip(*frames_by_view, strict=True))

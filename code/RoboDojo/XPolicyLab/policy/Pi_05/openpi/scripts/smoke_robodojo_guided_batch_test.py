@@ -11,7 +11,7 @@ class _StopAfterConfigError(RuntimeError):
     pass
 
 
-def test_smoke_cli_scopes_loader_to_requested_query_episode(monkeypatch):
+def test_smoke_cli_builds_task_level_guidance_config(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(
@@ -35,21 +35,23 @@ def test_smoke_cli_scopes_loader_to_requested_query_episode(monkeypatch):
         native_config_name="native-pi05",
         repo_id="RoboDojo_lerobot_v30_video",
         dataset_root=Path("dataset"),
-        dataset_artifact=Path("dataset.json"),
         documents_root=Path("documents"),
-        pairs_artifact=Path("pairs.jsonl"),
-        query_episode_index=37,
-        batch_size=2,
-        max_frames=8,
+        guides_per_batch=2,
+        queries_per_guide=3,
+        max_boundaries=8,
         max_units=4,
-        max_text_tokens=32,
+        max_boundary_text_tokens=32,
+        max_transition_text_tokens=24,
+        guide_boundary_num_queries=12,
+        guide_transition_num_queries=8,
         seed=0,
-        profile="actuator",
         num_batches=1,
     )
 
     with pytest.raises(_StopAfterConfigError):
         _smoke._run(args)  # noqa: SLF001
 
-    assert captured["guided_config"].query_episode_indices == (37,)
+    config = captured["guided_config"]
+    assert (config.guides_per_batch, config.queries_per_guide) == (2, 3)
+    assert (config.guide_boundary_num_queries, config.guide_transition_num_queries) == (12, 8)
     assert captured["num_batches"] == 1

@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
 from video_harness import media as _media
 from video_harness.media import FFmpegFrameLoader, FrameDecodeError
 
@@ -15,6 +14,17 @@ def _document() -> dict:
             "fps": 25,
             "video_from_timestamp": 10.0,
             "video_path": "videos/cam/file-000.mp4",
+            "views": {
+                view: {
+                    "video_path": f"videos/{view}/file-000.mp4",
+                    "video_from_timestamp": 10.0,
+                }
+                for view in (
+                    "cam_high",
+                    "cam_left_wrist",
+                    "cam_right_wrist",
+                )
+            },
         }
     }
 
@@ -171,6 +181,86 @@ def test_load_rgb_many_rejects_empty_or_short_batch_payload(
     )
     with pytest.raises(FrameDecodeError, match="batch decode"):
         loader.load_rgb_many(
+            _document(),
+            [{"episode_frame_index": 25, "timestamp_s": 1.0}],
+        )
+
+
+def test_load_views_rgb_many_uses_three_processes_and_returns_frame_major_order(
+    tmp_path, monkeypatch
+) -> None:
+    values = {
+        "cam_high": 11,
+        "cam_left_wrist": 22,
+        "cam_right_wrist": 33,
+    }
+    for view in values:
+        path = tmp_path / "videos" / view / "file-000.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"video-placeholder")
+    calls: list[str] = []
+
+    def fake_run(command, *, check, capture_output, timeout):
+        del check, capture_output, timeout
+        video_path = command[command.index("-i") + 1]
+        view = next(view for view in values if f"/{view}/" in video_path)
+        calls.append(view)
+        first = np.full((2, 4, 3), values[view], dtype=np.uint8)
+        second = np.full((2, 4, 3), values[view] + 1, dtype=np.uint8)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=first.tobytes() + second.tobytes(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(_media.subprocess, "run", fake_run)
+    loader = FFmpegFrameLoader(tmp_path, rgb_shape=(2, 4, 3))
+    frames = loader.load_views_rgb_many(
+        _document(),
+        [
+            {"episode_frame_index": 25, "timestamp_s": 1.0},
+            {"episode_frame_index": 50, "timestamp_s": 2.0},
+        ],
+    )
+
+    assert calls == ["cam_high", "cam_left_wrist", "cam_right_wrist"]
+    assert len(frames) == 2
+    assert tuple(int(image[0, 0, 0]) for image in frames[0]) == (11, 22, 33)
+    assert tuple(int(image[0, 0, 0]) for image in frames[1]) == (12, 23, 34)
+    assert loader.load_views_rgb_many(_document(), []) == ()
+
+
+def test_load_views_rgb_many_rejects_missing_camera_shard(tmp_path) -> None:
+    loader = FFmpegFrameLoader(tmp_path, rgb_shape=(2, 4, 3))
+
+    with pytest.raises(FrameDecodeError, match="Video shard does not exist"):
+        loader.load_views_rgb_many(
+            _document(),
+            [{"episode_frame_index": 25, "timestamp_s": 1.0}],
+        )
+
+
+def test_load_views_rgb_many_surfaces_corrupt_video_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    for view in ("cam_high", "cam_left_wrist", "cam_right_wrist"):
+        path = tmp_path / "videos" / view / "file-000.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"corrupt-video")
+    monkeypatch.setattr(
+        _media.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=b"",
+            stderr=b"Invalid data found when processing input",
+        ),
+    )
+    loader = FFmpegFrameLoader(tmp_path, rgb_shape=(2, 4, 3))
+
+    with pytest.raises(FrameDecodeError, match="Invalid data found"):
+        loader.load_views_rgb_many(
             _document(),
             [{"episode_frame_index": 25, "timestamp_s": 1.0}],
         )

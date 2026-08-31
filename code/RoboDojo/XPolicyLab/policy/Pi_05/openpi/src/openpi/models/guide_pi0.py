@@ -39,7 +39,8 @@ class GuidePi0(Pi0):
         self.guide_encoder = GuideFeatureEncoder(
             input_dim=paligemma_config.width,
             output_dim=paligemma_config.width,
-            num_queries=config.guide_num_queries,
+            boundary_num_queries=config.guide_boundary_num_queries,
+            transition_num_queries=config.guide_transition_num_queries,
             width=config.guide_resampler_width,
             num_heads=config.guide_resampler_num_heads,
             ffn_hidden_dim=config.guide_resampler_ffn_hidden_dim,
@@ -50,20 +51,26 @@ class GuidePi0(Pi0):
         """Encode one grouped Guide bank with the shared Pi05 backbones."""
 
         features = encode_shared_guide_features(
-            guide.images,
-            guide.text_tokens,
+            guide.boundary_images,
+            guide.boundary_text_tokens,
+            guide.transition_text_tokens,
             image_encoder=self.PaliGemma.img,
             text_embedder=self.PaliGemma.llm,
         )
 
         return self.guide_encoder(
-            features.frame_tokens,
-            guide.image_mask,
-            features.text_embeddings,
-            guide.text_mask,
+            features.boundary_image_tokens,
+            guide.boundary_image_mask,
+            features.boundary_text_embeddings,
+            guide.boundary_text_mask,
+            features.transition_text_embeddings,
+            guide.transition_text_mask,
+            guide.boundary_mask,
             guide.unit_mask,
-            guide.before_slot,
-            guide.after_slot,
+            guide.memory_source_kind,
+            guide.memory_source_index,
+            guide.memory_source_offset,
+            guide.memory_mask,
         )
 
     def _embed_guide_control_prefix(
@@ -93,7 +100,6 @@ class GuidePi0(Pi0):
 
         return combined_prefix_tokens, guide_mask, control_mask
 
-
     def _prefill_guided_prefix(
         self,
         observation: _model.Observation,
@@ -101,12 +107,29 @@ class GuidePi0(Pi0):
     ) -> tuple[_model.Observation, jax.Array, object, int, int]:
         """Encode Guide and prefill the combined Guide-Control prefix."""
 
-        groups, queries = validate_guide_conditioned_observation(
+        validate_guide_conditioned_observation(
             observation,
             guide,
         )
 
         guide_memory = self.encode_guide(guide)
+
+        return self._prefill_guided_prefix_with_memory(
+            observation,
+            guide_memory,
+        )
+
+    def _prefill_guided_prefix_with_memory(
+        self,
+        observation: _model.Observation,
+        guide_memory: GuideMemory,
+    ) -> tuple[_model.Observation, jax.Array, object, int, int]:
+        """Prefill the combined Guide-Control prefix from encoded Guide memory."""
+
+        groups, queries = self._validate_guide_memory_observation(
+            observation,
+            guide_memory,
+        )
 
         flat_observation = flatten_grouped_observation(observation)
         flat_observation = _model.preprocess_observation(
@@ -115,12 +138,10 @@ class GuidePi0(Pi0):
             train=False,
         )
 
-        prefix_tokens, guide_mask, control_mask = (
-            self._embed_guide_control_prefix(
-                guide_memory,
-                flat_observation,
-                queries_per_guide=queries,
-            )
+        prefix_tokens, guide_mask, control_mask = self._embed_guide_control_prefix(
+            guide_memory,
+            flat_observation,
+            queries_per_guide=queries,
         )
 
         prefix_mask = jnp.concatenate(
@@ -133,10 +154,13 @@ class GuidePi0(Pi0):
             control_mask,
         )
 
-        prefix_positions = jnp.cumsum(
-            prefix_mask,
-            axis=1,
-        ) - 1
+        prefix_positions = (
+            jnp.cumsum(
+                prefix_mask,
+                axis=1,
+            )
+            - 1
+        )
 
         _, kv_cache = self.PaliGemma.llm(
             [prefix_tokens, None],
@@ -152,6 +176,44 @@ class GuidePi0(Pi0):
             queries,
         )
 
+    @staticmethod
+    def _validate_guide_memory_observation(
+        observation: _model.Observation,
+        guide_memory: GuideMemory,
+    ) -> tuple[int, int]:
+        """Validate grouped observations and their encoded Guide bank."""
+
+        if observation.state.ndim < 3:
+            raise ValueError(f"observation.state must have shape [G, Q, S], got {observation.state.shape}")
+
+        groups, queries = observation.state.shape[:2]
+        if groups <= 0 or queries <= 0:
+            raise ValueError(f"observation G and Q must be positive, got G={groups}, Q={queries}")
+
+        for leaf in jax.tree_util.tree_leaves(observation):
+            if leaf is not None and (leaf.ndim < 2 or tuple(leaf.shape[:2]) != (groups, queries)):
+                raise ValueError(
+                    f"observation leaves must share leading dimensions [G, Q]=[{groups}, {queries}], got {leaf.shape}"
+                )
+
+        if guide_memory.tokens.ndim != 3:
+            raise ValueError(f"guide_memory.tokens must have shape [G, S, D], got {guide_memory.tokens.shape}")
+        if guide_memory.token_mask.ndim != 2:
+            raise ValueError(f"guide_memory.token_mask must have shape [G, S], got {guide_memory.token_mask.shape}")
+        if guide_memory.tokens.shape[:2] != guide_memory.token_mask.shape:
+            raise ValueError(
+                "guide_memory tokens and token_mask must share [G, S], got "
+                f"{guide_memory.tokens.shape[:2]} and {guide_memory.token_mask.shape}"
+            )
+        if guide_memory.tokens.shape[0] != groups:
+            raise ValueError(
+                f"guide_memory and observation must share G, got {guide_memory.tokens.shape[0]} and {groups}"
+            )
+        if guide_memory.token_mask.dtype != jnp.bool_:
+            raise ValueError(f"guide_memory.token_mask must have boolean dtype, got {guide_memory.token_mask.dtype}")
+
+        return groups, queries
+
     def sample_guided_actions(
         self,
         rng: at.KeyArrayLike,
@@ -163,9 +225,33 @@ class GuidePi0(Pi0):
     ) -> _model.Actions:
         """Sample actions conditioned on one grouped Guide bank."""
 
-        groups, queries = validate_guide_conditioned_observation(
+        validate_guide_conditioned_observation(
             observation,
             guide,
+        )
+
+        return self.sample_guided_actions_with_memory(
+            rng,
+            observation,
+            guide_memory=self.encode_guide(guide),
+            num_steps=num_steps,
+            noise=noise,
+        )
+
+    def sample_guided_actions_with_memory(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        guide_memory: GuideMemory,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: _model.Actions | None = None,
+    ) -> _model.Actions:
+        """Sample actions from a grouped, pre-encoded Guide bank."""
+
+        groups, queries = self._validate_guide_memory_observation(
+            observation,
+            guide_memory,
         )
 
         batch_size = groups * queries
@@ -187,10 +273,7 @@ class GuidePi0(Pi0):
             )
         else:
             if tuple(noise.shape) != expected_noise_shape:
-                raise ValueError(
-                    "noise must have grouped shape "
-                    f"{expected_noise_shape}, got {noise.shape}"
-                )
+                raise ValueError(f"noise must have grouped shape {expected_noise_shape}, got {noise.shape}")
 
             flat_noise = noise.reshape(
                 batch_size,
@@ -198,11 +281,9 @@ class GuidePi0(Pi0):
                 self.action_dim,
             )
 
-        flat_observation, prefix_mask, kv_cache, _, _ = (
-            self._prefill_guided_prefix(
-                observation,
-                guide,
-            )
+        flat_observation, prefix_mask, kv_cache, _, _ = self._prefill_guided_prefix_with_memory(
+            observation,
+            guide_memory,
         )
 
         dt = -1.0 / num_steps
@@ -210,12 +291,10 @@ class GuidePi0(Pi0):
         def step(carry):
             x_t, time = carry
 
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = (
-                self.embed_suffix(
-                    flat_observation,
-                    x_t,
-                    jnp.broadcast_to(time, batch_size),
-                )
+            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+                flat_observation,
+                x_t,
+                jnp.broadcast_to(time, batch_size),
             )
 
             suffix_attn_mask = make_attn_mask(
@@ -240,11 +319,7 @@ class GuidePi0(Pi0):
                 axis=-1,
             )
 
-            suffix_positions = (
-                jnp.sum(prefix_mask, axis=-1)[:, None]
-                + jnp.cumsum(suffix_mask, axis=-1)
-                - 1
-            )
+            suffix_positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens],
@@ -256,9 +331,7 @@ class GuidePi0(Pi0):
 
             assert prefix_out is None
 
-            velocity = self.action_out_proj(
-                suffix_out[:, -self.action_horizon :]
-            )
+            velocity = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
             return x_t + dt * velocity, time + dt
 
@@ -332,12 +405,10 @@ class GuidePi0(Pi0):
     ) -> jax.Array:
         """Run one Guide/Control/Action forward pass and predict action velocity."""
 
-        combined_prefix_tokens, guide_mask, control_mask = (
-            self._embed_guide_control_prefix(
-                guide_memory,
-                flat_observation,
-                queries_per_guide=queries_per_guide,
-            )
+        combined_prefix_tokens, guide_mask, control_mask = self._embed_guide_control_prefix(
+            guide_memory,
+            flat_observation,
+            queries_per_guide=queries_per_guide,
         )
 
         suffix_tokens, action_mask, _, adarms_cond = self.embed_suffix(
@@ -366,9 +437,7 @@ class GuidePi0(Pi0):
             adarms_cond=[None, adarms_cond],
         )
 
-        return self.action_out_proj(
-            suffix_out[:, -self.action_horizon :]
-        )
+        return self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
     @at.typecheck
     def compute_guided_loss(

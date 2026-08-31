@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from openpi.models.guide_resampler import UnitResampler
+from openpi.models.guide_resampler import PerceiverResampler
 from openpi.shared import nnx_utils
 
 _GROUPS = 2
@@ -17,14 +17,15 @@ _QUERIES = 2
 _HEADS = 2
 
 
-def _make_resampler(*, seed: int = 0) -> UnitResampler:
-    return UnitResampler(
+def _make_resampler(*, seed: int = 0) -> PerceiverResampler:
+    return PerceiverResampler(
         input_dim=_INPUT_DIM,
         output_dim=_OUTPUT_DIM,
         num_queries=_QUERIES,
         width=_WIDTH,
         num_heads=_HEADS,
         ffn_hidden_dim=16,
+        num_roles=3,
         rngs=nnx.Rngs(seed),
     )
 
@@ -126,7 +127,7 @@ def test_gradients_reach_inputs_and_all_resampler_components() -> None:
         (_GROUPS, _UNITS, _TOKENS),
     )
 
-    def loss_fn(module: UnitResampler, tokens: jax.Array) -> jax.Array:
+    def loss_fn(module: PerceiverResampler, tokens: jax.Array) -> jax.Array:
         output = module(tokens, token_mask, role_ids, unit_mask)
         weights = jnp.linspace(0.5, 1.5, output.size, dtype=output.dtype).reshape(output.shape)
         return jnp.mean(jnp.square(output) * weights)

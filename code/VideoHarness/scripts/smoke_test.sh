@@ -17,7 +17,6 @@ uv run video-harness build \
   --dataset-root "${dataset_root}" \
   --output-root "${output_root}" \
   --sample-hz 1 \
-  --supports-per-query 1 \
   --max-tasks 1 \
   --episodes-per-task 3
 uv run video-harness annotate \

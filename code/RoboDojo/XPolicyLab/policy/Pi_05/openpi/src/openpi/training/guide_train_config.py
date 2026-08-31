@@ -88,7 +88,12 @@ def _load_native_config(name: str) -> Any:
     return _native_config().get_config(name)
 
 
-def make_guide_pi0_config(native_model: Pi0Config) -> GuidePi0Config:
+def make_guide_pi0_config(
+    native_model: Pi0Config,
+    *,
+    guide_boundary_num_queries: int = 8,
+    guide_transition_num_queries: int = 4,
+) -> GuidePi0Config:
     """Copy every native Pi0Config init field before adding Guide settings."""
 
     if not isinstance(native_model, Pi0Config):
@@ -123,7 +128,8 @@ def make_guide_pi0_config(native_model: Pi0Config) -> GuidePi0Config:
 
     kwargs = {name: getattr(native_model, name) for name in native_fields}
     kwargs.update(
-        guide_num_queries=8,
+        guide_boundary_num_queries=guide_boundary_num_queries,
+        guide_transition_num_queries=guide_transition_num_queries,
         guide_resampler_width=1024,
         guide_resampler_num_heads=8,
         guide_resampler_ffn_hidden_dim=None,
@@ -148,7 +154,15 @@ def resolve_guided_train_config(run_config: GuidedTrainRunConfig) -> Any:
             f"got {train_config_type.__name__}"
         )
 
-    guide_model = make_guide_pi0_config(native_config.model)
+    guide_model = make_guide_pi0_config(
+        native_config.model,
+        guide_boundary_num_queries=(
+            run_config.guided_data.guide_boundary_num_queries
+        ),
+        guide_transition_num_queries=(
+            run_config.guided_data.guide_transition_num_queries
+        ),
+    )
     config_fields = {field.name for field in dataclasses.fields(train_config_type) if field.init}
     kwargs = {name: getattr(native_config, name) for name in config_fields}
     kwargs.update(

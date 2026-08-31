@@ -75,17 +75,21 @@ fi
 GUIDANCE_OVERRIDES=()
 if [[ "${PI05_GUIDANCE_ENABLED:-0}" == "1" ]]; then
     : "${PI05_GUIDANCE_DOCUMENTS_ROOT:?Set PI05_GUIDANCE_DOCUMENTS_ROOT}"
-    : "${PI05_GUIDANCE_EPISODES_PATH:?Set PI05_GUIDANCE_EPISODES_PATH}"
     : "${PI05_GUIDANCE_DATASET_ROOT:?Set PI05_GUIDANCE_DATASET_ROOT}"
+    : "${PI05_GUIDANCE_MAX_BOUNDARIES:?Set PI05_GUIDANCE_MAX_BOUNDARIES from the corpus report}"
+    : "${PI05_GUIDANCE_MAX_UNITS:?Set PI05_GUIDANCE_MAX_UNITS from the corpus report}"
+    : "${PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS:?Set PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS from the corpus report}"
+    : "${PI05_GUIDANCE_MAX_TRANSITION_TEXT_TOKENS:?Set PI05_GUIDANCE_MAX_TRANSITION_TEXT_TOKENS from the corpus report}"
     GUIDANCE_OVERRIDES+=(
         guidance_enabled=true
         "guidance_documents_root=${PI05_GUIDANCE_DOCUMENTS_ROOT}"
-        "guidance_episodes_path=${PI05_GUIDANCE_EPISODES_PATH}"
         "guidance_dataset_root=${PI05_GUIDANCE_DATASET_ROOT}"
-        "guidance_profile=${PI05_GUIDANCE_PROFILE:-actuator}"
-        "guidance_max_frames=${PI05_GUIDANCE_MAX_FRAMES:-64}"
-        "guidance_max_units=${PI05_GUIDANCE_MAX_UNITS:-32}"
-        "guidance_max_text_tokens=${PI05_GUIDANCE_MAX_TEXT_TOKENS:-128}"
+        "guidance_max_boundaries=${PI05_GUIDANCE_MAX_BOUNDARIES}"
+        "guidance_max_units=${PI05_GUIDANCE_MAX_UNITS}"
+        "guidance_max_boundary_text_tokens=${PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS}"
+        "guidance_max_transition_text_tokens=${PI05_GUIDANCE_MAX_TRANSITION_TEXT_TOKENS}"
+        "guidance_boundary_num_queries=${PI05_GUIDANCE_BOUNDARY_NUM_QUERIES:-8}"
+        "guidance_transition_num_queries=${PI05_GUIDANCE_TRANSITION_NUM_QUERIES:-4}"
     )
 fi
 

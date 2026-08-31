@@ -1,461 +1,262 @@
-from dataclasses import FrozenInstanceError
-from dataclasses import dataclass
+from __future__ import annotations
+
+from collections import Counter
+from types import SimpleNamespace
 
 import pytest
 
-from openpi.training.guide_dataset import GuideBindingIndex
-from openpi.training.guide_dataset import GuideSampleIndex
-from openpi.training.guide_sampler import BindingBatchStats
-from openpi.training.guide_sampler import GroupedBindingBatchSampler
-from openpi.training.guide_sampler import HomogeneousBindingBatchSampler
-from openpi.training.guide_sampler import QueryEpisodeRange
-from openpi.training.guide_sampler import build_binding_to_sample_indices
+from openpi.training.guide_dataset import GuideCatalog
+from openpi.training.guide_dataset import TaskSampleIndex
+from openpi.training.guide_sampler import GuidanceFirstBatchSampler
 
 
-@dataclass(frozen=True)
-class _SupportBinding:
-    query_episode_index: int
-    support_episode_index: int
-    task_index: int
-    support_document_id: str
-
-
-def _make_index() -> GuideBindingIndex:
-    return GuideBindingIndex.from_bindings(
-        [
-            _SupportBinding(20, 21, 5, "document-1"),
-            _SupportBinding(10, 11, 4, "document-0"),
-        ]
+def _catalog() -> GuideCatalog:
+    documents = tuple(
+        SimpleNamespace(
+            document_id=f"doc-{index}",
+            source_episode_index=10 + index,
+            task_index=0 if index < 4 else 1,
+            task_instruction="task zero" if index < 4 else "task one",
+        )
+        for index in range(6)
+    )
+    return GuideCatalog.from_document_catalog(
+        SimpleNamespace(catalog_digest="digest", documents=documents)
     )
 
 
-def _make_ranges() -> tuple[QueryEpisodeRange, ...]:
-    return (
-        QueryEpisodeRange(20, 5, 9),
-        QueryEpisodeRange(10, 0, 5),
-        QueryEpisodeRange(999, 9, 11),
+def _samples() -> TaskSampleIndex:
+    return TaskSampleIndex.from_episode_records(
+        (
+            SimpleNamespace(episode_index=10, task_index=0, dataset_from_index=0, dataset_to_index=8),
+            SimpleNamespace(episode_index=20, task_index=1, dataset_from_index=8, dataset_to_index=16),
+        ),
+        dataset_length=16,
     )
 
 
-def _make_sample_indices() -> dict[int, tuple[int, ...]]:
-    return {
-        1: (5, 6, 7, 8),
-        0: (0, 1, 2, 3, 4),
-    }
+def _groups(batch, q):
+    return tuple(batch[index : index + q] for index in range(0, len(batch), q))
 
 
-def test_build_binding_to_sample_indices_uses_half_open_ranges_and_stable_binding_keys():
-    result = build_binding_to_sample_indices(
-        _make_ranges(),
-        binding_index=_make_index(),
-    )
-
-    assert dict(result) == {
-        0: (0, 1, 2, 3, 4),
-        1: (5, 6, 7, 8),
-    }
-
-
-def test_range_builder_is_independent_of_input_order_and_ignores_extra_episode():
-    ranges = list(reversed(_make_ranges()))
-    original = list(ranges)
-
-    result = build_binding_to_sample_indices(
-        ranges,
-        binding_index=_make_index(),
-    )
-
-    assert set(result) == {0, 1}
-    assert ranges == original
-
-
-def test_range_builder_returns_immutable_groups():
-    result = build_binding_to_sample_indices(
-        _make_ranges(),
-        binding_index=_make_index(),
-    )
-
-    with pytest.raises(TypeError):
-        result[0] = (99,)  # type: ignore[index]
-
-
-def test_range_builder_rejects_missing_query_episode():
-    ranges = (QueryEpisodeRange(10, 0, 2),)
-
-    with pytest.raises(ValueError, match=r"missing|query_episode_index"):
-        build_binding_to_sample_indices(ranges, binding_index=_make_index())
-
-
-def test_range_builder_rejects_duplicate_episode_ranges():
-    ranges = (
-        QueryEpisodeRange(10, 0, 2),
-        QueryEpisodeRange(10, 2, 4),
-        QueryEpisodeRange(20, 4, 6),
-    )
-
-    with pytest.raises(ValueError, match=r"duplicate|episode_index"):
-        build_binding_to_sample_indices(ranges, binding_index=_make_index())
-
-
-def test_range_builder_rejects_overlapping_ranges():
-    ranges = (
-        QueryEpisodeRange(10, 0, 3),
-        QueryEpisodeRange(20, 2, 5),
-    )
-
-    with pytest.raises(ValueError, match="overlap"):
-        build_binding_to_sample_indices(ranges, binding_index=_make_index())
-
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        QueryEpisodeRange(10, 0, 0),
-        QueryEpisodeRange(10, 3, 2),
-        QueryEpisodeRange(10, -1, 2),
-        QueryEpisodeRange(-1, 0, 2),
-    ],
-)
-def test_range_builder_rejects_empty_negative_or_reversed_ranges(entry):
-    with pytest.raises(ValueError, match=r"range|non-negative|episode"):
-        build_binding_to_sample_indices((entry,), binding_index=_make_index())
-
-
-def test_sampler_yields_homogeneous_fixed_size_batches_and_reports_tail():
-    sampler = HomogeneousBindingBatchSampler(
-        _make_sample_indices(),
-        binding_index=_make_index(),
-        batch_size=2,
+def test_guidance_first_sampler_uses_distinct_guides_and_masks_native_tail():
+    sampler = GuidanceFirstBatchSampler(
+        guide_catalog=_catalog(),
+        task_sample_index=_samples(),
+        guides_per_batch=4,
+        queries_per_guide=3,
         seed=7,
+        remainder_strategy="pad_mask",
     )
-
     batches = list(sampler)
-
-    assert len(sampler) == 4
-    assert len(batches) == 4
-    assert all(len(batch) == 2 for batch in batches)
-    assert all(set(batch) <= set(range(5)) or set(batch) <= set(range(5, 9)) for batch in batches)
-    used_values = {value for batch in batches for value in batch}
-    assert len(used_values) == 8
-    assert used_values <= set(range(5)) | set(range(5, 9))
-    assert sampler.stats == (
-        BindingBatchStats(0, 5, 4, 1, 2),
-        BindingBatchStats(1, 4, 4, 0, 2),
-    )
-    assert sampler.total_samples == 9
-    assert sampler.used_samples == 8
-    assert sampler.dropped_samples == 1
-
-
-def test_sampler_mapping_order_does_not_change_output():
-    first = HomogeneousBindingBatchSampler(
-        {0: (0, 1, 2, 3), 1: (4, 5, 6, 7)},
-        binding_index=_make_index(),
-        batch_size=2,
-        seed=11,
-    )
-    second = HomogeneousBindingBatchSampler(
-        {1: (4, 5, 6, 7), 0: (0, 1, 2, 3)},
-        binding_index=_make_index(),
-        batch_size=2,
-        seed=11,
-    )
-
-    assert list(first) == list(second)
-
-
-def test_sampler_seed_and_epoch_are_reproducible():
-    first = HomogeneousBindingBatchSampler(
-        _make_sample_indices(),
-        binding_index=_make_index(),
-        batch_size=2,
-        seed=13,
-    )
-    second = HomogeneousBindingBatchSampler(
-        _make_sample_indices(),
-        binding_index=_make_index(),
-        batch_size=2,
-        seed=13,
-    )
-
-    epoch_zero = list(first)
-    assert epoch_zero == list(first)
-
-    first.set_epoch(1)
-    second.set_epoch(1)
-    assert list(first) == list(second)
-    assert list(first) != epoch_zero
-    assert first.epoch == 1
-
-
-def test_sampler_copies_input_sequences():
-    indices = {0: [0, 1, 2, 3], 1: [4, 5, 6, 7]}
-    sampler = HomogeneousBindingBatchSampler(
-        indices,
-        binding_index=_make_index(),
-        batch_size=2,
-    )
-    expected = list(sampler)
-
-    indices[0].clear()
-    indices[1][:] = [99, 98, 97, 96]
-
-    assert list(sampler) == expected
-
-
-def test_sampler_stats_are_immutable():
-    sampler = HomogeneousBindingBatchSampler(
-        _make_sample_indices(),
-        binding_index=_make_index(),
-        batch_size=2,
-    )
-
-    with pytest.raises(FrozenInstanceError):
-        sampler.stats[0].used_samples = 0
-
-
-def test_sampler_set_epoch_does_not_change_automatically_during_iteration():
-    sampler = HomogeneousBindingBatchSampler(
-        _make_sample_indices(),
-        binding_index=_make_index(),
-        batch_size=2,
-        seed=17,
-    )
-
-    list(sampler)
-
-    assert sampler.epoch == 0
-
-
-@pytest.mark.parametrize(
-    "bad_mapping",
-    [
-        {},
-        {0: ()},
-        {0: (0,)},
-        {0: (0, 1, 1, 2)},
-        {0: (0, 1, 2, 3), 1: (3, 4, 5, 6)},
-        {99: (0, 1, 2, 3)},
-    ],
-)
-def test_sampler_rejects_invalid_groups(bad_mapping):
-    with pytest.raises(ValueError, match=r"binding|sample|batch|unknown"):
-        HomogeneousBindingBatchSampler(
-            bad_mapping,
-            binding_index=_make_index(),
-            batch_size=2,
-        )
-
-
-def test_sampler_rejects_invalid_batch_size_seed_and_epoch():
-    with pytest.raises(ValueError, match="batch_size"):
-        HomogeneousBindingBatchSampler(
-            _make_sample_indices(),
-            binding_index=_make_index(),
-            batch_size=0,
-        )
-
-    with pytest.raises(ValueError, match="batch_size"):
-        HomogeneousBindingBatchSampler(
-            _make_sample_indices(),
-            binding_index=_make_index(),
-            batch_size=True,
-        )
-
-    with pytest.raises(ValueError, match="seed"):
-        HomogeneousBindingBatchSampler(
-            _make_sample_indices(),
-            binding_index=_make_index(),
-            batch_size=2,
-            seed=True,
-        )
-
-    sampler = HomogeneousBindingBatchSampler(
-        _make_sample_indices(),
-        binding_index=_make_index(),
-        batch_size=2,
-    )
-    with pytest.raises(ValueError, match="epoch"):
-        sampler.set_epoch(-1)
-
-
-def test_grouped_sampler_mixes_distinct_guides_and_tasks_without_changing_sample_marginal():
-    index = GuideBindingIndex.from_bindings(
-        [
-            _SupportBinding(10, 11, 0, "doc-a"),
-            _SupportBinding(20, 21, 1, "doc-b"),
-            _SupportBinding(30, 31, 0, "doc-c"),
-            _SupportBinding(40, 41, 2, "doc-d"),
-        ]
-    )
-    mapping = {
-        0: tuple(range(8)),
-        1: tuple(range(8, 16)),
-        2: tuple(range(16, 24)),
-        3: tuple(range(24, 32)),
-    }
-    sampler = GroupedBindingBatchSampler(
-        mapping,
-        binding_index=index,
-        guides_per_batch=2,
-        queries_per_guide=2,
-        seed=19,
-    )
-
-    batches = list(sampler)
-
-    assert len(batches) == len(sampler) == 8
-    assert all(len(batch) == 4 for batch in batches)
-    assert {sample for batch in batches for sample in batch} == set(range(32))
     for batch in batches:
-        first_group = batch[:2]
-        second_group = batch[2:]
-        first_binding = next(binding for binding, samples in mapping.items() if first_group[0] in samples)
-        second_binding = next(binding for binding, samples in mapping.items() if second_group[0] in samples)
-        assert first_binding != second_binding
-        assert set(first_group) <= set(mapping[first_binding])
-        assert set(second_group) <= set(mapping[second_binding])
-        assert (
-            index.by_binding_index(first_binding).support_document_id
-            != index.by_binding_index(second_binding).support_document_id
+        guide_indices = [group[0].guide_index for group in _groups(batch, 3)]
+        assert len(guide_indices) == len(set(guide_indices)) == 4
+    assert sampler.stats.total_native_samples == 16
+    assert sampler.stats.valid_query_samples == 16
+    assert sampler.stats.padded_query_slots == 8
+
+
+def test_guidance_first_sampler_draws_q_distinct_same_task_samples_and_allows_source():
+    catalog = _catalog()
+    sampler = GuidanceFirstBatchSampler(
+        guide_catalog=catalog,
+        task_sample_index=_samples(),
+        guides_per_batch=2,
+        queries_per_guide=3,
+        seed=3,
+        remainder_strategy="drop",
+    )
+
+    for batch in sampler:
+        for group in _groups(batch, 3):
+            assert len({sample.sample_index for sample in group}) == 3
+            task = catalog.by_guide_index(group[0].guide_index).task_index
+            expected = set(range(8) if task == 0 else range(8, 16))
+            assert {sample.sample_index for sample in group} <= expected
+
+    source_catalog = GuideCatalog.from_document_catalog(
+        SimpleNamespace(
+            catalog_digest="source",
+            documents=(
+                SimpleNamespace(
+                    document_id="source-guide",
+                    source_episode_index=10,
+                    task_index=0,
+                    task_instruction="source task",
+                ),
+            ),
         )
-
-    assert sampler.stats.used_query_groups == 16
-    assert sampler.stats.dropped_query_groups == 0
-    assert sampler.stats.mixed_task_batches > 0
-
-
-def test_grouped_sampler_is_reproducible_and_changes_order_by_epoch():
-    index = GuideBindingIndex.from_bindings(
-        [
-            _SupportBinding(10, 11, 0, "doc-a"),
-            _SupportBinding(20, 21, 1, "doc-b"),
-        ]
     )
-    mapping = {0: tuple(range(8)), 1: tuple(range(8, 16))}
-    first = GroupedBindingBatchSampler(
-        mapping,
-        binding_index=index,
+    source_samples = TaskSampleIndex.from_episode_records(
+        (
+            SimpleNamespace(
+                episode_index=10,
+                task_index=0,
+                dataset_from_index=0,
+                dataset_to_index=4,
+            ),
+        )
+    )
+    source_sampler = GuidanceFirstBatchSampler(
+        guide_catalog=source_catalog,
+        task_sample_index=source_samples,
+        guides_per_batch=1,
+        queries_per_guide=2,
+    )
+    assert {sample.sample_index for sample in next(iter(source_sampler))} <= set(range(4))
+
+
+def test_sampler_is_reproducible_and_changes_order_across_epochs():
+    sampler = GuidanceFirstBatchSampler(
+        guide_catalog=_catalog(),
+        task_sample_index=_samples(),
         guides_per_batch=2,
         queries_per_guide=2,
-        seed=3,
+        seed=11,
+        remainder_strategy="drop",
     )
-    second = GroupedBindingBatchSampler(
-        dict(reversed(tuple(mapping.items()))),
-        binding_index=index,
-        guides_per_batch=2,
-        queries_per_guide=2,
-        seed=3,
-    )
-
-    epoch_zero = list(first)
-    assert epoch_zero == list(second)
-    first.set_epoch(1)
-    second.set_epoch(1)
-    assert list(first) == list(second)
-    assert list(first) != epoch_zero
+    first = list(sampler)
+    assert list(sampler) == first
+    sampler.set_epoch(1)
+    assert list(sampler) != first
 
 
-def test_grouped_sampler_keeps_length_buckets_and_accumulation_blocks_homogeneous():
-    index = GuideBindingIndex.from_bindings(
-        [
-            _SupportBinding(10, 11, 0, "doc-a"),
-            _SupportBinding(20, 21, 1, "doc-b"),
-            _SupportBinding(30, 31, 2, "doc-c"),
-            _SupportBinding(40, 41, 3, "doc-d"),
-        ]
-    )
-    mapping = {
-        0: tuple(range(8)),
-        1: tuple(range(8, 16)),
-        2: tuple(range(16, 24)),
-        3: tuple(range(24, 32)),
+def test_sampler_keeps_accumulation_blocks_bucket_homogeneous():
+    catalog = _catalog()
+    buckets = {
+        record.guide_index: ("small" if record.guide_index < 4 else "large")
+        for record in catalog.records
     }
-    binding_to_bucket = {0: "small", 1: "small", 2: "large", 3: "large"}
-    sample_to_binding = {
-        sample: binding for binding, samples in mapping.items() for sample in samples
-    }
-    sampler = GroupedBindingBatchSampler(
-        mapping,
-        binding_index=index,
-        guides_per_batch=2,
+    sampler = GuidanceFirstBatchSampler(
+        guide_catalog=catalog,
+        task_sample_index=_samples(),
+        guides_per_batch=1,
         queries_per_guide=2,
         seed=5,
-        binding_to_bucket=binding_to_bucket,
+        guide_to_bucket=buckets,
+        remainder_strategy="pad_mask",
         batch_block_size=2,
     )
-
     batches = list(sampler)
-    batch_buckets = []
-    for batch in batches:
-        bindings = {
-            sample_to_binding[
-                sample.sample_index if isinstance(sample, GuideSampleIndex) else sample
-            ]
-            for sample in batch
+
+    for start in range(0, len(batches), 2):
+        block = batches[start : start + 2]
+        block_buckets = {
+            buckets[batch[0].guide_index]
+            for batch in block
         }
-        buckets = {binding_to_bucket[binding] for binding in bindings}
-        assert len(buckets) == 1
-        batch_buckets.append(next(iter(buckets)))
-    assert all(
-        batch_buckets[index] == batch_buckets[index + 1]
-        for index in range(0, len(batch_buckets), 2)
-    )
-    assert dict(sampler.stats.bucket_batch_counts) == {"large": 4, "small": 4}
+        assert len(block_buckets) == 1
 
 
-def test_pad_mask_preserves_query_remainders_and_marks_padding_invalid():
-    index = GuideBindingIndex.from_bindings(
-        [
-            _SupportBinding(10, 11, 0, "doc-a"),
-            _SupportBinding(20, 21, 1, "doc-b"),
-        ]
+def test_bucket_count_weighting_gives_each_document_equal_first_batch_marginal():
+    documents = tuple(
+        SimpleNamespace(
+            document_id=f"weighted-{index}",
+            source_episode_index=index,
+            task_index=0,
+            task_instruction="shared task",
+        )
+        for index in range(12)
     )
-    sampler = GroupedBindingBatchSampler(
-        {0: (0, 1, 2), 1: (3,)},
-        binding_index=index,
+    catalog = GuideCatalog.from_document_catalog(
+        SimpleNamespace(catalog_digest="weighted", documents=documents)
+    )
+    task_samples = TaskSampleIndex.from_episode_records(
+        (
+            SimpleNamespace(
+                episode_index=0,
+                task_index=0,
+                dataset_from_index=0,
+                dataset_to_index=20,
+            ),
+        )
+    )
+    buckets = {
+        record.guide_index: ("small" if record.guide_index < 4 else "large")
+        for record in catalog.records
+    }
+    sampler = GuidanceFirstBatchSampler(
+        guide_catalog=catalog,
+        task_sample_index=task_samples,
         guides_per_batch=2,
-        queries_per_guide=2,
-        remainder_strategy="pad_mask",
-        seed=1,
+        queries_per_guide=1,
+        seed=17,
+        guide_to_bucket=buckets,
+        remainder_strategy="drop",
+    )
+    exposure = Counter()
+    for epoch in range(1200):
+        sampler.set_epoch(epoch)
+        exposure.update(sample.guide_index for sample in next(iter(sampler)))
+
+    assert set(exposure) == set(range(12))
+    assert max(exposure.values()) / min(exposure.values()) < 1.25
+
+
+def test_drop_sampler_rejects_unpromoted_small_bucket():
+    catalog = _catalog()
+    buckets = {
+        record.guide_index: ("orphan" if record.guide_index == 0 else "large")
+        for record in catalog.records
+    }
+    with pytest.raises(ValueError, match="promote it to a larger bucket"):
+        GuidanceFirstBatchSampler(
+            guide_catalog=catalog,
+            task_sample_index=_samples(),
+            guides_per_batch=2,
+            queries_per_guide=1,
+            guide_to_bucket=buckets,
+            remainder_strategy="drop",
+        )
+
+
+def test_pad_sampler_masks_queries_when_task_pool_is_smaller_than_q():
+    documents = tuple(
+        SimpleNamespace(
+            document_id=f"small-{index}",
+            source_episode_index=index,
+            task_index=0,
+            task_instruction="small task",
+        )
+        for index in range(2)
+    )
+    catalog = GuideCatalog.from_document_catalog(
+        SimpleNamespace(catalog_digest="small", documents=documents)
+    )
+    samples = TaskSampleIndex.from_episode_records(
+        (
+            SimpleNamespace(
+                episode_index=0,
+                task_index=0,
+                dataset_from_index=0,
+                dataset_to_index=2,
+            ),
+        ),
+        dataset_length=2,
     )
 
-    batches = list(sampler)
-    validity = [
-        sample.query_valid if isinstance(sample, GuideSampleIndex) else True
-        for batch in batches
-        for sample in batch
-    ]
-    raw_indices = [
-        sample.sample_index if isinstance(sample, GuideSampleIndex) else sample
-        for batch in batches
-        for sample in batch
-        if not isinstance(sample, GuideSampleIndex) or sample.query_valid
-    ]
+    with pytest.raises(ValueError, match="fewer than queries_per_guide"):
+        GuidanceFirstBatchSampler(
+            guide_catalog=catalog,
+            task_sample_index=samples,
+            guides_per_batch=2,
+            queries_per_guide=3,
+            remainder_strategy="drop",
+        )
 
-    assert sorted(raw_indices) == [0, 1, 2, 3]
-    assert sum(validity) == 4
-    assert sampler.stats.valid_query_samples == 4
-    assert sampler.stats.padded_query_slots == len(validity) - 4
-    assert sampler.stats.dropped_query_samples == 0
-
-
-def test_pad_mask_can_complete_final_guide_and_accumulation_dimensions():
-    index = GuideBindingIndex.from_bindings(
-        [_SupportBinding(10, 11, 0, "doc-a")]
+    batch = next(
+        iter(
+            GuidanceFirstBatchSampler(
+                guide_catalog=catalog,
+                task_sample_index=samples,
+                guides_per_batch=2,
+                queries_per_guide=3,
+                remainder_strategy="pad_mask",
+            )
+        )
     )
-    sampler = GroupedBindingBatchSampler(
-        {0: (0, 1, 2)},
-        binding_index=index,
-        guides_per_batch=2,
-        queries_per_guide=2,
-        remainder_strategy="pad_mask",
-        batch_block_size=2,
-    )
-
-    batches = list(sampler)
-
-    assert len(batches) % 2 == 0
-    assert sampler.stats.valid_query_samples == 3
-    assert sampler.stats.dropped_query_samples == 0
-    assert sampler.stats.padded_query_slots == len(batches) * 4 - 3
+    first_group = batch[:3]
+    assert [sample.query_valid for sample in first_group] == [True, True, False]
+    assert len({sample.sample_index for sample in first_group[:2]}) == 2
+    assert first_group[2].sample_index == first_group[1].sample_index

@@ -11,9 +11,12 @@ from typing import Any
 
 import jax
 import numpy as np
-from openpi.models.guide_inputs import query_mask_or_ones, validate_guide_conditioned_batch
+
+from openpi.models.guide_inputs import query_mask_or_ones
+from openpi.models.guide_inputs import validate_guide_conditioned_batch
 from openpi.training.guide_buckets import parse_guide_length_bucket
-from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig, create_robodojo_guided_data_loader
+from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
+from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -86,12 +89,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--native-config-name", required=True)
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--dataset-artifact", type=Path, required=True)
     parser.add_argument("--documents-root", type=Path, required=True)
-    parser.add_argument("--pairs-artifact", type=Path, required=True)
-    parser.add_argument("--split-manifest", type=Path, required=True)
-    parser.add_argument("--batch-size", type=int, required=True)
     parser.add_argument("--guides-per-batch", type=int, required=True)
+    parser.add_argument("--queries-per-guide", type=int, required=True)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--worker-torch-threads", type=int, default=1)
@@ -103,15 +103,18 @@ def _parser() -> argparse.ArgumentParser:
         "--guide-length-bucket",
         action="append",
         default=[],
-        metavar="MAX_UNITS:MAX_FRAMES",
+        metavar="MAX_UNITS:MAX_BOUNDARIES",
+        help="repeat to override the automatic observed-length buckets",
     )
-    parser.add_argument("--max-frames", type=int, required=True)
+    parser.add_argument("--max-boundaries", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
-    parser.add_argument("--max-text-tokens", type=int, required=True)
+    parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
+    parser.add_argument("--max-transition-text-tokens", type=int, required=True)
+    parser.add_argument("--guide-boundary-num-queries", type=int, default=8)
+    parser.add_argument("--guide-transition-num-queries", type=int, default=4)
     parser.add_argument("--warmup-batches", type=int, default=8)
     parser.add_argument("--measured-batches", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--profile", default="actuator")
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -122,22 +125,21 @@ def main(argv: list[str] | None = None) -> int:
     config = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
-        dataset_artifact_path=args.dataset_artifact,
         documents_root=args.documents_root,
-        pairs_artifact_path=args.pairs_artifact,
-        batch_size=args.batch_size,
         guides_per_batch=args.guides_per_batch,
+        queries_per_guide=args.queries_per_guide,
         seed=args.seed,
-        profile=args.profile,
-        max_frames=args.max_frames,
+        max_boundaries=args.max_boundaries,
         max_units=args.max_units,
-        max_text_tokens=args.max_text_tokens,
+        max_boundary_text_tokens=args.max_boundary_text_tokens,
+        max_transition_text_tokens=args.max_transition_text_tokens,
+        guide_boundary_num_queries=args.guide_boundary_num_queries,
+        guide_transition_num_queries=args.guide_transition_num_queries,
         num_workers=args.num_workers,
         prefetch_factor=args.prefetch_factor,
         worker_torch_threads=args.worker_torch_threads,
         guide_cache_entries=args.guide_cache_entries,
         guide_cache_max_bytes=args.guide_cache_max_bytes,
-        split_manifest_path=args.split_manifest,
         require_all_tasks=True,
         guide_length_buckets=(tuple(parse_guide_length_bucket(spec) for spec in args.guide_length_bucket) or None),
         remainder_strategy=args.remainder_strategy,

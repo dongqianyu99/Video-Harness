@@ -35,7 +35,8 @@ def test_guide_pi0_calls_parent_once_and_adds_only_guide_encoder(monkeypatch) ->
             input_dim,
             output_dim,
             *,
-            num_queries,
+            boundary_num_queries,
+            transition_num_queries,
             width,
             num_heads,
             ffn_hidden_dim,
@@ -45,7 +46,8 @@ def test_guide_pi0_calls_parent_once_and_adds_only_guide_encoder(monkeypatch) ->
                 {
                     "input_dim": input_dim,
                     "output_dim": output_dim,
-                    "num_queries": num_queries,
+                    "boundary_num_queries": boundary_num_queries,
+                    "transition_num_queries": transition_num_queries,
                     "width": width,
                     "num_heads": num_heads,
                     "ffn_hidden_dim": ffn_hidden_dim,
@@ -79,7 +81,8 @@ def test_guide_pi0_calls_parent_once_and_adds_only_guide_encoder(monkeypatch) ->
     )
 
     config = guide_pi0_config.GuidePi0Config(
-        guide_num_queries=4,
+        guide_boundary_num_queries=6,
+        guide_transition_num_queries=3,
         guide_resampler_width=512,
         guide_resampler_num_heads=8,
         guide_resampler_ffn_hidden_dim=1024,
@@ -98,7 +101,8 @@ def test_guide_pi0_calls_parent_once_and_adds_only_guide_encoder(monkeypatch) ->
     encoder_kwargs = encoder_calls[0]
     assert encoder_kwargs["input_dim"] == 2048
     assert encoder_kwargs["output_dim"] == 2048
-    assert encoder_kwargs["num_queries"] == config.guide_num_queries
+    assert encoder_kwargs["boundary_num_queries"] == config.guide_boundary_num_queries
+    assert encoder_kwargs["transition_num_queries"] == config.guide_transition_num_queries
     assert encoder_kwargs["width"] == config.guide_resampler_width
     assert encoder_kwargs["num_heads"] == config.guide_resampler_num_heads
     assert encoder_kwargs["ffn_hidden_dim"] == config.guide_resampler_ffn_hidden_dim

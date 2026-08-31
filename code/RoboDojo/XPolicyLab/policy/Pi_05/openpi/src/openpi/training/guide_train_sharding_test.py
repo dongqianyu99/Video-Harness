@@ -30,13 +30,18 @@ def _batch(*, groups: int = 1, queries: int = 4) -> GuideConditionedBatch:
         tokenized_prompt_mask=None,
     )
     guide = GuideInput(
-        images=jnp.ones((groups, 2, 2, 2, 3), dtype=jnp.float32),
-        image_mask=jnp.ones((groups, 2), dtype=jnp.bool_),
-        text_tokens=jnp.ones((groups, 1, 4), dtype=jnp.int32),
-        text_mask=jnp.ones((groups, 1, 4), dtype=jnp.bool_),
+        boundary_images=jnp.ones((groups, 2, 3, 2, 2, 3), dtype=jnp.float32),
+        boundary_image_mask=jnp.ones((groups, 2, 3), dtype=jnp.bool_),
+        boundary_text_tokens=jnp.ones((groups, 2, 3, 4), dtype=jnp.int32),
+        boundary_text_mask=jnp.ones((groups, 2, 3, 4), dtype=jnp.bool_),
+        transition_text_tokens=jnp.ones((groups, 1, 4), dtype=jnp.int32),
+        transition_text_mask=jnp.ones((groups, 1, 4), dtype=jnp.bool_),
+        boundary_mask=jnp.ones((groups, 2), dtype=jnp.bool_),
         unit_mask=jnp.ones((groups, 1), dtype=jnp.bool_),
-        before_slot=jnp.zeros((groups, 1), dtype=jnp.int32),
-        after_slot=jnp.ones((groups, 1), dtype=jnp.int32),
+        memory_source_kind=jnp.zeros((groups, 20), dtype=jnp.int32),
+        memory_source_index=jnp.zeros((groups, 20), dtype=jnp.int32),
+        memory_source_offset=jnp.zeros((groups, 20), dtype=jnp.int32),
+        memory_mask=jnp.ones((groups, 20), dtype=jnp.bool_),
     )
     return GuideConditionedBatch(
         observation=observation,
@@ -56,7 +61,7 @@ def test_sharding_replicates_g_and_guide_and_shards_q_when_mesh_has_data_axes() 
 
     placed = put_guided_batch(_batch(queries=4), sharding)
     assert placed.actions.shape == (1, 4, 3, 2)
-    assert placed.guide.images.shape == (1, 2, 2, 2, 3)
+    assert placed.guide.boundary_images.shape == (1, 2, 3, 2, 2, 3)
 
 
 def test_nontrivial_mesh_uses_none_for_g_and_data_axes_for_q(monkeypatch) -> None:
@@ -74,7 +79,7 @@ def test_nontrivial_mesh_uses_none_for_g_and_data_axes_for_q(monkeypatch) -> Non
     action_spec = sharding.actions.spec
     image_spec = sharding.observation.images["base_0_rgb"].spec
     state_spec = sharding.observation.state.spec
-    guide_spec = sharding.guide.images.spec
+    guide_spec = sharding.guide.boundary_images.spec
     expected_query_spec = jax.sharding.PartitionSpec(None, stock_sharding.DATA_AXIS)
     assert action_spec == expected_query_spec
     assert image_spec == expected_query_spec

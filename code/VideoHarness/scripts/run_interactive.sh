@@ -236,13 +236,9 @@ case "${scale_choice}" in
     ;;
   4)
     max_tasks=$(prompt_default "Maximum task count" "1")
-    episodes_per_task=$(prompt_default "Episodes per task (at least 2)" "3")
+    episodes_per_task=$(prompt_default "Episodes per task" "3")
     require_positive_integer "${max_tasks}" "Maximum task count"
     require_positive_integer "${episodes_per_task}" "Episodes per task"
-    if (( episodes_per_task < 2 )); then
-      echo "Episodes per task must be at least 2 for support/query pairing." >&2
-      exit 2
-    fi
     build_limits=(--max-tasks "${max_tasks}" --episodes-per-task "${episodes_per_task}")
     limit_documents=$(prompt_default "Documents to annotate; 0 means all built documents" "1")
     limit_units=$(prompt_default "Units per annotated document; 0 means all units" "3")
@@ -286,7 +282,6 @@ uv run video-harness build \
   --dataset-root "${dataset_root}" \
   --output-root "${output_root}" \
   --sample-hz 1 \
-  --supports-per-query 1 \
   "${build_limits[@]}"
 uv run video-harness decode-smoke \
   --dataset-root "${dataset_root}" \
@@ -321,5 +316,4 @@ echo "Video Harness completed successfully."
 echo "Dataset:   ${dataset_root}"
 echo "Documents: ${output_root}/documents.jsonl"
 echo "Evidence:  ${annotation_output}"
-echo "Pairs:     ${output_root}/pairs.jsonl"
 echo "Review the evidence report and manually audit a sample before training."

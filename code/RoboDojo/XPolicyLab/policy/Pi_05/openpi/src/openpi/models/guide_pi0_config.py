@@ -19,7 +19,8 @@ class GuidePi0Config(pi0_config.Pi0Config):
 
     pi05: bool = True
 
-    guide_num_queries: int = 8
+    guide_boundary_num_queries: int = 8
+    guide_transition_num_queries: int = 4
     guide_resampler_width: int = 1024
     guide_resampler_num_heads: int = 8
     guide_resampler_ffn_hidden_dim: int | None = None
@@ -30,8 +31,11 @@ class GuidePi0Config(pi0_config.Pi0Config):
         if not self.pi05:
             raise ValueError("GuidePi0Config only supports pi05=True")
 
-        if self.guide_num_queries <= 0:
-            raise ValueError("guide_num_queries must be positive")
+        if self.guide_boundary_num_queries <= 0:
+            raise ValueError("guide_boundary_num_queries must be positive")
+
+        if self.guide_transition_num_queries <= 0:
+            raise ValueError("guide_transition_num_queries must be positive")
 
         if self.guide_resampler_width <= 0:
             raise ValueError("guide_resampler_width must be positive")

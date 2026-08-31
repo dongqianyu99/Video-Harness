@@ -5,249 +5,261 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 
-from openpi.models.guide_resampler import UnitResampler
-from openpi.models.guide_tokens import assemble_unit_tokens
+from openpi.models.guide_resampler import PerceiverResampler
+from openpi.models.guide_tokens import NUM_BOUNDARY_ROLES
+from openpi.models.guide_tokens import NUM_MEMORY_KINDS
+from openpi.models.guide_tokens import NUM_TRANSITION_ROLES
+from openpi.models.guide_tokens import assemble_boundary_tokens
+from openpi.models.guide_tokens import assemble_transition_tokens
+from openpi.models.guide_tokens import pack_guide_tokens
 
 
 @struct.dataclass
 class GuideMemory:
-    """Flattened Guide memory for one grouped Guide bank."""
-
-    tokens: jax.Array  # [G, U * K, D]
-    token_mask: jax.Array  # [G, U * K]
+    tokens: jax.Array  # [G, S, D]
+    token_mask: jax.Array  # [G, S]
 
 
 @struct.dataclass
 class GuideBackboneFeatures:
-    """shared-backbone features for Guide images and text."""
-
-    frame_tokens: jax.Array  # [G, F, P, D]
-    text_embeddings: jax.Array  # [G, U, T, D]
-
-
-def _validate_inputs(
-    unit_memory: jax.Array,
-    unit_mask: jax.Array,
-) -> tuple[int, int, int, int]:
-    """Validate unit memory inputs and return G, U, K, and D."""
-
-    if unit_memory.ndim != 4:
-        raise ValueError(f"unit_memory must have shape [G, U, K, D], got {unit_memory.shape}")
-
-    if unit_mask.ndim != 2:
-        raise ValueError(f"unit_mask must have shape [G, U], got {unit_mask.shape}")
-
-    groups, units, queries, width = unit_memory.shape
-
-    if unit_mask.shape != (groups, units):
-        raise ValueError(f"unit_mask must have shape {(groups, units)}, got {unit_mask.shape}")
-
-    if not jnp.issubdtype(unit_memory.dtype, jnp.floating):
-        raise ValueError(f"unit_memory must have a floating dtype, got {unit_memory.dtype}")
-
-    if unit_mask.dtype != jnp.bool_:
-        raise ValueError(f"unit_mask must have bool dtype, got {unit_mask.dtype}")
-
-    return groups, units, queries, width
-
-
-def _flatten_memory_and_mask(
-    unit_memory: jax.Array,
-    unit_mask: jax.Array,
-) -> tuple[jax.Array, jax.Array]:
-    """Flatten unit/query axes and apply the repeated unit masks."""
-
-    groups, units, queries, width = unit_memory.shape
-
-    tokens = unit_memory.reshape(
-        groups,
-        units * queries,
-        width,
-    )
-
-    token_mask = jnp.repeat(
-        unit_mask,
-        queries,
-        axis=1,
-    )
-
-    tokens = jnp.where(
-        token_mask[..., None],
-        tokens,
-        jnp.zeros_like(tokens),
-    )
-
-    return tokens, token_mask
-
-
-def flatten_unit_memory(
-    unit_memory: jax.Array,
-    unit_mask: jax.Array,
-) -> GuideMemory:
-    """Flatten per-unit memory into ordered GuideMemory tokens."""
-
-    _validate_inputs(
-        unit_memory,
-        unit_mask,
-    )
-
-    tokens, token_mask = _flatten_memory_and_mask(
-        unit_memory,
-        unit_mask,
-    )
-
-    return GuideMemory(
-        tokens=tokens,
-        token_mask=token_mask,
-    )
+    boundary_image_tokens: jax.Array  # [G, F, V, P, D]
+    boundary_text_embeddings: jax.Array  # [G, F, V, T_B, D]
+    transition_text_embeddings: jax.Array  # [G, U, T_T, D]
 
 
 class GuideFeatureEncoder(nnx.Module):
-    """Encode pre-embedded Guide features with a shared per-unit resampler."""
+    """Encode Boundary evidence and transition text into interleaved Guide memory."""
 
     def __init__(
         self,
         input_dim: int = 2048,
         output_dim: int = 2048,
         *,
-        num_queries: int = 8,
+        boundary_num_queries: int = 8,
+        transition_num_queries: int = 4,
         width: int = 1024,
         num_heads: int = 8,
         ffn_hidden_dim: int | None = None,
         rngs: nnx.Rngs,
     ):
-        self.unit_resampler = UnitResampler(
+        self.boundary_resampler = PerceiverResampler(
             input_dim=input_dim,
             output_dim=output_dim,
-            num_queries=num_queries,
+            num_queries=boundary_num_queries,
             width=width,
             num_heads=num_heads,
             ffn_hidden_dim=ffn_hidden_dim,
+            num_roles=NUM_BOUNDARY_ROLES,
             rngs=rngs,
         )
-
+        self.transition_resampler = PerceiverResampler(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            num_queries=transition_num_queries,
+            width=width,
+            num_heads=num_heads,
+            ffn_hidden_dim=ffn_hidden_dim,
+            num_roles=NUM_TRANSITION_ROLES,
+            rngs=rngs,
+        )
+        self.memory_type_embeddings = nnx.Param(
+            nnx.initializers.normal(stddev=0.02)(
+                rngs.params(),
+                (NUM_MEMORY_KINDS, output_dim),
+                jnp.float32,
+            )
+        )
 
     def __call__(
         self,
-        frame_tokens: jax.Array,
-        frame_mask: jax.Array,
-        text_embeddings: jax.Array,
-        text_mask: jax.Array,
+        boundary_image_tokens: jax.Array,
+        boundary_image_mask: jax.Array,
+        boundary_text_embeddings: jax.Array,
+        boundary_text_mask: jax.Array,
+        transition_text_embeddings: jax.Array,
+        transition_text_mask: jax.Array,
+        boundary_mask: jax.Array,
         unit_mask: jax.Array,
-        before_slot: jax.Array,
-        after_slot: jax.Array,
+        memory_source_kind: jax.Array,
+        memory_source_index: jax.Array,
+        memory_source_offset: jax.Array,
+        memory_mask: jax.Array,
     ) -> GuideMemory:
-        _unit_tokens = assemble_unit_tokens(
-            frame_tokens,  # [G, F, P, D_in]
-            frame_mask,
-            text_embeddings,  # [G, U, T, D_in]
-            text_mask,
-            unit_mask,
-            before_slot,
-            after_slot,
+        boundary_tokens = assemble_boundary_tokens(
+            boundary_image_tokens,
+            boundary_image_mask,
+            boundary_text_embeddings,
+            boundary_text_mask,
+            boundary_mask,
         )
-
-        _unit_memory = self.unit_resampler(
-            _unit_tokens.tokens,  # [G, U, 2P+T, D_in]
-            _unit_tokens.token_mask,
-            _unit_tokens.role_ids,
+        transition_tokens = assemble_transition_tokens(
+            transition_text_embeddings,
+            transition_text_mask,
             unit_mask,
-        )  # [G, U, K, D_out]
-
-        return flatten_unit_memory(_unit_memory, unit_mask)
+        )
+        boundary_memory = self.boundary_resampler(
+            boundary_tokens.tokens,
+            boundary_tokens.token_mask,
+            boundary_tokens.role_ids,
+            boundary_mask,
+        )
+        transition_memory = self.transition_resampler(
+            transition_tokens.tokens,
+            transition_tokens.token_mask,
+            transition_tokens.role_ids,
+            unit_mask,
+        )
+        packed = pack_guide_tokens(
+            boundary_memory,
+            transition_memory,
+            boundary_mask,
+            unit_mask,
+            memory_source_kind,
+            memory_source_index,
+            memory_source_offset,
+            memory_mask,
+            self.memory_type_embeddings.value,
+        )
+        return GuideMemory(tokens=packed.tokens, token_mask=packed.token_mask)
 
 
 def _validate_shared_feature_inputs(
-    images: jax.Array,
-    text_token_ids: jax.Array,
-) -> tuple[int, int, int, int, int, int]:
-    """Validate Guide image and text inputs before shared encoding."""
-
-    if images.ndim != 5:
-        raise ValueError(f"images must have shape [G, F, H, W, 3], got {images.shape}")
-
-    if text_token_ids.ndim != 3:
-        raise ValueError(f"text_token_ids must have shape [G, U, T], got {text_token_ids.shape}")
-
-    groups, frames, height, image_width, channels = images.shape
-    text_groups, units, text_tokens = text_token_ids.shape
-
-    if channels != 3:
-        raise ValueError(f"images must have 3 channels, got {channels}")
-
-    if text_groups != groups:
+    boundary_images: jax.Array,
+    boundary_text_token_ids: jax.Array,
+    transition_text_token_ids: jax.Array,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    if boundary_images.ndim != 6:
         raise ValueError(
-            "images and text_token_ids must have the same group count: "
-            f"images G={groups}, text_token_ids G={text_groups}"
+            "boundary_images must have shape [G, F, V, H, W, 3], got "
+            f"{boundary_images.shape}"
         )
-
-    if not jnp.issubdtype(images.dtype, jnp.floating):
-        raise ValueError(f"images must have a floating dtype, got {images.dtype}")
-
-    if not jnp.issubdtype(text_token_ids.dtype, jnp.integer):
-        raise ValueError(f"text_token_ids must have an integer dtype, got {text_token_ids.dtype}")
-
-    return groups, frames, height, image_width, units, text_tokens
+    if boundary_text_token_ids.ndim != 4:
+        raise ValueError(
+            "boundary_text_token_ids must have shape [G, F, V, T_B], got "
+            f"{boundary_text_token_ids.shape}"
+        )
+    if transition_text_token_ids.ndim != 3:
+        raise ValueError(
+            "transition_text_token_ids must have shape [G, U, T_T], got "
+            f"{transition_text_token_ids.shape}"
+        )
+    groups, boundaries, views, height, image_width, channels = boundary_images.shape
+    text_groups, text_boundaries, text_views, boundary_text_tokens = (
+        boundary_text_token_ids.shape
+    )
+    transition_groups, units, transition_text_tokens = transition_text_token_ids.shape
+    if views != 3 or channels != 3:
+        raise ValueError(
+            f"boundary_images must contain exactly 3 RGB views, got {boundary_images.shape}"
+        )
+    if (text_groups, text_boundaries, text_views) != (groups, boundaries, views):
+        raise ValueError("Boundary images and Boundary text must share G, F, and V")
+    if transition_groups != groups:
+        raise ValueError("Boundary and transition inputs must share G")
+    if not jnp.issubdtype(boundary_images.dtype, jnp.floating):
+        raise ValueError(
+            f"boundary_images must have a floating dtype, got {boundary_images.dtype}"
+        )
+    if not jnp.issubdtype(boundary_text_token_ids.dtype, jnp.integer):
+        raise ValueError("boundary_text_token_ids must have an integer dtype")
+    if not jnp.issubdtype(transition_text_token_ids.dtype, jnp.integer):
+        raise ValueError("transition_text_token_ids must have an integer dtype")
+    return (
+        groups,
+        boundaries,
+        views,
+        height,
+        image_width,
+        units,
+        boundary_text_tokens,
+        transition_text_tokens,
+    )
 
 
 def encode_shared_guide_features(
-    images: jax.Array,
-    text_token_ids: jax.Array,
+    boundary_images: jax.Array,
+    boundary_text_token_ids: jax.Array,
+    transition_text_token_ids: jax.Array,
     *,
     image_encoder,
     text_embedder,
 ) -> GuideBackboneFeatures:
-    """Encode Guide images and text with externally owned shared backbones."""
+    """Encode three-view Boundary evidence and transition text with Pi0.5 backbones."""
 
-    groups, frames, height, image_width, units, text_tokens = (
-        _validate_shared_feature_inputs(images, text_token_ids)
+    (
+        groups,
+        boundaries,
+        views,
+        height,
+        image_width,
+        units,
+        boundary_text_tokens,
+        transition_text_tokens,
+    ) = _validate_shared_feature_inputs(
+        boundary_images,
+        boundary_text_token_ids,
+        transition_text_token_ids,
     )
+    flat_images = boundary_images.reshape(
+        groups * boundaries * views,
+        height,
+        image_width,
+        3,
+    )
+    flat_boundary_text = boundary_text_token_ids.reshape(
+        groups * boundaries * views,
+        boundary_text_tokens,
+    )
+    flat_transition_text = transition_text_token_ids.reshape(
+        groups * units,
+        transition_text_tokens,
+    )
+    flat_image_tokens, _ = image_encoder(flat_images, train=False)
+    flat_boundary_text_embeddings = text_embedder(flat_boundary_text, method="embed")
+    flat_transition_text_embeddings = text_embedder(flat_transition_text, method="embed")
 
-    flat_images = images.reshape(groups * frames, height, image_width, 3)
-
-    flat_text_token_ids = text_token_ids.reshape(groups * units, text_tokens)
-
-    _flat_frame_tokens, _ = image_encoder(flat_images, train=False)
-
-    _flat_text_embeddings = text_embedder(flat_text_token_ids, method="embed")
-
-    if _flat_frame_tokens.ndim != 3:
-        raise ValueError(f"image_encoder output must have shape [G*F, P, D], got {_flat_frame_tokens.shape}")
-
-    expected_frame_batch = groups * frames
-    frame_batch, patches, image_width = _flat_frame_tokens.shape
-
-    if frame_batch != expected_frame_batch:
+    if flat_image_tokens.ndim != 3:
         raise ValueError(
-            f"image_encoder output leading dimension must equal G*F: expected {expected_frame_batch}, got {frame_batch}"
+            "image_encoder output must have shape [G*F*V, P, D], got "
+            f"{flat_image_tokens.shape}"
         )
-
-    if _flat_text_embeddings.ndim != 3:
-        raise ValueError(f"text_embedder output must have shape [G*U, T, D], got {_flat_text_embeddings.shape}")
-
-    expected_text_batch = groups * units
-    text_batch, output_text_tokens, text_width = _flat_text_embeddings.shape
-
-    if text_batch != expected_text_batch:
-        raise ValueError(
-            f"text_embedder output leading dimension must equal G*U: expected {expected_text_batch}, got {text_batch}"
-        )
-
-    if output_text_tokens != text_tokens:
-        raise ValueError(
-            f"text_embedder output token length must match input T: expected {text_tokens}, got {output_text_tokens}"
-        )
-
-    if text_width != image_width:
-        raise ValueError(
-            "image and text encoder outputs must have the same width: "
-            f"image width={image_width}, text width={text_width}"
-        )
-
-    frame_tokens = _flat_frame_tokens.reshape(groups, frames, patches, image_width)
-    text_embeddings = _flat_text_embeddings.reshape(groups, units, text_tokens, text_width)
+    image_batch, patches, image_dim = flat_image_tokens.shape
+    if image_batch != groups * boundaries * views:
+        raise ValueError("image_encoder output leading dimension must equal G*F*V")
+    if flat_boundary_text_embeddings.shape[:2] != (
+        groups * boundaries * views,
+        boundary_text_tokens,
+    ):
+        raise ValueError("Boundary text embedding shape does not match token ids")
+    if flat_transition_text_embeddings.shape[:2] != (
+        groups * units,
+        transition_text_tokens,
+    ):
+        raise ValueError("Transition text embedding shape does not match token ids")
+    boundary_text_dim = flat_boundary_text_embeddings.shape[-1]
+    transition_text_dim = flat_transition_text_embeddings.shape[-1]
+    if boundary_text_dim != image_dim or transition_text_dim != image_dim:
+        raise ValueError("Image, Boundary text, and transition text widths must match")
 
     return GuideBackboneFeatures(
-        frame_tokens=frame_tokens,  # [G, F, P, D]
-        text_embeddings=text_embeddings,  # [G, U, T, D]
+        boundary_image_tokens=flat_image_tokens.reshape(
+            groups,
+            boundaries,
+            views,
+            patches,
+            image_dim,
+        ),
+        boundary_text_embeddings=flat_boundary_text_embeddings.reshape(
+            groups,
+            boundaries,
+            views,
+            boundary_text_tokens,
+            image_dim,
+        ),
+        transition_text_embeddings=flat_transition_text_embeddings.reshape(
+            groups,
+            units,
+            transition_text_tokens,
+            image_dim,
+        ),
     )

@@ -5,6 +5,7 @@
 """
 
 import importlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,10 @@ def _resolve_pi05_model_root(model_cfg: dict[str, Any]) -> Path:
     checkpoint_root = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
     if not checkpoint_root.is_dir():
         return checkpoint_root
+    if (checkpoint_root / "run.json").is_file() and (
+        checkpoint_root / "checkpoints"
+    ).is_dir():
+        checkpoint_root = checkpoint_root / "checkpoints"
 
     candidate_dirs = []
     if (checkpoint_root / "params").exists() or (checkpoint_root / "assets").exists():
@@ -84,6 +89,28 @@ def _resolve_pi05_model_root(model_cfg: dict[str, Any]) -> Path:
     return candidate_dirs[0]
 
 
+def _guided_run_capacities(model_root: Path) -> tuple[int, int] | None:
+    for candidate in (model_root, model_root.parent, model_root.parent.parent):
+        manifest_path = candidate / "run.json"
+        checkpoints_root = candidate / "checkpoints"
+        if not manifest_path.is_file() or not (
+            model_root == checkpoints_root or checkpoints_root in model_root.parents
+        ):
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            guided_data = manifest["config"]["guided_data"]
+            return (
+                int(guided_data["guide_boundary_num_queries"]),
+                int(guided_data["guide_transition_num_queries"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Guided run manifest has invalid capacity fields: {manifest_path}"
+            ) from exc
+    return None
+
+
 class Model(ModelTemplate):
     def __init__(self, model_cfg: dict[str, Any]):
         self.task_name = model_cfg["task_name"]
@@ -94,6 +121,12 @@ class Model(ModelTemplate):
         self.observation_window: dict[str, Any] | None = None
         self._latest_env_idx_list: list[int] = [0]
         self.guidance_enabled = bool(model_cfg.get("guidance_enabled", False))
+        self._guide_boundary_num_queries = int(
+            model_cfg.get("guidance_boundary_num_queries", 8)
+        )
+        self._guide_transition_num_queries = int(
+            model_cfg.get("guidance_transition_num_queries", 4)
+        )
         self._guide_session = None
         self._prepared_case_id: str | None = None
 
@@ -103,8 +136,10 @@ class Model(ModelTemplate):
             self._guide_session = self._create_guide_session(model_cfg)
 
     @staticmethod
-    def _positive_config_int(model_cfg: dict[str, Any], key: str) -> int:
-        value = model_cfg.get(key)
+    def _positive_config_int(
+        model_cfg: dict[str, Any], key: str, *, default: int | None = None
+    ) -> int:
+        value = model_cfg.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{key} must be a positive integer in guided eval mode")
         return value
@@ -123,18 +158,73 @@ class Model(ModelTemplate):
 
         return session_module.TaskGuideSession(
             documents_root=absolute_path("guidance_documents_root"),
-            episodes_path=absolute_path("guidance_episodes_path"),
             dataset_root=absolute_path("guidance_dataset_root"),
-            profile=model_cfg.get("guidance_profile", "actuator"),
-            max_frames=self._positive_config_int(model_cfg, "guidance_max_frames"),
+            max_boundaries=self._positive_config_int(
+                model_cfg, "guidance_max_boundaries"
+            ),
             max_units=self._positive_config_int(model_cfg, "guidance_max_units"),
-            max_text_tokens=self._positive_config_int(model_cfg, "guidance_max_text_tokens"),
+            max_boundary_text_tokens=self._positive_config_int(
+                model_cfg, "guidance_max_boundary_text_tokens"
+            ),
+            max_transition_text_tokens=self._positive_config_int(
+                model_cfg, "guidance_max_transition_text_tokens"
+            ),
+            boundary_num_queries=self._positive_config_int(
+                {
+                    "guidance_boundary_num_queries": self._guide_boundary_num_queries
+                },
+                "guidance_boundary_num_queries",
+            ),
+            transition_num_queries=self._positive_config_int(
+                {
+                    "guidance_transition_num_queries": self._guide_transition_num_queries
+                },
+                "guidance_transition_num_queries",
+            ),
         )
 
     def get_model(self, model_cfg: dict[str, Any]):
         train_config_name = model_cfg.get("train_config_name", "pi05_aloha")
         repo_id = model_cfg.get("repo_id", "1118")
         model_root = _resolve_pi05_model_root(model_cfg)
+
+        if self.guidance_enabled:
+            self._guide_boundary_num_queries = getattr(
+                self,
+                "_guide_boundary_num_queries",
+                int(model_cfg.get("guidance_boundary_num_queries", 8)),
+            )
+            self._guide_transition_num_queries = getattr(
+                self,
+                "_guide_transition_num_queries",
+                int(model_cfg.get("guidance_transition_num_queries", 4)),
+            )
+            manifest_capacities = _guided_run_capacities(model_root)
+            configured_capacities = (
+                self._guide_boundary_num_queries,
+                self._guide_transition_num_queries,
+            )
+            explicit_capacity = any(
+                key in model_cfg
+                for key in (
+                    "guidance_boundary_num_queries",
+                    "guidance_transition_num_queries",
+                )
+            )
+            if (
+                manifest_capacities is not None
+                and explicit_capacity
+                and configured_capacities != manifest_capacities
+            ):
+                raise ValueError(
+                    "Guided evaluation capacity does not match the run manifest: "
+                    f"configured={configured_capacities}, manifest={manifest_capacities}"
+                )
+            if manifest_capacities is not None:
+                (
+                    self._guide_boundary_num_queries,
+                    self._guide_transition_num_queries,
+                ) = manifest_capacities
 
         config = _config.get_config(train_config_name)
         norm_stats = None
@@ -147,6 +237,18 @@ class Model(ModelTemplate):
                 config,
                 str(model_root),
                 norm_stats=norm_stats,
+                guide_boundary_num_queries=self._positive_config_int(
+                    {
+                        "guidance_boundary_num_queries": self._guide_boundary_num_queries
+                    },
+                    "guidance_boundary_num_queries",
+                ),
+                guide_transition_num_queries=self._positive_config_int(
+                    {
+                        "guidance_transition_num_queries": self._guide_transition_num_queries
+                    },
+                    "guidance_transition_num_queries",
+                ),
             )
         return _policy_config.create_trained_policy(config, str(model_root), norm_stats=norm_stats)
 
@@ -161,6 +263,7 @@ class Model(ModelTemplate):
         return {
             "task_name": self.task_name,
             "guidance_prepared": self._guide_session.guide is not None,
+            "guidance": self._guide_session.identity,
         }
 
     def _ensure_task_guide(self, obs_list: list[dict[str, Any]]) -> None:
@@ -218,7 +321,8 @@ class Model(ModelTemplate):
         self._latest_env_idx_list = [0]
 
     def on_trial_end(self, result=None):
-        del result
+        if self.guidance_enabled and isinstance(result, dict):
+            result.setdefault("guidance", self._guide_session.identity)
         self.observation_window = None
         self._latest_env_idx_list = [0]
 

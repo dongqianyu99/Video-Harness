@@ -12,20 +12,23 @@ from typing import Any
 import flax.nnx as nnx
 import jax
 import numpy as np
-from openpi.models.guide_inputs import GuideConditionedBatch, validate_guide_conditioned_batch
+
+from openpi.models.guide_inputs import GuideConditionedBatch
+from openpi.models.guide_inputs import validate_guide_conditioned_batch
 from openpi.models.guide_pi0 import GuidePi0
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.training.guide_buckets import parse_guide_length_bucket
 from openpi.training.guide_data_loader import prefetch_guided_batches
-from openpi.training.guide_run import (
-    GuidedRunLayout,
-    configure_guided_run_logging,
-    finish_guided_wandb,
-    init_guided_wandb,
-    prepare_guided_run_layout,
-    write_guided_run_manifest,
-)
-from openpi.training.guide_train_config import GuidedTrainRunConfig, resolve_guided_train_config
+from openpi.training.guide_run import GuidedResumeContractError
+from openpi.training.guide_run import GuidedRunLayout
+from openpi.training.guide_run import configure_guided_run_logging
+from openpi.training.guide_run import finish_guided_wandb
+from openpi.training.guide_run import init_guided_wandb
+from openpi.training.guide_run import prepare_guided_run_layout
+from openpi.training.guide_run import validate_guided_run_resume
+from openpi.training.guide_run import write_guided_run_manifest
+from openpi.training.guide_train_config import GuidedTrainRunConfig
+from openpi.training.guide_train_config import resolve_guided_train_config
 from openpi.training.guide_train_sharding import make_guided_batch_sharding
 from openpi.training.guide_train_step import guided_accumulated_train_step
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
@@ -48,6 +51,13 @@ def _validate_runtime_config(run_config: GuidedTrainRunConfig, resolved_config: 
         raise ValueError("resolved guided training config must use GuidePi0Config")
     if not resolved_config.model.pi05:
         raise ValueError("resolved guided training config must use GuidePi0 Pi05")
+    if (
+        resolved_config.model.guide_boundary_num_queries
+        != run_config.guided_data.guide_boundary_num_queries
+        or resolved_config.model.guide_transition_num_queries
+        != run_config.guided_data.guide_transition_num_queries
+    ):
+        raise ValueError("resolved Guide capacity does not match guided data config")
     if resolved_config.batch_size != run_config.guided_data.batch_size:
         raise ValueError(
             "resolved TrainConfig.batch_size does not match guided_data.batch_size: "
@@ -105,16 +115,16 @@ def restore_guided_state(
     return _load_checkpoints().restore_state(checkpoint_manager, state, data_loader, step)
 
 
-def _binding_log(data_loader: Any) -> dict[str, Any]:
-    binding_index = getattr(data_loader, "binding_index", None)
-    if binding_index is None:
-        return {"count": 0, "tasks": 0, "support_documents": 0, "examples": []}
-    records = tuple(binding_index.records)
+def _catalog_log(data_loader: Any) -> dict[str, Any]:
+    catalog = getattr(data_loader, "guide_catalog", None)
+    if catalog is None:
+        return {"count": 0, "tasks": 0, "examples": []}
+    records = tuple(catalog.records)
     examples = [
         {
-            "query_episode_index": record.query_episode_index,
-            "support_episode_index": record.support_episode_index,
-            "support_document_id": record.support_document_id,
+            "guide_index": record.guide_index,
+            "source_episode_index": record.source_episode_index,
+            "document_id": record.document_id,
             "task_index": record.task_index,
         }
         for record in records[:10]
@@ -122,7 +132,7 @@ def _binding_log(data_loader: Any) -> dict[str, Any]:
     return {
         "count": len(records),
         "tasks": len({record.task_index for record in records}),
-        "support_documents": len({record.support_document_id for record in records}),
+        "catalog_digest": catalog.catalog_digest,
         "examples": examples,
     }
 
@@ -162,22 +172,6 @@ def _run_guided_training_impl(
     if resolved_config.fsdp_devices <= 0:
         raise ValueError("fsdp_devices must be positive")
 
-    checkpoints = _load_checkpoints()
-    checkpoint_manager, resuming = checkpoints.initialize_checkpoint_dir(
-        resolved_config.checkpoint_dir,
-        keep_period=resolved_config.keep_period,
-        overwrite=resolved_config.overwrite,
-        resume=resolved_config.resume,
-    )
-
-    session["wandb_run"] = init_guided_wandb(
-        layout=layout,
-        run_config=run_config,
-        resolved_config=resolved_config,
-        resuming=resuming,
-    )
-    train_script = importlib.import_module("scripts.train")
-
     data_module = importlib.import_module("openpi.training.robodojo_guide_data")
     data_loader = data_module.create_robodojo_guided_data_loader(
         native_config,
@@ -195,12 +189,32 @@ def _run_guided_training_impl(
         "effective_global_batch_size": run_config.effective_global_batch_size,
         "data": getattr(data_loader, "host_metadata", {}),
     }
+    validate_guided_run_resume(
+        layout,
+        run_config=run_config,
+        runtime_data=runtime_metadata["data"],
+    )
     write_guided_run_manifest(
         layout,
         run_config=run_config,
         status="running",
         runtime=runtime_metadata,
     )
+    configure_guided_run_logging(layout, resume=run_config.resume)
+    checkpoints = _load_checkpoints()
+    checkpoint_manager, resuming = checkpoints.initialize_checkpoint_dir(
+        resolved_config.checkpoint_dir,
+        keep_period=resolved_config.keep_period,
+        overwrite=resolved_config.overwrite,
+        resume=resolved_config.resume,
+    )
+    session["wandb_run"] = init_guided_wandb(
+        layout=layout,
+        run_config=run_config,
+        resolved_config=resolved_config,
+        resuming=resuming,
+    )
+    train_script = importlib.import_module("scripts.train")
     wandb_run = session.get("wandb_run")
     wandb_config = getattr(wandb_run, "config", None)
     update_wandb_config = getattr(wandb_config, "update", None)
@@ -233,14 +247,14 @@ def _run_guided_training_impl(
 
     logger.info(
         "Initialized GuidePi0: G=%d Q=%d devices=%d parameters=%d base_params_path=%s "
-        "resume_checkpoint_dir=%s bindings=%s metadata=%s",
+        "resume_checkpoint_dir=%s catalog=%s metadata=%s",
         groups,
         queries,
         jax.device_count(),
         _parameter_count(train_state.params),
         run_config.base_params_path,
         run_config.checkpoint_dir,
-        _binding_log(data_loader),
+        _catalog_log(data_loader),
         getattr(data_loader, "host_metadata", {}),
     )
 
@@ -343,23 +357,25 @@ def run_guided_training(run_config: GuidedTrainRunConfig) -> Any:
         resume=run_config.resume,
         overwrite=run_config.overwrite,
     )
-    configure_guided_run_logging(layout, resume=run_config.resume)
-    write_guided_run_manifest(
-        layout,
-        run_config=run_config,
-        status="running",
-    )
+    validate_guided_run_resume(layout, run_config=run_config)
+    if not run_config.resume:
+        write_guided_run_manifest(
+            layout,
+            run_config=run_config,
+            status="running",
+        )
     session: dict[str, Any] = {}
     try:
         result = _run_guided_training_impl(run_config, layout, session)
     except BaseException as exc:
         logger.exception("Guided training failed")
-        write_guided_run_manifest(
-            layout,
-            run_config=run_config,
-            status="failed",
-            error=exc,
-        )
+        if not isinstance(exc, GuidedResumeContractError):
+            write_guided_run_manifest(
+                layout,
+                run_config=run_config,
+                status="failed",
+                error=exc,
+            )
         finish_guided_wandb(session.get("wandb_run"), exit_code=1)
         raise
     write_guided_run_manifest(
@@ -378,20 +394,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-params-path", type=Path, required=True)
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--dataset-artifact", type=Path, required=True)
     parser.add_argument("--documents-root", type=Path, required=True)
-    parser.add_argument("--pairs-artifact", type=Path, required=True)
-    parser.add_argument("--split-manifest", type=Path)
-    parser.add_argument(
-        "--debug-query-episode-index",
-        "--query-episode-index",
-        dest="query_episode_index",
-        type=int,
-        action="append",
-        help="optional subset of a formal split, or legacy single-query smoke scope",
-    )
-    parser.add_argument("--batch-size", type=int, required=True)
-    parser.add_argument("--guides-per-batch", type=int, default=1)
+    parser.add_argument("--guides-per-batch", type=int, required=True)
+    parser.add_argument("--queries-per-guide", type=int, required=True)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--device-prefetch-size", type=int, default=2)
@@ -412,11 +417,15 @@ def _parser() -> argparse.ArgumentParser:
         "--guide-length-bucket",
         action="append",
         default=[],
-        metavar="MAX_UNITS:MAX_FRAMES",
+        metavar="MAX_UNITS:MAX_BOUNDARIES",
+        help="repeat to override the automatic observed-length buckets",
     )
-    parser.add_argument("--max-frames", type=int, required=True)
+    parser.add_argument("--max-boundaries", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
-    parser.add_argument("--max-text-tokens", type=int, required=True)
+    parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
+    parser.add_argument("--max-transition-text-tokens", type=int, required=True)
+    parser.add_argument("--guide-boundary-num-queries", type=int, default=8)
+    parser.add_argument("--guide-transition-num-queries", type=int, default=4)
     parser.add_argument("--experiment-name", required=True)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
@@ -429,7 +438,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-interval", type=int, default=1000)
     parser.add_argument("--fsdp-devices", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--profile", default="actuator")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--wandb-enabled", action="store_true")
@@ -440,19 +448,6 @@ def _run_from_args(args: argparse.Namespace) -> Any:
     bucket_specs = getattr(args, "guide_length_bucket", [])
     guide_length_buckets = tuple(parse_guide_length_bucket(spec) for spec in bucket_specs) or None
     accumulation_steps = getattr(args, "gradient_accumulation_steps", 1)
-    raw_query_indices = args.query_episode_index
-    if raw_query_indices is None:
-        query_episode_indices = None
-    elif isinstance(raw_query_indices, int):
-        query_episode_indices = (raw_query_indices,)
-    else:
-        query_episode_indices = tuple(raw_query_indices)
-
-    split_manifest = getattr(args, "split_manifest", None)
-    if split_manifest is None and query_episode_indices is None:
-        raise ValueError(
-            "formal training requires --split-manifest; use --debug-query-episode-index only for an explicit smoke run"
-        )
     run_dir = getattr(args, "run_dir", None)
     checkpoint_dir = getattr(args, "checkpoint_dir", None)
     if run_dir is not None:
@@ -466,17 +461,16 @@ def _run_from_args(args: argparse.Namespace) -> Any:
     guided_data = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
-        dataset_artifact_path=args.dataset_artifact,
         documents_root=args.documents_root,
-        pairs_artifact_path=args.pairs_artifact,
-        batch_size=args.batch_size,
+        guides_per_batch=args.guides_per_batch,
+        queries_per_guide=args.queries_per_guide,
         seed=args.seed,
-        profile=args.profile,
-        max_frames=args.max_frames,
+        max_boundaries=args.max_boundaries,
         max_units=args.max_units,
-        max_text_tokens=args.max_text_tokens,
-        query_episode_indices=query_episode_indices,
-        guides_per_batch=getattr(args, "guides_per_batch", 1),
+        max_boundary_text_tokens=args.max_boundary_text_tokens,
+        max_transition_text_tokens=args.max_transition_text_tokens,
+        guide_boundary_num_queries=getattr(args, "guide_boundary_num_queries", 8),
+        guide_transition_num_queries=getattr(args, "guide_transition_num_queries", 4),
         num_workers=getattr(args, "num_workers", 0),
         prefetch_factor=getattr(args, "prefetch_factor", 2),
         persistent_workers=not getattr(args, "no_persistent_workers", False),
@@ -485,8 +479,7 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         guide_cache_entries=getattr(args, "guide_cache_entries", 2),
         guide_cache_max_bytes=getattr(args, "guide_cache_max_bytes", 256 * 1024 * 1024),
         device_prefetch_size=getattr(args, "device_prefetch_size", 2),
-        split_manifest_path=split_manifest,
-        require_all_tasks=split_manifest is not None,
+        require_all_tasks=True,
         guide_length_buckets=guide_length_buckets,
         remainder_strategy=getattr(args, "remainder_strategy", "drop"),
         gradient_accumulation_steps=accumulation_steps,
@@ -506,9 +499,7 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         wandb_enabled=args.wandb_enabled,
         gradient_accumulation_steps=accumulation_steps,
         reference_global_batch_size=getattr(args, "reference_global_batch_size", 256),
-        enforce_reference_batch_size=(
-            split_manifest is not None and not getattr(args, "allow_effective_batch_mismatch", False)
-        ),
+        enforce_reference_batch_size=not getattr(args, "allow_effective_batch_mismatch", False),
         run_dir=run_dir,
     )
     return run_guided_training(run_config)

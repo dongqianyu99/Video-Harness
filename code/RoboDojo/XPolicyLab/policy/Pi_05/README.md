@@ -63,9 +63,10 @@ When evaluating a checkpoint from a tracked training run, set
 `ROBODOJO_EVAL_ROOT=/absolute/path/to/run/eval`; RoboDojo will place result
 JSON, videos, and resume manifests below that run-local directory instead of
 the repository-level `eval_result/` tree.
-The catalog validates `episodes.jsonl` and always selects the document generated
-from the smallest dataset `episode_index` for that task; every RoboDojo layout
-and repeat then reuses the same materialized Guide.
+The catalog validates every final Document, filters quarantined entries, and
+selects the first accepted document in stable `(episode_index, document_id)`
+order for that task. Every RoboDojo layout and repeat then reuses the same
+materialized Guide.
 
 Install `VideoHarness` in the Pi_05 OpenPI environment and provide absolute
 artifact paths:
@@ -73,17 +74,23 @@ artifact paths:
 ```bash
 export PI05_GUIDANCE_ENABLED=1
 export PI05_GUIDANCE_DOCUMENTS_ROOT=/path/to/documents-openai
-export PI05_GUIDANCE_EPISODES_PATH=/path/to/episodes.jsonl
 export PI05_GUIDANCE_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
-export PI05_GUIDANCE_MAX_FRAMES=64
+export PI05_GUIDANCE_MAX_BOUNDARIES=64
 export PI05_GUIDANCE_MAX_UNITS=32
-export PI05_GUIDANCE_MAX_TEXT_TOKENS=128
+export PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS=128
+export PI05_GUIDANCE_MAX_TRANSITION_TEXT_TOKENS=128
+export PI05_GUIDANCE_BOUNDARY_NUM_QUERIES=8
+export PI05_GUIDANCE_TRANSITION_NUM_QUERIES=4
 
 bash eval.sh RoboDojo <task_name> <guided_ckpt> arx_x5 joint 0 0 0 uv <eval_env_conda_env>
 ```
 
-The three budgets above are explicit capacity limits, not recommended defaults;
-set them from the generated corpus report. Guided eval currently supports JAX
+The four size/token budgets above are explicit capacity limits; set them from
+the generated corpus report. The two resampler capacities default to 8 and 4
+and must match the checkpoint. A tracked run root is resolved through
+`checkpoints/<step>` and its run manifest supplies the recorded capacities;
+conflicting deployment values fail closed. Guided eval records the selected
+Document ID/catalog digest with the trial result. It currently supports JAX
 checkpoints only. With `PI05_GUIDANCE_ENABLED` unset, the official stock Pi_05
 evaluation path is unchanged.
 
@@ -102,8 +109,9 @@ Environment variables used by the adapter scripts:
 | `OPENPI_LOCAL_CACHE_ROOT` | Per-host local cache root for the HF datasets / JAX compilation caches; defaults to `/tmp/openpi-cache-$(hostname)`. |
 | `PI05_GUIDANCE_ENABLED` | Set to `1` to enable task-level Behavior Document evaluation. |
 | `PI05_GUIDANCE_DOCUMENTS_ROOT` | Absolute task-grouped per-episode Document directory. |
-| `PI05_GUIDANCE_EPISODES_PATH` | Absolute `episodes.jsonl` path used to prove dataset-first selection. |
 | `PI05_GUIDANCE_DATASET_ROOT` | Absolute LeRobot dataset root used to decode support frames. |
-| `PI05_GUIDANCE_MAX_FRAMES` / `MAX_UNITS` / `MAX_TEXT_TOKENS` | Fixed Guide capacity limits. |
+| `PI05_GUIDANCE_MAX_BOUNDARIES` / `MAX_UNITS` | Fixed structural Guide capacity limits. |
+| `PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS` / `MAX_TRANSITION_TEXT_TOKENS` | Independent fail-closed text budgets. |
+| `PI05_GUIDANCE_BOUNDARY_NUM_QUERIES` / `TRANSITION_NUM_QUERIES` | Boundary/Transition resampler capacities; defaults to 8/4. |
 
 `OPENPI_ROOT` and `OPENPI_SRC` are additional overrides consumed by the local scripts.

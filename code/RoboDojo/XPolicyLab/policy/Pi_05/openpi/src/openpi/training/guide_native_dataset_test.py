@@ -8,7 +8,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from openpi.training.guide_dataset import GuideBoundDataset
+from openpi.training.guide_dataset import GuideCatalog
+from openpi.training.guide_dataset import GuidedDataset
+from openpi.training.guide_dataset import GuidedSampleIndex
+from openpi.training.guide_dataset import TaskSampleIndex
 from openpi.training.guide_native_dataset import IdentityPreservingTransformedDataset
 from openpi.training.guide_native_dataset import transform_dataset_preserving_identity
 
@@ -148,7 +151,7 @@ def test_identity_preserving_transform_matches_stock_transform_and_keeps_identit
     assert guided_dataset.calls == [0]
 
 
-def test_identity_is_removed_by_guide_bound_dataset_after_transforms():
+def test_identity_is_removed_by_guided_dataset_after_transforms():
     config = _data_config()
     transformed = transform_dataset_preserving_identity(
         _CountingDataset(_raw_sample()),
@@ -157,23 +160,37 @@ def test_identity_is_removed_by_guide_bound_dataset_after_transforms():
         transforms_module=_FAKE_TRANSFORMS,
     )
 
-    class _BindingIndex:
-        def by_query_episode(self, episode_index: int):
-            assert episode_index == 7
-            return type(
-                "Record",
-                (),
-                {
-                    "binding_index": 0,
-                    "task_index": 3,
-                },
-            )()
-
-    item = GuideBoundDataset(transformed, _BindingIndex())[0]
+    catalog = GuideCatalog.from_document_catalog(
+        SimpleNamespace(
+            catalog_digest="digest",
+            documents=(
+                SimpleNamespace(
+                    document_id="doc",
+                    source_episode_index=7,
+                    task_index=3,
+                    task_instruction="task three",
+                ),
+            ),
+        )
+    )
+    task_samples = TaskSampleIndex.from_episode_records(
+        (
+            SimpleNamespace(
+                episode_index=7,
+                task_index=3,
+                dataset_from_index=0,
+                dataset_to_index=1,
+            ),
+        ),
+        dataset_length=1,
+    )
+    item = GuidedDataset(transformed, catalog, task_samples)[
+        GuidedSampleIndex(0, 0)
+    ]
 
     assert "episode_index" not in item["query"]
     assert "task_index" not in item["query"]
-    assert item["guide_binding_index"].item() == 0
+    assert item["guide_index"].item() == 0
 
 
 def test_identity_metadata_is_not_normalized_and_norm_stats_are_required():

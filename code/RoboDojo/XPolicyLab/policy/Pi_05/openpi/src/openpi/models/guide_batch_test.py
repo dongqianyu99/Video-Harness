@@ -52,13 +52,18 @@ def _make_observation(*, include_prompt: bool = True) -> _model.Observation:
 
 def _make_guide() -> GuideInput:
     return GuideInput(
-        images=jnp.zeros((2, 2, 2, 2, 3), dtype=jnp.uint8),
-        image_mask=jnp.ones((2, 2), dtype=jnp.bool_),
-        text_tokens=jnp.zeros((2, 2, 4), dtype=jnp.int32),
-        text_mask=jnp.ones((2, 2, 4), dtype=jnp.bool_),
+        boundary_images=jnp.zeros((2, 3, 3, 2, 2, 3), dtype=jnp.float32),
+        boundary_image_mask=jnp.ones((2, 3, 3), dtype=jnp.bool_),
+        boundary_text_tokens=jnp.zeros((2, 3, 3, 4), dtype=jnp.int32),
+        boundary_text_mask=jnp.ones((2, 3, 3, 4), dtype=jnp.bool_),
+        transition_text_tokens=jnp.zeros((2, 2, 4), dtype=jnp.int32),
+        transition_text_mask=jnp.ones((2, 2, 4), dtype=jnp.bool_),
+        boundary_mask=jnp.ones((2, 3), dtype=jnp.bool_),
         unit_mask=jnp.ones((2, 2), dtype=jnp.bool_),
-        before_slot=jnp.zeros((2, 2), dtype=jnp.int32),
-        after_slot=jnp.ones((2, 2), dtype=jnp.int32),
+        memory_source_kind=jnp.zeros((2, 8), dtype=jnp.int32),
+        memory_source_index=jnp.zeros((2, 8), dtype=jnp.int32),
+        memory_source_offset=jnp.zeros((2, 8), dtype=jnp.int32),
+        memory_mask=jnp.ones((2, 8), dtype=jnp.bool_),
     )
 
 
@@ -217,9 +222,9 @@ def test_validate_rejects_guide_leaf_with_wrong_group_count() -> None:
     batch = _make_batch()
     invalid_guide = dataclasses.replace(
         batch.guide,
-        images=batch.guide.images[:1],
+        boundary_images=batch.guide.boundary_images[:1],
     )
     batch = dataclasses.replace(batch, guide=invalid_guide)
 
-    with pytest.raises(ValueError, match=r"guide|images"):
+    with pytest.raises(ValueError, match=r"guide|boundary_images"):
         validate_guide_conditioned_batch(batch)

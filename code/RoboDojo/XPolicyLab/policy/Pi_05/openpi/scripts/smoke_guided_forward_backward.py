@@ -9,11 +9,16 @@ from typing import Any
 
 import jax
 import numpy as np
+
 from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_pi0_config import GuidePi0Config
-from openpi.training.guide_train_config import GuidedTrainRunConfig, resolve_guided_train_config
-from openpi.training.guide_train_sharding import make_guided_batch_sharding, put_guided_batch
-from openpi.training.guide_train_step import _prefix_norm, guided_loss_and_grad, guided_train_step
+from openpi.training.guide_train_config import GuidedTrainRunConfig
+from openpi.training.guide_train_config import resolve_guided_train_config
+from openpi.training.guide_train_sharding import make_guided_batch_sharding
+from openpi.training.guide_train_sharding import put_guided_batch
+from openpi.training.guide_train_step import _prefix_norm
+from openpi.training.guide_train_step import guided_loss_and_grad
+from openpi.training.guide_train_step import guided_train_step
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 
 
@@ -23,18 +28,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-params-path", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--repo-id", required=True)
-    parser.add_argument("--dataset-artifact", type=Path, required=True)
     parser.add_argument("--documents-root", type=Path, required=True)
-    parser.add_argument("--pairs-artifact", type=Path, required=True)
-    parser.add_argument("--query-episode-index", type=int, required=True)
-    parser.add_argument("--batch-size", type=int, required=True)
-    parser.add_argument("--max-frames", type=int, required=True)
+    parser.add_argument("--guides-per-batch", type=int, required=True)
+    parser.add_argument("--queries-per-guide", type=int, required=True)
+    parser.add_argument("--max-boundaries", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
-    parser.add_argument("--max-text-tokens", type=int, required=True)
+    parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
+    parser.add_argument("--max-transition-text-tokens", type=int, required=True)
+    parser.add_argument("--guide-boundary-num-queries", type=int, default=8)
+    parser.add_argument("--guide-transition-num-queries", type=int, default=4)
     parser.add_argument("--fsdp-devices", type=int, default=1)
     parser.add_argument("--no-optimizer-update", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--profile", default="actuator")
     return parser
 
 
@@ -78,16 +83,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     guided_data = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
-        dataset_artifact_path=args.dataset_artifact,
         documents_root=args.documents_root,
-        pairs_artifact_path=args.pairs_artifact,
-        batch_size=args.batch_size,
+        guides_per_batch=args.guides_per_batch,
+        queries_per_guide=args.queries_per_guide,
         seed=args.seed,
-        profile=args.profile,
-        max_frames=args.max_frames,
+        max_boundaries=args.max_boundaries,
         max_units=args.max_units,
-        max_text_tokens=args.max_text_tokens,
-        query_episode_indices=(args.query_episode_index,),
+        max_boundary_text_tokens=args.max_boundary_text_tokens,
+        max_transition_text_tokens=args.max_transition_text_tokens,
+        guide_boundary_num_queries=args.guide_boundary_num_queries,
+        guide_transition_num_queries=args.guide_transition_num_queries,
     )
     run_config = GuidedTrainRunConfig(
         native_config_name=args.native_config_name,
@@ -177,8 +182,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "observation_image_shapes": {key: _shape(value) for key, value in batch.observation.images.items()},
         "state_shape": _shape(batch.observation.state),
         "action_shape": _shape(batch.actions),
-        "guide_image_shape": _shape(batch.guide.images),
-        "guide_text_shape": _shape(batch.guide.text_tokens),
+        "guide_boundary_image_shape": _shape(batch.guide.boundary_images),
+        "guide_boundary_text_shape": _shape(batch.guide.boundary_text_tokens),
+        "guide_transition_text_shape": _shape(batch.guide.transition_text_tokens),
+        "guide_memory_mask_shape": _shape(batch.guide.memory_mask),
         "loss": float(loss),
         "finite_loss": bool(np.isfinite(float(loss))),
         "finite_gradients": _finite_tree(info),

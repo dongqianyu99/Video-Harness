@@ -14,8 +14,12 @@ def _gradient_sharding_helper():
     return namespace["_gradient_sharding"]
 
 
-def test_smoke_scopes_query_episode_to_guided_data_config():
-    assert "query_episode_indices=(args.query_episode_index,)" in SOURCE
+def test_smoke_uses_document_catalog_and_task_level_batch_config():
+    assert "documents_root=args.documents_root" in SOURCE
+    assert "guides_per_batch=args.guides_per_batch" in SOURCE
+    assert "queries_per_guide=args.queries_per_guide" in SOURCE
+    assert "pairs_artifact" not in SOURCE
+    assert "query_episode" not in SOURCE
 
 
 def test_smoke_uses_mesh_context_and_sharded_jit_for_both_modes():

@@ -1,318 +1,218 @@
+from __future__ import annotations
+
 import copy
-from dataclasses import FrozenInstanceError
-from dataclasses import dataclass
+import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from openpi.training import guide_dataset as _guide_dataset
+from openpi.training.guide_dataset import GuideCatalog
+from openpi.training.guide_dataset import GuidedDataset
+from openpi.training.guide_dataset import GuidedSampleIndex
+from openpi.training.guide_dataset import TaskSampleIndex
 
 
-@dataclass(frozen=True)
-class _SupportBinding:
-    build_id: str = "build-0"
-    pair_id: str = "pair-0"
-    query_episode_index: int = 10
-    support_episode_index: int = 11
-    support_document_id: str = "document-0"
-    support_rank: int = 0
-    task_index: int = 4
-    task_instruction: str = "open the cabinet"
-    guide_schema_version: str = "actuator"
-
-
-def _make_binding(**overrides) -> _SupportBinding:
-    values = {
-        "build_id": "build-0",
-        "pair_id": "pair-0",
-        "query_episode_index": 10,
-        "support_episode_index": 11,
-        "support_document_id": "document-0",
-        "support_rank": 0,
-        "task_index": 4,
-        "task_instruction": "open the cabinet",
-        "guide_schema_version": "actuator",
-    }
-    values.update(overrides)
-    return _SupportBinding(**values)
-
-
-def _make_index(*bindings: _SupportBinding):
-    return _guide_dataset.GuideBindingIndex.from_bindings(list(bindings))
-
-
-def _index_value(value: int) -> np.ndarray:
-    return np.asarray(value, dtype=np.int64)
-
-
-def _make_sample(
-    episode_index,
-    task_index,
+def _document(
+    document_id: str,
     *,
-    value: float = 0.0,
-) -> dict[str, object]:
-    return {
-        "observation": {
-            "state": np.asarray([value, value + 1], dtype=np.float32),
-        },
-        "actions": np.asarray([[value, value + 1]], dtype=np.float32),
-        "episode_index": episode_index,
-        "task_index": task_index,
-    }
+    episode: int,
+    task: int,
+    instruction: str | None = None,
+):
+    return SimpleNamespace(
+        document_id=document_id,
+        source_episode_index=episode,
+        task_index=task,
+        task_instruction=instruction or f"task {task}",
+    )
 
 
-class _CountingDataset:
-    def __init__(self, samples: list[dict[str, object]]):
+def _catalog(*documents) -> GuideCatalog:
+    return GuideCatalog.from_document_catalog(
+        SimpleNamespace(catalog_digest="digest", documents=documents)
+    )
+
+
+def test_catalog_stably_numbers_documents_and_round_trips_through_pickle():
+    catalog = _catalog(
+        _document("z", episode=20, task=1),
+        _document("b", episode=11, task=0),
+        _document("a", episode=11, task=0),
+    )
+
+    assert [record.document_id for record in catalog.records] == ["a", "b", "z"]
+    assert [record.guide_index for record in catalog.records] == [0, 1, 2]
+    assert [record.document_id for record in catalog.records_for_task(0)] == ["a", "b"]
+    assert pickle.loads(pickle.dumps(catalog)).records == catalog.records
+
+
+def test_catalog_rejects_duplicate_documents_and_instruction_drift():
+    with pytest.raises(ValueError, match="duplicate document_id"):
+        _catalog(
+            _document("same", episode=1, task=0),
+            _document("same", episode=2, task=0),
+        )
+    with pytest.raises(ValueError, match="inconsistent task instructions"):
+        _catalog(
+            _document("a", episode=1, task=0, instruction="first"),
+            _document("b", episode=2, task=0, instruction="second"),
+        )
+
+
+def test_task_sample_index_uses_explicit_half_open_ranges_and_allows_source_episode():
+    records = (
+        SimpleNamespace(episode_index=10, task_index=4, dataset_from_index=0, dataset_to_index=2),
+        SimpleNamespace(episode_index=11, task_index=4, dataset_from_index=2, dataset_to_index=5),
+        SimpleNamespace(episode_index=20, task_index=5, dataset_from_index=5, dataset_to_index=7),
+    )
+    index = TaskSampleIndex.from_episode_records(records, dataset_length=7)
+
+    assert index.samples_for_task(4) == (0, 1, 2, 3, 4)
+    assert index.range_for_episode(11).dataset_from_index == 2
+    assert index.range_for_sample(0).episode_index == 10
+    assert index.range_for_sample(4).episode_index == 11
+    assert index.range_for_sample(6).episode_index == 20
+    with pytest.raises(ValueError, match="outside episode ranges"):
+        index.range_for_sample(7)
+    restored = pickle.loads(pickle.dumps(index))
+    assert restored.samples_for_task(5) == (5, 6)
+    assert restored.range_for_sample(5).episode_index == 20
+    assert restored.digest == index.digest
+    assert len(index.digest) == 64
+
+
+def test_task_sample_index_rejects_overlap_and_out_of_bounds():
+    with pytest.raises(ValueError, match="overlap"):
+        TaskSampleIndex.from_episode_records(
+            (
+                SimpleNamespace(episode_index=0, task_index=0, dataset_from_index=0, dataset_to_index=3),
+                SimpleNamespace(episode_index=1, task_index=0, dataset_from_index=2, dataset_to_index=4),
+            )
+        )
+    with pytest.raises(ValueError, match="dataset_length"):
+        TaskSampleIndex.from_episode_records(
+            (SimpleNamespace(episode_index=0, task_index=0, dataset_from_index=0, dataset_to_index=3),),
+            dataset_length=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        (SimpleNamespace(episode_index=0, task_index=0, dataset_from_index=1, dataset_to_index=4),),
+        (
+            SimpleNamespace(episode_index=0, task_index=0, dataset_from_index=0, dataset_to_index=2),
+            SimpleNamespace(episode_index=1, task_index=0, dataset_from_index=3, dataset_to_index=4),
+        ),
+        (SimpleNamespace(episode_index=0, task_index=0, dataset_from_index=0, dataset_to_index=3),),
+    ],
+)
+def test_task_sample_index_requires_exact_formal_dataset_coverage(records):
+    with pytest.raises(ValueError, match=r"start|gap|exactly cover"):
+        TaskSampleIndex.from_episode_records(records, dataset_length=4)
+
+
+class _Dataset:
+    def __init__(self, samples):
         self.samples = samples
-        self.calls: list[int] = []
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> dict[str, object]:
-        self.calls.append(index)
-        return self.samples[index]
+    def __getitem__(self, index):
+        return copy.deepcopy(self.samples[index])
 
 
-def _contains_string(value) -> bool:
-    if isinstance(value, str):
-        return True
-    if isinstance(value, dict):
-        return any(_contains_string(child) for child in value.values())
-    if isinstance(value, (tuple, list)):
-        return any(_contains_string(child) for child in value)
-    return False
+def _sample(*, episode: int, task: int):
+    return {
+        "episode_index": np.asarray(episode, dtype=np.int64),
+        "task_index": np.asarray(task, dtype=np.int64),
+        "state": np.asarray([1.0], dtype=np.float32),
+        "actions": np.zeros((2, 1), dtype=np.float32),
+    }
 
 
-def test_binding_index_sorts_queries_and_assigns_contiguous_indices():
-    bindings = [
-        _make_binding(
-            pair_id="pair-20",
-            query_episode_index=20,
-            support_episode_index=21,
-            support_document_id="document-20",
-        ),
-        _make_binding(
-            pair_id="pair-3",
-            query_episode_index=3,
-            support_episode_index=4,
-            support_document_id="document-3",
-        ),
-        _make_binding(
-            pair_id="pair-11",
-            query_episode_index=11,
-            support_episode_index=12,
-            support_document_id="document-11",
-        ),
-    ]
-
-    index = _make_index(*bindings)
-
-    assert [record.binding_index for record in index.records] == [0, 1, 2]
-    assert [record.query_episode_index for record in index.records] == [3, 11, 20]
-    assert index.by_query_episode(11).support_document_id == "document-11"
-    assert index.by_binding_index(0).query_episode_index == 3
-
-
-def test_binding_index_does_not_modify_input_sequence():
-    bindings = [
-        _make_binding(query_episode_index=20, support_episode_index=21),
-        _make_binding(
-            pair_id="pair-3",
-            query_episode_index=3,
-            support_episode_index=4,
-        ),
-    ]
-    original = list(bindings)
-
-    _make_index(*bindings)
-
-    assert bindings == original
-
-
-def test_binding_records_and_record_sequence_are_immutable():
-    index = _make_index(_make_binding())
-
-    assert isinstance(index.records, tuple)
-
-    with pytest.raises(TypeError):
-        index.records[0] = index.records[0]
-
-    with pytest.raises(FrozenInstanceError):
-        index.records[0].binding_index = 99
-
-
-def test_binding_index_rejects_duplicate_query_episode():
-    with pytest.raises(ValueError, match=r"duplicate|query_episode_index"):
-        _make_index(
-            _make_binding(query_episode_index=10, support_episode_index=11),
-            _make_binding(
-                pair_id="pair-10-second",
-                query_episode_index=10,
-                support_episode_index=12,
+def _task_samples(*, episode: int, task: int) -> TaskSampleIndex:
+    return TaskSampleIndex.from_episode_records(
+        (
+            SimpleNamespace(
+                episode_index=episode,
+                task_index=task,
+                dataset_from_index=0,
+                dataset_to_index=1,
             ),
-        )
-
-
-def test_binding_index_rejects_query_equal_to_support_episode():
-    with pytest.raises(ValueError, match=r"different|support_episode_index"):
-        _make_index(
-            _make_binding(query_episode_index=10, support_episode_index=10),
-        )
-
-
-@pytest.mark.parametrize(
-    ("overrides", "error_pattern"),
-    [
-        ({"query_episode_index": -1}, "query_episode_index"),
-        ({"query_episode_index": True}, "query_episode_index"),
-        ({"support_episode_index": -1}, "support_episode_index"),
-        ({"support_episode_index": False}, "support_episode_index"),
-        ({"task_index": -1}, "task_index"),
-        ({"task_index": True}, "task_index"),
-        ({"support_document_id": ""}, "support_document_id"),
-    ],
-)
-def test_binding_index_rejects_invalid_binding_fields(overrides, error_pattern):
-    with pytest.raises(ValueError, match=error_pattern):
-        _make_index(_make_binding(**overrides))
-
-
-def test_binding_index_rejects_unknown_lookups():
-    index = _make_index()
-
-    with pytest.raises(ValueError, match="query_episode_index"):
-        index.by_query_episode(999)
-
-    with pytest.raises(ValueError, match="binding_index"):
-        index.by_binding_index(999)
-
-    with pytest.raises(ValueError, match="binding_index"):
-        index.by_binding_index(-1)
-
-
-def test_bound_dataset_removes_identity_metadata_and_preserves_content():
-    binding_index = _make_index(_make_binding())
-    sample = _make_sample(_index_value(10), _index_value(4), value=1.0)
-    sample_before = copy.deepcopy(sample)
-    dataset = _CountingDataset([sample])
-    bound_dataset = _guide_dataset.GuideBoundDataset(dataset, binding_index)
-
-    result = bound_dataset[0]
-
-    assert len(bound_dataset) == len(dataset)
-    assert dataset.calls == [0]
-    assert set(result) == {"query", "guide_binding_index", "query_valid"}
-    assert bool(result["query_valid"])
-    assert set(result["query"]) == {"observation", "actions"}
-    assert result["guide_binding_index"].shape == ()
-    assert result["guide_binding_index"].dtype == np.int32
-    assert result["guide_binding_index"].item() == 0
-    np.testing.assert_array_equal(
-        result["query"]["observation"]["state"],
-        sample_before["observation"]["state"],
-    )
-    np.testing.assert_array_equal(result["query"]["actions"], sample_before["actions"])
-    assert set(sample) == set(sample_before)
-    np.testing.assert_array_equal(sample["episode_index"], sample_before["episode_index"])
-    np.testing.assert_array_equal(sample["task_index"], sample_before["task_index"])
-
-
-def test_bound_dataset_binds_all_frames_of_an_episode_to_one_record():
-    bindings = [
-        _make_binding(
-            pair_id="pair-10",
-            query_episode_index=10,
-            support_episode_index=11,
         ),
-        _make_binding(
-            pair_id="pair-20",
-            query_episode_index=20,
-            support_episode_index=21,
-        ),
-    ]
-    dataset = _CountingDataset(
-        [
-            _make_sample(_index_value(20), _index_value(4), value=0.0),
-            _make_sample(_index_value(10), _index_value(4), value=1.0),
-            _make_sample(_index_value(10), _index_value(4), value=2.0),
-        ]
-    )
-    bound_dataset = _guide_dataset.GuideBoundDataset(
-        dataset,
-        _make_index(*bindings),
+        dataset_length=1,
     )
 
-    results = [bound_dataset[index] for index in range(len(bound_dataset))]
 
-    assert [result["guide_binding_index"].item() for result in results] == [1, 0, 0]
-    assert dataset.calls == [0, 1, 2]
-
-
-def test_bound_dataset_rejects_task_mismatch():
-    dataset = _CountingDataset([_make_sample(_index_value(10), _index_value(999))])
-    bound_dataset = _guide_dataset.GuideBoundDataset(
-        dataset,
-        _make_index(_make_binding()),
+def test_guided_dataset_attaches_dynamic_guide_and_allows_same_source_episode():
+    catalog = _catalog(_document("guide", episode=10, task=4))
+    dataset = GuidedDataset(
+        _Dataset([_sample(episode=10, task=4)]),
+        catalog,
+        _task_samples(episode=10, task=4),
     )
 
-    with pytest.raises(ValueError, match="task_index"):
-        bound_dataset[0]
+    item = dataset[GuidedSampleIndex(0, 0)]
+
+    assert set(item) == {"query", "guide_index", "query_valid"}
+    assert item["guide_index"].item() == 0
+    assert bool(item["query_valid"])
+    assert set(item["query"]) == {"state", "actions"}
 
 
-def test_bound_dataset_rejects_unknown_query_episode():
-    dataset = _CountingDataset([_make_sample(_index_value(999), _index_value(4))])
-    bound_dataset = _guide_dataset.GuideBoundDataset(dataset, _make_index())
-
-    with pytest.raises(ValueError, match="query_episode_index"):
-        bound_dataset[0]
-
-
-@pytest.mark.parametrize("missing_key", ["episode_index", "task_index"])
-def test_bound_dataset_rejects_missing_identity_metadata(missing_key):
-    sample = _make_sample(_index_value(10), _index_value(4))
-    sample.pop(missing_key)
-    bound_dataset = _guide_dataset.GuideBoundDataset(
-        _CountingDataset([sample]),
-        _make_index(),
+def test_guided_dataset_allows_expected_same_task_episode_different_from_guide():
+    catalog = _catalog(_document("guide", episode=10, task=4))
+    dataset = GuidedDataset(
+        _Dataset([_sample(episode=11, task=4)]),
+        catalog,
+        _task_samples(episode=11, task=4),
     )
 
-    with pytest.raises(ValueError, match=missing_key):
-        bound_dataset[0]
+    item = dataset[GuidedSampleIndex(0, 0)]
+
+    assert item["guide_index"].item() == 0
 
 
-@pytest.mark.parametrize(
-    ("episode_value", "task_value", "error_pattern"),
-    [
-        (np.asarray([10], dtype=np.int64), _index_value(4), "episode_index"),
-        (np.asarray(1, dtype=np.bool_), _index_value(4), "episode_index"),
-        (np.asarray(10.0), _index_value(4), "episode_index"),
-        (np.asarray(-1, dtype=np.int64), _index_value(4), "episode_index"),
-        (_index_value(10), np.asarray([4], dtype=np.int64), "task_index"),
-        (_index_value(10), np.asarray(0, dtype=np.bool_), "task_index"),
-        (_index_value(10), np.asarray(4.0), "task_index"),
-        (_index_value(10), np.asarray(-1, dtype=np.int64), "task_index"),
-    ],
-)
-def test_bound_dataset_rejects_non_scalar_or_invalid_identity_metadata(
-    episode_value,
-    task_value,
-    error_pattern,
-):
-    dataset = _CountingDataset([_make_sample(episode_value, task_value)])
-    bound_dataset = _guide_dataset.GuideBoundDataset(dataset, _make_index())
-
-    with pytest.raises(ValueError, match=error_pattern):
-        bound_dataset[0]
-
-
-def test_bound_dataset_does_not_add_strings_to_model_facing_output():
-    dataset = _CountingDataset([_make_sample(_index_value(10), _index_value(4))])
-    bound_dataset = _guide_dataset.GuideBoundDataset(
-        dataset,
-        _make_index(_make_binding()),
+def test_guided_dataset_fails_on_cross_task_pairing():
+    catalog = _catalog(_document("guide", episode=10, task=4))
+    dataset = GuidedDataset(
+        _Dataset([_sample(episode=20, task=5)]),
+        catalog,
+        _task_samples(episode=20, task=5),
     )
 
-    result = bound_dataset[0]
+    with pytest.raises(ValueError, match="does not match Guide"):
+        dataset[GuidedSampleIndex(0, 0)]
 
-    assert not _contains_string(result)
+
+def test_guided_dataset_fails_when_sample_reports_wrong_episode():
+    catalog = _catalog(_document("guide", episode=99, task=4))
+    dataset = GuidedDataset(
+        _Dataset([_sample(episode=11, task=4)]),
+        catalog,
+        _task_samples(episode=10, task=4),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"sample_index=0 expected episode_index=10, got 11",
+    ):
+        dataset[GuidedSampleIndex(0, 0)]
+
+
+def test_guided_dataset_fails_when_sample_reports_wrong_task_for_range():
+    catalog = _catalog(_document("guide", episode=99, task=4))
+    dataset = GuidedDataset(
+        _Dataset([_sample(episode=10, task=5)]),
+        catalog,
+        _task_samples(episode=10, task=4),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"sample_index=0 expected task_index=4, got 5",
+    ):
+        dataset[GuidedSampleIndex(0, 0)]

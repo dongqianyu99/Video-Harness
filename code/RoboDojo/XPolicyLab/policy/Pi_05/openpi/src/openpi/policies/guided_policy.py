@@ -13,7 +13,9 @@ import numpy as np
 
 from openpi import transforms as _transforms
 from openpi.models import model as _model
+from openpi.models.guide_encoder import GuideMemory
 from openpi.models.guide_inputs import GuideInput
+from openpi.models.guide_tokens import validate_materialized_guide_map
 from openpi.policies.policy import Policy
 from openpi.shared import nnx_utils
 from openpi.training import checkpoints as _checkpoints
@@ -28,7 +30,7 @@ def _require_single_guide(guide: GuideInput) -> None:
 
 
 class GuidedPolicy(Policy):
-    """Stock OpenPI transforms with one persistent task-level GuideInput."""
+    """Stock OpenPI transforms with one immutable, persistent task-level GuideInput."""
 
     def __init__(
         self,
@@ -39,6 +41,8 @@ class GuidedPolicy(Policy):
         output_transforms: Sequence[_transforms.DataTransformFn] = (),
         sample_kwargs: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        guide_boundary_num_queries: int = 8,
+        guide_transition_num_queries: int = 4,
     ) -> None:
         super().__init__(
             model,
@@ -49,24 +53,43 @@ class GuidedPolicy(Policy):
             metadata=metadata,
             is_pytorch=False,
         )
-        self._sample_guided_actions = nnx_utils.module_jit(model.sample_guided_actions)
+        self._encode_guide = nnx_utils.module_jit(model.encode_guide)
+        self._sample_guided_actions_with_memory = nnx_utils.module_jit(model.sample_guided_actions_with_memory)
         self._guide: GuideInput | None = None
+        self._guide_memory: GuideMemory | None = None
+        self._guide_boundary_num_queries = guide_boundary_num_queries
+        self._guide_transition_num_queries = guide_transition_num_queries
 
     @property
     def guide(self) -> GuideInput | None:
         return self._guide
 
+    @property
+    def guide_memory(self) -> GuideMemory | None:
+        return self._guide_memory
+
     def set_guide(self, guide: GuideInput) -> None:
         if not isinstance(guide, GuideInput):
             raise TypeError(f"guide must be GuideInput, got {type(guide).__name__}")
+        # Materialized guides are immutable for the lifetime of a task session.
+        if guide is self._guide and self._guide_memory is not None:
+            return
         _require_single_guide(guide)
+        validate_materialized_guide_map(
+            guide,
+            boundary_num_queries=self._guide_boundary_num_queries,
+            transition_num_queries=self._guide_transition_num_queries,
+        )
+        guide_memory = self._encode_guide(guide)
         self._guide = guide
+        self._guide_memory = guide_memory
 
     def clear_guide(self) -> None:
         self._guide = None
+        self._guide_memory = None
 
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:
-        if self._guide is None:
+        if self._guide is None or self._guide_memory is None:
             raise RuntimeError("GuidedPolicy requires set_guide() before infer()")
 
         inputs = jax.tree.map(lambda value: value, obs)
@@ -90,10 +113,10 @@ class GuidedPolicy(Policy):
             sample_kwargs["noise"] = noise_array
 
         start = time.monotonic()
-        actions = self._sample_guided_actions(
+        actions = self._sample_guided_actions_with_memory(
             sample_rng,
             observation,
-            guide=self._guide,
+            guide_memory=self._guide_memory,
             **sample_kwargs,
         )
         if actions.ndim != 4 or actions.shape[:2] != (1, 1):
@@ -116,6 +139,8 @@ def create_trained_guided_policy(
     sample_kwargs: dict[str, Any] | None = None,
     default_prompt: str | None = None,
     norm_stats: dict[str, _transforms.NormStats] | None = None,
+    guide_boundary_num_queries: int = 8,
+    guide_transition_num_queries: int = 4,
 ) -> GuidedPolicy:
     """Restore a full GuidePi0 tree while retaining native policy transforms."""
 
@@ -126,7 +151,11 @@ def create_trained_guided_policy(
     if not params_path.exists():
         raise FileNotFoundError(f"Guided checkpoint params do not exist: {params_path}")
 
-    guide_config = make_guide_pi0_config(native_train_config.model)
+    guide_config = make_guide_pi0_config(
+        native_train_config.model,
+        guide_boundary_num_queries=guide_boundary_num_queries,
+        guide_transition_num_queries=guide_transition_num_queries,
+    )
     model = guide_config.load(_model.restore_params(params_path, dtype=jnp.bfloat16))
     data_config = native_train_config.data.create(native_train_config.assets_dirs, guide_config)
     if norm_stats is None:
@@ -152,4 +181,6 @@ def create_trained_guided_policy(
         ],
         sample_kwargs=sample_kwargs,
         metadata=native_train_config.policy_metadata,
+        guide_boundary_num_queries=guide_boundary_num_queries,
+        guide_transition_num_queries=guide_transition_num_queries,
     )

@@ -4,29 +4,30 @@ import dataclasses
 from pathlib import Path
 
 import flax.nnx as nnx
+import pytest
+
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.models.pi0_config import Pi0Config
 from openpi.training import config as stock_config
-from openpi.training.guide_train_config import GuidedTrainRunConfig, make_guide_pi0_config, resolve_guided_train_config
+from openpi.training.guide_train_config import GuidedTrainRunConfig
+from openpi.training.guide_train_config import make_guide_pi0_config
+from openpi.training.guide_train_config import resolve_guided_train_config
 from openpi.training.guide_weight_loaders import GuidePi0BaseWeightLoader
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
-import pytest
 
 
 def _guided_data(tmp_path: Path, *, batch_size: int = 4) -> RoboDojoGuidedDataConfig:
     return RoboDojoGuidedDataConfig(
         repo_id="fake",
         dataset_root=tmp_path / "dataset",
-        dataset_artifact_path=tmp_path / "dataset.json",
         documents_root=tmp_path / "documents",
-        pairs_artifact_path=tmp_path / "pairs.jsonl",
-        batch_size=batch_size,
+        guides_per_batch=1,
+        queries_per_guide=batch_size,
         seed=7,
-        profile="actuator",
-        max_frames=4,
+        max_boundaries=4,
         max_units=2,
-        max_text_tokens=8,
-        query_episode_indices=(11,),
+        max_boundary_text_tokens=8,
+        max_transition_text_tokens=8,
     )
 
 
@@ -54,13 +55,18 @@ def test_make_guide_pi0_config_copies_all_native_model_fields() -> None:
         action_expert_variant="gemma_300m",
     )
 
-    guide_model = make_guide_pi0_config(native_model)
+    guide_model = make_guide_pi0_config(
+        native_model,
+        guide_boundary_num_queries=12,
+        guide_transition_num_queries=8,
+    )
 
     assert isinstance(guide_model, GuidePi0Config)
     for field in dataclasses.fields(native_model):
         assert getattr(guide_model, field.name) == getattr(native_model, field.name)
 
-    assert guide_model.guide_num_queries == 8
+    assert guide_model.guide_boundary_num_queries == 12
+    assert guide_model.guide_transition_num_queries == 8
     assert guide_model.guide_resampler_width == 1024
     assert guide_model.guide_resampler_num_heads == 8
     assert guide_model.guide_resampler_ffn_hidden_dim is None

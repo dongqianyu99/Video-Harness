@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -31,6 +32,15 @@ class _Session:
         if self.guide is None:
             self.guide = object()
         return self.guide
+
+    @property
+    def identity(self):
+        return {
+            "catalog_digest": "digest",
+            "document_id": "doc" if self.guide is not None else None,
+            "source_episode_index": 1 if self.guide is not None else None,
+            "task_index": 2 if self.guide is not None else None,
+        }
 
 
 def _observation(instruction="toast bread", env_idx=0):
@@ -91,11 +101,13 @@ def test_prepare_case_validates_task_and_trial_end_clears_only_observation(monke
     response = instance.prepare_case({"task_name": "make_toast", "action_case_id": "case-1"})
     instance.update_obs(_observation())
     guide = policy.guides[-1]
-    instance.on_trial_end({"success": False})
+    result = {"success": False}
+    instance.on_trial_end(result)
 
     assert response["task_name"] == "make_toast"
     assert instance.observation_window is None
     assert session.guide is guide
+    assert result["guidance"]["document_id"] == "doc"
 
     with pytest.raises(ValueError, match="does not match"):
         instance.prepare_case({"task_name": "other"})
@@ -130,8 +142,23 @@ def test_get_model_selects_guided_checkpoint_factory(monkeypatch, tmp_path):
     monkeypatch.setattr(_model._config, "get_config", lambda _name: native_config)
     monkeypatch.setattr(_model._normalize, "load", lambda _path: {"stats": True})
 
-    def create_policy(config, model_root, *, norm_stats):
-        calls.append((config, model_root, norm_stats))
+    def create_policy(
+        config,
+        model_root,
+        *,
+        norm_stats,
+        guide_boundary_num_queries,
+        guide_transition_num_queries,
+    ):
+        calls.append(
+            (
+                config,
+                model_root,
+                norm_stats,
+                guide_boundary_num_queries,
+                guide_transition_num_queries,
+            )
+        )
         return sentinel
 
     original_import = _model.importlib.import_module
@@ -151,4 +178,78 @@ def test_get_model_selects_guided_checkpoint_factory(monkeypatch, tmp_path):
     )
 
     assert result is sentinel
-    assert calls == [(native_config, str(checkpoint), {"stats": True})]
+    assert calls == [
+        (native_config, str(checkpoint), {"stats": True}, 8, 4)
+    ]
+
+
+def test_resolver_descends_into_tracked_run_checkpoints(tmp_path):
+    run_root = tmp_path / "run"
+    step = run_root / "checkpoints" / "00042"
+    (step / "params").mkdir(parents=True)
+    (run_root / "run.json").write_text("{}", encoding="utf-8")
+
+    resolved = _model._resolve_pi05_model_root({"model_path": str(run_root)})
+
+    assert resolved == step
+
+
+def test_get_model_reads_capacities_from_guided_run_manifest(monkeypatch, tmp_path):
+    run_root = tmp_path / "run"
+    step = run_root / "checkpoints" / "00042"
+    (step / "params").mkdir(parents=True)
+    (run_root / "run.json").write_text(
+        json.dumps(
+            {
+                "config": {
+                    "guided_data": {
+                        "guide_boundary_num_queries": 12,
+                        "guide_transition_num_queries": 8,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    instance = _model.Model.__new__(_model.Model)
+    instance.guidance_enabled = True
+    instance._guide_boundary_num_queries = 8
+    instance._guide_transition_num_queries = 4
+    native_config = object()
+    captured = {}
+
+    monkeypatch.setattr(_model, "_resolve_pi05_model_root", lambda _cfg: step)
+    monkeypatch.setattr(_model._config, "get_config", lambda _name: native_config)
+    monkeypatch.setattr(_model._normalize, "load", lambda _path: None)
+    original_import = _model.importlib.import_module
+
+    def create_policy(_config, _root, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        _model.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(create_trained_guided_policy=create_policy)
+        if name == "openpi.policies.guided_policy"
+        else original_import(name),
+    )
+
+    instance.get_model({"train_config_name": "native", "repo_id": None})
+
+    assert instance._guide_boundary_num_queries == 12
+    assert instance._guide_transition_num_queries == 8
+    assert captured["guide_boundary_num_queries"] == 12
+    assert captured["guide_transition_num_queries"] == 8
+
+    with pytest.raises(ValueError, match="does not match the run manifest"):
+        instance._guide_boundary_num_queries = 8
+        instance._guide_transition_num_queries = 4
+        instance.get_model(
+            {
+                "train_config_name": "native",
+                "repo_id": None,
+                "guidance_boundary_num_queries": 8,
+                "guidance_transition_num_queries": 4,
+            }
+        )

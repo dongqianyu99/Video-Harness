@@ -1,89 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
-from collections.abc import Mapping as MappingABC
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from .quality import accepted_transition_chain
-from .renderer import RENDER_PROFILES, render_evidence_text
-from .sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION, validate_document
-
-DATASET_SCHEMA_VERSION = "video-harness.robodojo-source"
-PAIR_SCHEMA_VERSION = "video-harness.support-query-pair"
-
-_DATASET_KEYS = frozenset(
-    {
-        "schema_version",
-        "task_scope",
-        "episodes",
-        "tasks",
-        "frames",
-        "fps",
-        "episode_counts_by_task_index",
-        "build_id",
-        "source_dataset",
-        "source_revision",
-        "sample_hz",
-        "supports_per_query",
-        "document_camera",
-        "benchmark_source_episodes",
-        "selection",
-    }
-)
-
-_PAIR_KEYS = frozenset(
-    {
-        "schema_version",
-        "build_id",
-        "pair_id",
-        "task_index",
-        "task_instruction",
-        "query_episode_index",
-        "support_episode_index",
-        "support_rank",
-        "support_document_id",
-        "guide_schema_version",
-    }
-)
-
-
-def _exact_object(
-    value: Any,
-    field: str,
-    expected_keys: frozenset[str],
-) -> dict[str, Any]:
-    """Require one object to have exactly the expected keys."""
-
-    if not isinstance(value, dict) or set(value) != expected_keys:
-        actual = sorted(value) if isinstance(value, dict) else type(value).__name__
-        raise ValueError(
-            f"{field} must have exactly {sorted(expected_keys)}, got {actual}"
-        )
-
-    return value
-
-
-def _require_non_empty_string(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a non-empty string")
-
-    return value
-
-
-def _require_non_negative_int(value: Any, field: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"{field} must be a non-negative integer")
-
-    return value
+from .renderer import render_boundary_view_texts, render_transition_text
+from .sampling import validate_document
 
 
 def _freeze_json(value: Any) -> Any:
-    """Recursively convert JSON containers into immutable containers."""
-
     if isinstance(value, dict):
         return MappingProxyType(
             {key: _freeze_json(item) for key, item in value.items()}
@@ -93,154 +23,36 @@ def _freeze_json(value: Any) -> Any:
     return value
 
 
-def _validate_dataset_metadata(
-    dataset: dict[str, Any],
-) -> dict[str, Any]:
-    """Validate the build-level dataset metadata."""
-
-    value = _exact_object(
-        dataset,
-        "dataset",
-        _DATASET_KEYS,
-    )
-
-    if value["schema_version"] != DATASET_SCHEMA_VERSION:
-        raise ValueError(f"unexpected dataset schema {value['schema_version']!r}")
-
-    _require_non_empty_string(value["build_id"], "dataset.build_id")
-
-    supports_per_query = value["supports_per_query"]
-    if (
-        not isinstance(supports_per_query, int)
-        or isinstance(supports_per_query, bool)
-        or supports_per_query != 1
-    ):
-        raise ValueError("dataset.supports_per_query must be exactly 1")
-
+def _require_non_empty_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
     return value
 
 
-def _validate_support_binding(
-    pair: dict[str, Any],
-    *,
-    build_id: str,
-    guide_schema_version: str,
-) -> SupportBinding:
-    """Validate one static support-query pair."""
-
-    value = _exact_object(
-        pair,
-        "pair",
-        _PAIR_KEYS,
-    )
-
-    if value["schema_version"] != PAIR_SCHEMA_VERSION:
-        raise ValueError(f"unexpected pair schema {value['schema_version']!r}")
-
-    if value["build_id"] != build_id:
-        raise ValueError(
-            f"pair {value['pair_id']} build_id mismatch: "
-            f"expected {build_id!r}, got {value['build_id']!r}"
-        )
-
-    if value["guide_schema_version"] != guide_schema_version:
-        raise ValueError(
-            f"pair {value['pair_id']} guide_schema_version mismatch: "
-            f"expected {guide_schema_version!r}, "
-            f"got {value['guide_schema_version']!r}"
-        )
-
-    pair_id = _require_non_empty_string(value["pair_id"], "pair.pair_id")
-    task_instruction = _require_non_empty_string(
-        value["task_instruction"],
-        "pair.task_instruction",
-    )
-    support_document_id = _require_non_empty_string(
-        value["support_document_id"],
-        "pair.support_document_id",
-    )
-
-    query_episode_index = _require_non_negative_int(
-        value["query_episode_index"],
-        "pair.query_episode_index",
-    )
-    support_episode_index = _require_non_negative_int(
-        value["support_episode_index"],
-        "pair.support_episode_index",
-    )
-
-    if query_episode_index == support_episode_index:
-        raise ValueError(
-            f"pair {pair_id} must use different query and support episodes"
-        )
-
-    support_rank = _require_non_negative_int(
-        value["support_rank"],
-        "pair.support_rank",
-    )
-    if support_rank != 0:
-        raise ValueError(
-            f"pair {pair_id} must use support_rank=0 for supports_per_query=1"
-        )
-
-    task_index = _require_non_negative_int(
-        value["task_index"],
-        "pair.task_index",
-    )
-
-    return SupportBinding(
-        build_id=value["build_id"],
-        pair_id=pair_id,
-        query_episode_index=query_episode_index,
-        support_episode_index=support_episode_index,
-        support_document_id=support_document_id,
-        support_rank=support_rank,
-        task_index=task_index,
-        task_instruction=task_instruction,
-        guide_schema_version=value["guide_schema_version"],
-    )
-
-
-def _require_artifact_file(path: Path) -> None:
-    """Require one explicitly provided artifact file."""
-
-    if not path.is_file():
-        raise FileNotFoundError(f"Artifact file does not exist: {path}")
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    """Read one JSON object with path-aware parse errors."""
-
-    _require_artifact_file(path)
-
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            value = json.load(handle)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Invalid JSON in {path} at line {exc.lineno}, "
-            f"column {exc.colno}: {exc.msg}"
-        ) from exc
-
-    if not isinstance(value, dict):
-        raise TypeError(f"{path} must contain a JSON object")
-
+def _require_non_negative_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
     return value
+
+
+def _canonical_json_sha256(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read JSONL objects with path- and line-aware parse errors."""
-
-    _require_artifact_file(path)
     records: list[dict[str, Any]] = []
-
     with path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             if not raw_line.strip():
-                raise TypeError(
+                raise ValueError(
                     f"Invalid JSONL in {path} at line {line_number}: empty line"
                 )
-
             try:
                 value = json.loads(raw_line)
             except json.JSONDecodeError as exc:
@@ -248,346 +60,382 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
                     f"Invalid JSONL in {path} at line {line_number}, "
                     f"column {exc.colno}: {exc.msg}"
                 ) from exc
-
             if not isinstance(value, dict):
                 raise TypeError(
-                    f"JSONL record in {path} at line {line_number} "
-                    "must be a JSON object"
+                    f"JSONL record in {path} at line {line_number} must be an object"
                 )
-
             records.append(value)
-
     return records
 
 
-def _read_document_directory(path: Path) -> list[dict[str, Any]]:
-    """Read one single-record Document JSONL per episode, grouped by task."""
-
+def _read_document_directory(path: Path) -> list[tuple[Path, dict[str, Any]]]:
     if not path.is_dir():
         raise FileNotFoundError(f"Document directory does not exist: {path}")
     files = sorted(path.glob("*/*.document.jsonl"))
     if not files:
-        raise FileNotFoundError(f"Document directory contains no episode files: {path}")
-    documents: list[dict[str, Any]] = []
-    for file in files:
-        records = _read_jsonl(file)
+        raise FileNotFoundError(
+            f"Document directory contains no episode files: {path}"
+        )
+
+    documents: list[tuple[Path, dict[str, Any]]] = []
+    for document_path in files:
+        records = _read_jsonl(document_path)
         if len(records) != 1:
             raise ValueError(
-                f"Episode Document file must contain exactly one record: {file}"
+                "Episode Document file must contain exactly one record: "
+                f"{document_path}"
             )
-        documents.append(records[0])
+        documents.append((document_path.resolve(), records[0]))
     return documents
 
 
-@dataclass(frozen=True)
-class GuideFrameRef:
-    """One support-document frame referenced by a token-neutral GuidePlan."""
-
+@dataclass(frozen=True, slots=True)
+class GuideDocument:
     document_id: str
-    episode_index: int
-    episode_frame_index: int
-    timestamp_s: float
-
-
-@dataclass(frozen=True)
-class GuideSource:
-    """Validated support document source metadata and canonical document."""
-
-    document_id: str
+    document_path: Path
+    document_sha256: str
     build_id: str
-    schema_version: str
-    episode_index: int
+    source_episode_index: int
     task_index: int
     task_instruction: str
     document: Mapping[str, Any]
 
 
-@dataclass(frozen=True)
-class SupportBinding:
-    """Static query-episode to support-document binding."""
-
+@dataclass(frozen=True, slots=True)
+class GuideExclusion:
+    document_id: str
+    document_path: Path
+    document_sha256: str
     build_id: str
-    pair_id: str
-    query_episode_index: int
-    support_episode_index: int
-    support_document_id: str
-    support_rank: int
+    source_episode_index: int
     task_index: int
     task_instruction: str
-    guide_schema_version: str
+    quality_status: str
+    reason: str
 
 
-@dataclass(frozen=True)
-class GuideArtifactBundle:
-    """Validated, read-only artifact bundle for one build."""
-
+@dataclass(frozen=True, slots=True)
+class GuideDocumentCatalog:
     build_id: str
-    supports_per_query: int
-    dataset: Mapping[str, Any]
-    documents: tuple[GuideSource, ...]
-    support_bindings: tuple[SupportBinding, ...]
+    documents: tuple[GuideDocument, ...]
+    exclusions: tuple[GuideExclusion, ...]
+    catalog_digest: str
+    _by_document_id: Mapping[str, GuideDocument] = field(repr=False)
+    _by_task: Mapping[int, tuple[GuideDocument, ...]] = field(repr=False)
+
+    def by_document_id(self, document_id: str) -> GuideDocument:
+        document_id = _require_non_empty_string(document_id, "document_id")
+        try:
+            return self._by_document_id[document_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"No accepted Guide Document has document_id={document_id!r}"
+            ) from exc
+
+    def documents_for_task(self, task_index: int) -> tuple[GuideDocument, ...]:
+        task_index = _require_non_negative_int(task_index, "task_index")
+        return self._by_task.get(task_index, ())
 
 
-@dataclass(frozen=True)
+def _catalog_digest(
+    documents: list[GuideDocument],
+    exclusions: list[GuideExclusion],
+) -> str:
+    records = [
+        {
+            "document_id": document.document_id,
+            "source_episode_index": document.source_episode_index,
+            "task_index": document.task_index,
+            "quality_status": "accepted",
+            "document_sha256": document.document_sha256,
+        }
+        for document in documents
+    ]
+    records.extend(
+        {
+            "document_id": exclusion.document_id,
+            "source_episode_index": exclusion.source_episode_index,
+            "task_index": exclusion.task_index,
+            "quality_status": exclusion.quality_status,
+            "document_sha256": exclusion.document_sha256,
+        }
+        for exclusion in exclusions
+    )
+    records.sort(
+        key=lambda record: (
+            record["task_index"],
+            record["source_episode_index"],
+            record["document_id"],
+        )
+    )
+    payload = json.dumps(
+        records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_guide_document_catalog(documents_root: Path) -> GuideDocumentCatalog:
+    """Load the one canonical, document-only Guide catalog."""
+
+    raw_documents = _read_document_directory(documents_root)
+    documents: list[GuideDocument] = []
+    exclusions: list[GuideExclusion] = []
+    seen_document_ids: set[str] = set()
+    seen_task_episodes: set[tuple[int, int]] = set()
+    instructions_by_task: dict[int, str] = {}
+    build_id: str | None = None
+
+    for document_path, raw_document in raw_documents:
+        try:
+            document = validate_document(raw_document)
+        except Exception as exc:
+            raise ValueError(
+                f"Invalid Behavior Document in {document_path}: {exc}"
+            ) from exc
+
+        document_id = _require_non_empty_string(
+            document["document_id"], "document.document_id"
+        )
+        current_build_id = _require_non_empty_string(
+            document["build_id"], "document.build_id"
+        )
+        source = document["source"]
+        source_episode_index = _require_non_negative_int(
+            source["episode_index"], "document.source.episode_index"
+        )
+        task_index = _require_non_negative_int(
+            source["task_index"], "document.source.task_index"
+        )
+        task_instruction = _require_non_empty_string(
+            document["task_instruction"], "document.task_instruction"
+        )
+
+        if build_id is None:
+            build_id = current_build_id
+        elif current_build_id != build_id:
+            raise ValueError(
+                f"Document {document_id!r} build_id mismatch: "
+                f"expected {build_id!r}, got {current_build_id!r}"
+            )
+        if document_id in seen_document_ids:
+            raise ValueError(f"Duplicate document_id {document_id!r}")
+        seen_document_ids.add(document_id)
+        task_episode = (task_index, source_episode_index)
+        if task_episode in seen_task_episodes:
+            raise ValueError(
+                "Duplicate task/source episode Document: "
+                f"task_index={task_index}, episode_index={source_episode_index}"
+            )
+        seen_task_episodes.add(task_episode)
+        known_instruction = instructions_by_task.setdefault(
+            task_index, task_instruction
+        )
+        if known_instruction != task_instruction:
+            raise ValueError(
+                f"Task {task_index} has inconsistent task instructions"
+            )
+        quality_status = document["quality_status"]
+        document_sha256 = _canonical_json_sha256(document)
+        identity = {
+            "document_id": document_id,
+            "document_path": document_path,
+            "document_sha256": document_sha256,
+            "build_id": current_build_id,
+            "source_episode_index": source_episode_index,
+            "task_index": task_index,
+            "task_instruction": task_instruction,
+        }
+
+        if quality_status == "quarantined":
+            exclusions.append(
+                GuideExclusion(
+                    **identity,
+                    quality_status=quality_status,
+                    reason="Document quality_status is quarantined",
+                )
+            )
+            continue
+        if quality_status != "accepted":
+            raise ValueError(
+                f"Final Document {document_id!r} has nonterminal "
+                f"quality_status={quality_status!r}"
+            )
+
+        try:
+            chain = tuple(accepted_transition_chain(document))
+        except Exception as exc:
+            raise ValueError(
+                f"Accepted Document {document_id!r} has an invalid transition chain: {exc}"
+            ) from exc
+        if not chain:
+            raise ValueError(
+                f"Accepted Document {document_id!r} has no trainable Evidence Units"
+            )
+
+        documents.append(
+            GuideDocument(
+                **identity,
+                document=_freeze_json(document),
+            )
+        )
+
+    if build_id is None:
+        raise ValueError("Guide document catalog is empty")
+    if not documents:
+        raise ValueError("Guide document catalog contains no accepted Documents")
+
+    documents.sort(
+        key=lambda document: (
+            document.task_index,
+            document.source_episode_index,
+            document.document_id,
+        )
+    )
+    exclusions.sort(
+        key=lambda exclusion: (
+            exclusion.task_index,
+            exclusion.source_episode_index,
+            exclusion.document_id,
+        )
+    )
+    by_task: dict[int, list[GuideDocument]] = {}
+    for document in documents:
+        by_task.setdefault(document.task_index, []).append(document)
+
+    return GuideDocumentCatalog(
+        build_id=build_id,
+        documents=tuple(documents),
+        exclusions=tuple(exclusions),
+        catalog_digest=_catalog_digest(documents, exclusions),
+        _by_document_id=MappingProxyType(
+            {document.document_id: document for document in documents}
+        ),
+        _by_task=MappingProxyType(
+            {task: tuple(values) for task, values in by_task.items()}
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class GuideBoundary:
+    boundary_id: str
+    order: int
+    slot: int
+    episode_frame_index: int
+    timestamp_s: float
+    view_texts: tuple[str, str, str]
+
+
+@dataclass(frozen=True, slots=True)
 class GuidePlanUnit:
-    """One selected evidence transition in an ordered GuidePlan."""
-
     unit_id: str
     order: int
     before_slot: int
     after_slot: int
     transition_text: str
-    provenance: Mapping[str, Any]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GuidePlan:
-    """Token-neutral ordered Guide plan for one query episode."""
-
-    query_episode_index: int
-    support_document_id: str
-    support_episode_index: int
+    document_id: str
+    source_episode_index: int
     task_index: int
     task_instruction: str
-    profile: str
-    frames: tuple[GuideFrameRef, ...]
+    boundaries: tuple[GuideBoundary, ...]
     units: tuple[GuidePlanUnit, ...]
 
 
-def _validate_document_source(
-    document: dict[str, Any],
-    *,
-    build_id: str,
-) -> GuideSource:
-    """Validate one canonical behavior document and wrap its source metadata."""
-
-    value = validate_document(document)
-
-    if value["build_id"] != build_id:
-        raise ValueError(
-            f"document {value['document_id']} build_id mismatch: "
-            f"expected {build_id!r}, got {value['build_id']!r}"
-        )
-
-    source = value["source"]
-
-    return GuideSource(
-        document_id=value["document_id"],
-        build_id=value["build_id"],
-        schema_version=value["schema_version"],
-        episode_index=source["episode_index"],
-        task_index=source["task_index"],
-        task_instruction=value["task_instruction"],
-        document=_freeze_json(value),
-    )
-
-
-def _index_document_sources(
-    documents: list[dict[str, Any]],
-    *,
-    build_id: str,
-) -> tuple[GuideSource, ...]:
-    """Validate and index all documents while preserving file order."""
-
-    sources: list[GuideSource] = []
-    seen_document_ids: set[str] = set()
-
-    for line_number, document in enumerate(documents, start=1):
-        source = _validate_document_source(
-            document,
-            build_id=build_id,
-        )
-
-        if source.document_id in seen_document_ids:
-            raise ValueError(
-                f"duplicate document_id {source.document_id!r} "
-                f"at JSONL record {line_number}"
-            )
-
-        seen_document_ids.add(source.document_id)
-        sources.append(source)
-
-    return tuple(sources)
-
-
-def _validate_binding_relationships(
-    bindings: tuple[SupportBinding, ...],
-    documents: tuple[GuideSource, ...],
-) -> None:
-    """Validate cross-artifact support-document relationships."""
-
-    documents_by_id = {source.document_id: source for source in documents}
-    seen_pair_ids: set[str] = set()
-    seen_query_episodes: set[int] = set()
-
-    for binding in bindings:
-        if binding.pair_id in seen_pair_ids:
-            raise ValueError(f"duplicate pair_id {binding.pair_id!r}")
-        seen_pair_ids.add(binding.pair_id)
-
-        if binding.query_episode_index in seen_query_episodes:
-            raise ValueError(
-                f"query episode {binding.query_episode_index} has more than one support"
-            )
-        seen_query_episodes.add(binding.query_episode_index)
-
-        support = documents_by_id.get(binding.support_document_id)
-        if support is None:
-            raise ValueError(
-                f"pair {binding.pair_id} references missing support document "
-                f"{binding.support_document_id!r}"
-            )
-
-        if support.episode_index != binding.support_episode_index:
-            raise ValueError(
-                f"pair {binding.pair_id} support episode mismatch: "
-                f"document has {support.episode_index}, "
-                f"pair has {binding.support_episode_index}"
-            )
-
-        if support.task_index != binding.task_index:
-            raise ValueError(
-                f"pair {binding.pair_id} task index mismatch: "
-                f"document has {support.task_index}, "
-                f"pair has {binding.task_index}"
-            )
-
-        if support.task_instruction != binding.task_instruction:
-            raise ValueError(f"pair {binding.pair_id} task instruction mismatch")
-
-
-def load_guide_artifact_bundle(
-    *,
-    dataset_path: Path,
-    documents_path: Path,
-    pairs_path: Path,
-) -> GuideArtifactBundle:
-    """Load and cross-validate one explicit VideoHarness artifact bundle."""
-
-    dataset = _validate_dataset_metadata(_read_json(dataset_path))
-    build_id = dataset["build_id"]
-
-    documents = _index_document_sources(
-        _read_document_directory(documents_path),
-        build_id=build_id,
-    )
-
-    raw_pairs = _read_jsonl(pairs_path)
-    bindings = tuple(
-        _validate_support_binding(
-            pair,
-            build_id=build_id,
-            guide_schema_version=BEHAVIOR_DOCUMENT_SCHEMA_VERSION,
-        )
-        for pair in raw_pairs
-    )
-    _validate_binding_relationships(bindings, documents)
-
-    return GuideArtifactBundle(
-        build_id=build_id,
-        supports_per_query=dataset["supports_per_query"],
-        dataset=_freeze_json(dataset),
-        documents=documents,
-        support_bindings=bindings,
-    )
-
-
 def build_guide_plan(
-    bundle: GuideArtifactBundle,
+    catalog: GuideDocumentCatalog,
     *,
-    query_episode_index: int,
-    profile: str = "actuator",
+    document_id: str,
 ) -> GuidePlan:
-    """Select trainable support evidence and build a token-neutral GuidePlan."""
+    """Project one accepted canonical Document into a token-neutral GuidePlan."""
 
-    if profile not in RENDER_PROFILES:
-        raise ValueError(f"Unknown renderer profile: {profile}")
-
-    binding = next(
-        (
-            candidate
-            for candidate in bundle.support_bindings
-            if candidate.query_episode_index == query_episode_index
-        ),
-        None,
-    )
-    if binding is None:
-        raise ValueError(
-            f"no support binding found for query episode {query_episode_index}"
-        )
-
-    source = next(
-        (
-            candidate
-            for candidate in bundle.documents
-            if candidate.document_id == binding.support_document_id
-        ),
-        None,
-    )
-    if source is None:
-        raise ValueError(
-            f"support document {binding.support_document_id!r} is not loaded"
-        )
-
-    frames: list[GuideFrameRef] = []
-    frame_slots: dict[tuple[int, float], int] = {}
+    source = catalog.by_document_id(document_id)
+    boundaries: list[GuideBoundary] = []
+    boundary_slots: dict[str, int] = {}
     units: list[GuidePlanUnit] = []
 
-    def slot_for(frame: MappingABC[str, Any]) -> int:
-        key = (
-            frame["episode_frame_index"],
-            float(frame["timestamp_s"]),
+    def slot_for(
+        boundary: Mapping[str, Any],
+        boundary_record: dict[str, Any],
+    ) -> int:
+        boundary_id = _require_non_empty_string(
+            boundary["boundary_id"], "boundary.boundary_id"
         )
-        if key not in frame_slots:
-            frame_slots[key] = len(frames)
-            frames.append(
-                GuideFrameRef(
-                    document_id=source.document_id,
-                    episode_index=source.episode_index,
-                    episode_frame_index=frame["episode_frame_index"],
-                    timestamp_s=float(frame["timestamp_s"]),
-                )
-            )
-        return frame_slots[key]
+        frame = boundary["frame"]
+        episode_frame_index = _require_non_negative_int(
+            frame["episode_frame_index"], "boundary.frame.episode_frame_index"
+        )
+        timestamp_s = float(frame["timestamp_s"])
+        view_texts = render_boundary_view_texts(boundary_record)
 
-    document = source.document
+        if boundary_id in boundary_slots:
+            slot = boundary_slots[boundary_id]
+            existing = boundaries[slot]
+            if (
+                existing.order != boundary["order"]
+                or existing.episode_frame_index != episode_frame_index
+                or existing.timestamp_s != timestamp_s
+                or existing.view_texts != view_texts
+            ):
+                raise ValueError(
+                    f"Shared Boundary {boundary_id!r} changed within one GuidePlan"
+                )
+            return slot
+
+        slot = len(boundaries)
+        boundary_slots[boundary_id] = slot
+        boundaries.append(
+            GuideBoundary(
+                boundary_id=boundary_id,
+                order=_require_non_negative_int(
+                    boundary["order"], "boundary.order"
+                ),
+                slot=slot,
+                episode_frame_index=episode_frame_index,
+                timestamp_s=timestamp_s,
+                view_texts=view_texts,
+            )
+        )
+        return slot
+
     for (
         raw_unit,
         before_boundary,
         after_boundary,
         record,
-        _before_record,
-        _after_record,
-    ) in accepted_transition_chain(document):
-        annotation = raw_unit["annotation"]
-        before_slot = slot_for(before_boundary["frame"])
-        after_slot = slot_for(after_boundary["frame"])
+        before_record,
+        after_record,
+    ) in accepted_transition_chain(source.document):
         units.append(
             GuidePlanUnit(
-                unit_id=raw_unit["unit_id"],
-                order=raw_unit["order"],
-                before_slot=before_slot,
-                after_slot=after_slot,
-                transition_text=render_evidence_text(
-                    record,
-                    profile,
+                unit_id=_require_non_empty_string(
+                    raw_unit["unit_id"], "evidence_unit.unit_id"
                 ),
-                provenance=annotation["provenance"],
+                order=_require_non_negative_int(
+                    raw_unit["order"], "evidence_unit.order"
+                ),
+                before_slot=slot_for(before_boundary, before_record),
+                after_slot=slot_for(after_boundary, after_record),
+                transition_text=render_transition_text(record),
             )
         )
 
     if not units:
         raise ValueError(
-            f"support document {source.document_id!r} has no trainable units"
+            f"Accepted Document {source.document_id!r} has no trainable Evidence Units"
         )
 
     return GuidePlan(
-        query_episode_index=query_episode_index,
-        support_document_id=source.document_id,
-        support_episode_index=source.episode_index,
+        document_id=source.document_id,
+        source_episode_index=source.source_episode_index,
         task_index=source.task_index,
         task_instruction=source.task_instruction,
-        profile=profile,
-        frames=tuple(frames),
+        boundaries=tuple(boundaries),
         units=tuple(units),
     )

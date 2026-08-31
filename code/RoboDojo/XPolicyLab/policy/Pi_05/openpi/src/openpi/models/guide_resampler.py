@@ -7,8 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-_NUM_ROLES = 3
-
 
 def _local_sinusoidal_position_encoding(length: int, width: int, dtype: jnp.dtype) -> jax.Array:
     positions = jnp.arange(length, dtype=jnp.float32)[:, None]  # [L] -> [L, 1]
@@ -19,8 +17,8 @@ def _local_sinusoidal_position_encoding(length: int, width: int, dtype: jnp.dtyp
     return encoding[:, :width].astype(dtype)
 
 
-class UnitResampler(nnx.Module):
-    """Shared Perceiver-style resampler applied independently to each Guide unit."""
+class PerceiverResampler(nnx.Module):
+    """Shared Perceiver-style resampler applied independently over one bank axis."""
 
     def __init__(
         self,
@@ -31,10 +29,21 @@ class UnitResampler(nnx.Module):
         width: int = 1024,
         num_heads: int = 8,
         ffn_hidden_dim: int | None = None,
+        num_roles: int,
         rngs: nnx.Rngs,
     ):
-        if input_dim <= 0 or output_dim <= 0 or num_queries <= 0 or width <= 0 or num_heads <= 0:
-            raise ValueError("input_dim, output_dim, num_queries, width, and num_heads must all be positive")
+        if (
+            input_dim <= 0
+            or output_dim <= 0
+            or num_queries <= 0
+            or width <= 0
+            or num_heads <= 0
+            or num_roles <= 0
+        ):
+            raise ValueError(
+                "input_dim, output_dim, num_queries, width, num_heads, and num_roles "
+                "must all be positive"
+            )
         if width % num_heads != 0:
             raise ValueError(f"width ({width}) must be divisible by num_heads ({num_heads})")
         if ffn_hidden_dim is None:
@@ -48,13 +57,14 @@ class UnitResampler(nnx.Module):
         self.width = width
         self.num_heads = num_heads
         self.head_dim = width // num_heads
+        self.num_roles = num_roles
 
         query_init = nnx.initializers.normal(stddev=0.02)
         self.learned_queries = nnx.Param(
             query_init(rngs.params(), (num_queries, width), jnp.float32)
         )
         self.role_embeddings = nnx.Param(
-            query_init(rngs.params(), (_NUM_ROLES, width), jnp.float32)
+            query_init(rngs.params(), (num_roles, width), jnp.float32)
         )
 
         kernel_init = nnx.initializers.xavier_uniform()
@@ -105,34 +115,49 @@ class UnitResampler(nnx.Module):
 
     def _validate_inputs(
         self,
-        unit_tokens: jax.Array,
+        bank_tokens: jax.Array,
         token_mask: jax.Array,
         role_ids: jax.Array,
-        unit_mask: jax.Array,
+        item_mask: jax.Array,
     ) -> None:
-        if unit_tokens.ndim != 4:
-            raise ValueError(f"unit_tokens must have shape [G, U, L, D_in], got {unit_tokens.shape}")
+        if bank_tokens.ndim != 4:
+            raise ValueError(
+                "bank_tokens must have shape [G, N, L, D_in], got "
+                f"{bank_tokens.shape}"
+            )
 
-        groups, units, tokens, input_dim = unit_tokens.shape
+        groups, items, tokens, input_dim = bank_tokens.shape
         if input_dim != self.input_dim:
-            raise ValueError(f"unit_tokens last dimension must be input_dim={self.input_dim}, got {input_dim}")
-        if token_mask.shape != (groups, units, tokens):
-            raise ValueError(f"token_mask must have shape {(groups, units, tokens)}, got {token_mask.shape}")
-        if role_ids.shape != (groups, units, tokens):
-            raise ValueError(f"role_ids must have shape {(groups, units, tokens)}, got {role_ids.shape}")
-        if unit_mask.shape != (groups, units):
-            raise ValueError(f"unit_mask must have shape {(groups, units)}, got {unit_mask.shape}")
+            raise ValueError(
+                f"bank_tokens last dimension must be input_dim={self.input_dim}, "
+                f"got {input_dim}"
+            )
+        if token_mask.shape != (groups, items, tokens):
+            raise ValueError(
+                f"token_mask must have shape {(groups, items, tokens)}, got "
+                f"{token_mask.shape}"
+            )
+        if role_ids.shape != (groups, items, tokens):
+            raise ValueError(
+                f"role_ids must have shape {(groups, items, tokens)}, got {role_ids.shape}"
+            )
+        if item_mask.shape != (groups, items):
+            raise ValueError(
+                f"item_mask must have shape {(groups, items)}, got {item_mask.shape}"
+            )
         if token_mask.dtype != jnp.bool_:
             raise ValueError(f"token_mask must have bool dtype, got {token_mask.dtype}")
-        if unit_mask.dtype != jnp.bool_:
-            raise ValueError(f"unit_mask must have bool dtype, got {unit_mask.dtype}")
+        if item_mask.dtype != jnp.bool_:
+            raise ValueError(f"item_mask must have bool dtype, got {item_mask.dtype}")
         if not jnp.issubdtype(role_ids.dtype, jnp.integer):
             raise ValueError(f"role_ids must have an integer dtype, got {role_ids.dtype}")
 
         if not isinstance(role_ids, jax.core.Tracer):
             role_ids_array = np.asarray(role_ids)
-            if np.any((role_ids_array < 0) | (role_ids_array >= _NUM_ROLES)):
-                raise ValueError(f"role_ids must contain only values in [0, {_NUM_ROLES})")
+            if np.any((role_ids_array < 0) | (role_ids_array >= self.num_roles)):
+                raise ValueError(
+                    f"role_ids must contain only values in [0, {self.num_roles})"
+                )
 
 
     def _split_heads(self, value: jax.Array) -> jax.Array:
@@ -172,24 +197,24 @@ class UnitResampler(nnx.Module):
 
     def __call__(
         self,
-        unit_tokens: jax.Array,
+        bank_tokens: jax.Array,
         token_mask: jax.Array,
         role_ids: jax.Array,
-        unit_mask: jax.Array,
+        item_mask: jax.Array,
     ) -> jax.Array:
-        self._validate_inputs(unit_tokens, token_mask, role_ids, unit_mask)
-        groups, units, tokens, _ = unit_tokens.shape
-        flat_units = groups * units
+        self._validate_inputs(bank_tokens, token_mask, role_ids, item_mask)
+        groups, items, tokens, _ = bank_tokens.shape
+        flat_items = groups * items
 
-        x = self.input_projection(unit_tokens)
+        x = self.input_projection(bank_tokens)
         x = x + self.role_embeddings.value[role_ids]
         x = x + _local_sinusoidal_position_encoding(tokens, self.width, x.dtype)[None, None, :, :]
-        x = x.reshape(flat_units, tokens, self.width)
-        flat_token_mask = token_mask.reshape(flat_units, tokens)
+        x = x.reshape(flat_items, tokens, self.width)
+        flat_token_mask = token_mask.reshape(flat_items, tokens)
 
         queries = jnp.broadcast_to(
             self.learned_queries.value,
-            (flat_units, self.num_queries, self.width),
+            (flat_items, self.num_queries, self.width),
         )
         queries = queries + self._cross_attention(
             self.query_norm(queries),
@@ -201,5 +226,5 @@ class UnitResampler(nnx.Module):
         )
 
         output = self.output_projection(queries)
-        output = output.reshape(groups, units, self.num_queries, self.output_dim)
-        return jnp.where(unit_mask[..., None, None], output, jnp.zeros_like(output))
+        output = output.reshape(groups, items, self.num_queries, self.output_dim)
+        return jnp.where(item_mask[..., None, None], output, jnp.zeros_like(output))

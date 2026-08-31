@@ -32,7 +32,6 @@ from .hdf5_source import (
     load_hdf5_jpeg,
 )
 from .media import FFmpegFrameLoader
-from .pairing import build_pairs
 from .pipeline import EvidenceUnitPipeline
 from .reconciliation import reconcile_document, sequence_projection_sha256
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
@@ -49,7 +48,6 @@ from .sampling import (
     validate_document,
 )
 from .temporal_media import TemporalMediaBuilder
-from .training_split import build_training_split, episode_record_from_dict
 
 CHECKPOINT_SCHEMA_VERSION = "video-harness.document-checkpoint"
 CHECKPOINT_RUN_SCHEMA_VERSION = "video-harness.checkpoint-run"
@@ -387,10 +385,8 @@ def _select_records(
     for task_index in task_indices:
         task_records = sorted(by_task[task_index], key=lambda item: item.episode_index)
         if episodes_per_task is not None:
-            if episodes_per_task < 2:
-                raise ValueError(
-                    "--episodes-per-task must be at least two for support/query pairing"
-                )
+            if episodes_per_task < 1:
+                raise ValueError("--episodes-per-task must be positive")
             task_records = task_records[:episodes_per_task]
         selected.extend(task_records)
     return selected
@@ -402,7 +398,6 @@ def _build(args: argparse.Namespace) -> int:
     records = _select_records(source_records, args.max_tasks, args.episodes_per_task)
     build_id = (
         f"robodojo-main__benchmark-34__hz-{args.sample_hz:g}__"
-        f"supports-{args.supports_per_query}__seed-{args.seed}__"
         f"tasks-{args.max_tasks if args.max_tasks is not None else 'all'}__"
         f"episodes-{args.episodes_per_task if args.episodes_per_task is not None else 'all'}"
     )
@@ -413,8 +408,11 @@ def _build(args: argparse.Namespace) -> int:
             "source_dataset": "RoboDojo-Benchmark/RoboDojo/data/RoboDojo_lerobot_v30_video",
             "source_revision": "main",
             "sample_hz": args.sample_hz,
-            "supports_per_query": args.supports_per_query,
-            "document_camera": "observation.images.cam_high",
+            "document_views": [
+                "cam_high",
+                "cam_left_wrist",
+                "cam_right_wrist",
+            ],
             "benchmark_source_episodes": len(source_records),
             "selection": {
                 "max_tasks": args.max_tasks,
@@ -433,16 +431,9 @@ def _build(args: argparse.Namespace) -> int:
     for document in documents:
         validate_document(document)
     _write_jsonl(args.output_root / "documents.jsonl", documents)
-    pairs = build_pairs(
-        records,
-        build_id=build_id,
-        supports_per_query=args.supports_per_query,
-        seed=args.seed,
-    )
-    _write_jsonl(args.output_root / "pairs.jsonl", pairs)
     print(
         json.dumps(
-            {**summary, "documents": len(documents), "pairs": len(pairs)}, indent=2
+            {**summary, "documents": len(documents)}, indent=2
         )
     )
     return 0
@@ -999,42 +990,6 @@ def _annotate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _make_training_split(args: argparse.Namespace) -> int:
-    _require_new_or_empty_directory(args.output_root)
-    dataset = json.loads(args.dataset_artifact.read_text(encoding="utf-8"))
-    if not isinstance(dataset, dict):
-        raise TypeError("--dataset-artifact must contain one JSON object")
-    build_id = dataset.get("build_id")
-    if not isinstance(build_id, str) or not build_id.strip():
-        raise ValueError("dataset artifact has no valid build_id")
-
-    records = [episode_record_from_dict(value) for value in _read_jsonl(args.episodes)]
-    documents = _read_jsonl(args.documents)
-    manifest, pairs = build_training_split(
-        records,
-        documents,
-        build_id=build_id,
-        support_documents_per_task=args.support_documents_per_task,
-        heldout_documents_per_task=args.heldout_documents_per_task,
-        query_episodes_per_task=args.query_episodes_per_task,
-        min_trainable_units=args.min_trainable_units,
-        seed=args.seed,
-    )
-    _write_json(args.output_root / "training-split.json", manifest)
-    _write_jsonl(args.output_root / "train-pairs.jsonl", pairs)
-    print(
-        json.dumps(
-            {
-                "split_id": manifest["split_id"],
-                **manifest["totals"],
-                "output_root": str(args.output_root),
-            },
-            indent=2,
-        )
-    )
-    return 0
-
-
 def _merge_checkpoints(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise FileExistsError(f"Merged annotation output already exists: {args.output}")
@@ -1294,13 +1249,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.set_defaults(handler=_inspect)
 
     build = subparsers.add_parser(
-        "build", help="build inventory, draft documents, and pairs"
+        "build", help="build source inventory and draft Documents"
     )
     build.add_argument("--dataset-root", type=Path, required=True)
     build.add_argument("--output-root", type=Path, required=True)
     build.add_argument("--sample-hz", type=float, default=1.0)
-    build.add_argument("--supports-per-query", type=int, default=1)
-    build.add_argument("--seed", type=int, default=0)
     build.add_argument("--max-tasks", type=int)
     build.add_argument("--episodes-per-task", type=int)
     build.set_defaults(handler=_build)
@@ -1391,21 +1344,6 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--document-root", type=Path)
     merge.add_argument("--output", type=Path, required=True)
     merge.set_defaults(handler=_merge_checkpoints)
-
-    split = subparsers.add_parser(
-        "make-training-split",
-        help="build a role-disjoint training split and balanced static Guide bindings",
-    )
-    split.add_argument("--dataset-artifact", type=Path, required=True)
-    split.add_argument("--episodes", type=Path, required=True)
-    split.add_argument("--documents", type=Path, required=True)
-    split.add_argument("--output-root", type=Path, required=True)
-    split.add_argument("--support-documents-per-task", type=int, required=True)
-    split.add_argument("--heldout-documents-per-task", type=int, required=True)
-    split.add_argument("--query-episodes-per-task", type=int)
-    split.add_argument("--min-trainable-units", type=int, default=1)
-    split.add_argument("--seed", type=int, default=0)
-    split.set_defaults(handler=_make_training_split)
 
     report = subparsers.add_parser(
         "report", help="validate evidence records and summarize annotation usability"

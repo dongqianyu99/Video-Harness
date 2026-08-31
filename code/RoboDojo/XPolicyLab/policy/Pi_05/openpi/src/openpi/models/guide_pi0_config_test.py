@@ -16,7 +16,8 @@ def test_guide_pi0_config_defaults_to_pi05_and_guide_resampler_settings() -> Non
     config = guide_pi0_config.GuidePi0Config()
 
     assert config.pi05 is True
-    assert config.guide_num_queries == 8
+    assert config.guide_boundary_num_queries == 8
+    assert config.guide_transition_num_queries == 4
     assert config.guide_resampler_width == 1024
     assert config.guide_resampler_num_heads == 8
     assert config.guide_resampler_ffn_hidden_dim is None
@@ -31,7 +32,8 @@ def test_guide_pi0_config_rejects_pi0_mode() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"guide_num_queries": 0}, "positive"),
+        ({"guide_boundary_num_queries": 0}, "positive"),
+        ({"guide_transition_num_queries": 0}, "positive"),
         ({"guide_resampler_width": 0}, "positive"),
         ({"guide_resampler_num_heads": 0}, "positive"),
         ({"guide_resampler_width": 10, "guide_resampler_num_heads": 3}, "divisible"),

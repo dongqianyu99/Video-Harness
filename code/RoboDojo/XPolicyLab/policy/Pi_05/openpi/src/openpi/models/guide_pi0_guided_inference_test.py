@@ -33,10 +33,7 @@ def _make_observation(*, include_prompt: bool = True) -> _model.Observation:
         ).reshape(_GROUPS, _QUERIES, 2, 2, 3)
         for key in _model.IMAGE_KEYS
     }
-    image_masks = {
-        key: jnp.ones((_GROUPS, _QUERIES), dtype=jnp.bool_)
-        for key in _model.IMAGE_KEYS
-    }
+    image_masks = {key: jnp.ones((_GROUPS, _QUERIES), dtype=jnp.bool_) for key in _model.IMAGE_KEYS}
 
     if include_prompt:
         tokenized_prompt = jnp.arange(
@@ -65,13 +62,18 @@ def _make_observation(*, include_prompt: bool = True) -> _model.Observation:
 
 def _make_guide() -> GuideInput:
     return GuideInput(
-        images=jnp.zeros((_GROUPS, 2, 2, 2, 3), dtype=jnp.float32),
-        image_mask=jnp.ones((_GROUPS, 2), dtype=jnp.bool_),
-        text_tokens=jnp.zeros((_GROUPS, 1, 4), dtype=jnp.int32),
-        text_mask=jnp.ones((_GROUPS, 1, 4), dtype=jnp.bool_),
+        boundary_images=jnp.zeros((_GROUPS, 2, 3, 2, 2, 3), dtype=jnp.float32),
+        boundary_image_mask=jnp.ones((_GROUPS, 2, 3), dtype=jnp.bool_),
+        boundary_text_tokens=jnp.zeros((_GROUPS, 2, 3, 4), dtype=jnp.int32),
+        boundary_text_mask=jnp.ones((_GROUPS, 2, 3, 4), dtype=jnp.bool_),
+        transition_text_tokens=jnp.zeros((_GROUPS, 1, 4), dtype=jnp.int32),
+        transition_text_mask=jnp.ones((_GROUPS, 1, 4), dtype=jnp.bool_),
+        boundary_mask=jnp.ones((_GROUPS, 2), dtype=jnp.bool_),
         unit_mask=jnp.ones((_GROUPS, 1), dtype=jnp.bool_),
-        before_slot=jnp.zeros((_GROUPS, 1), dtype=jnp.int32),
-        after_slot=jnp.ones((_GROUPS, 1), dtype=jnp.int32),
+        memory_source_kind=jnp.zeros((_GROUPS, 3), dtype=jnp.int32),
+        memory_source_index=jnp.zeros((_GROUPS, 3), dtype=jnp.int32),
+        memory_source_offset=jnp.zeros((_GROUPS, 3), dtype=jnp.int32),
+        memory_mask=jnp.ones((_GROUPS, 3), dtype=jnp.bool_),
     )
 
 
@@ -114,7 +116,10 @@ def test_validate_grouped_observation_rejects_observation_group_query_mismatch()
 
 
 def test_validate_grouped_observation_rejects_guide_group_mismatch() -> None:
-    guide = dataclasses.replace(_make_guide(), images=_make_guide().images[:1])
+    guide = dataclasses.replace(
+        _make_guide(),
+        boundary_images=_make_guide().boundary_images[:1],
+    )
 
     with pytest.raises(ValueError, match=r"guide|images"):
         guide_inputs.validate_guide_conditioned_observation(_make_observation(), guide)
@@ -137,9 +142,7 @@ def test_flatten_grouped_observation_is_group_major() -> None:
 
 
 def test_flatten_grouped_observation_preserves_optional_none_fields() -> None:
-    flat_observation = guide_inputs.flatten_grouped_observation(
-        _make_observation(include_prompt=False)
-    )
+    flat_observation = guide_inputs.flatten_grouped_observation(_make_observation(include_prompt=False))
 
     assert flat_observation.tokenized_prompt is None
     assert flat_observation.tokenized_prompt_mask is None
@@ -299,13 +302,17 @@ def test_prefill_guided_prefix_encodes_and_prefills_once(monkeypatch) -> None:
     model._embed_guide_control_prefix = (  # noqa: SLF001
         guide_pi0.GuidePi0._embed_guide_control_prefix.__get__(model)  # noqa: SLF001
     )
+    model._prefill_guided_prefix_with_memory = (  # noqa: SLF001
+        guide_pi0.GuidePi0._prefill_guided_prefix_with_memory.__get__(model)  # noqa: SLF001
+    )
+    model._validate_guide_memory_observation = (  # noqa: SLF001
+        guide_pi0.GuidePi0._validate_guide_memory_observation  # noqa: SLF001
+    )
 
-    flat_observation, prefix_mask, kv_cache, groups, queries = (
-        guide_pi0.GuidePi0._prefill_guided_prefix(  # noqa: SLF001
-            model,
-            observation,
-            guide,
-        )
+    flat_observation, prefix_mask, kv_cache, groups, queries = guide_pi0.GuidePi0._prefill_guided_prefix(  # noqa: SLF001
+        model,
+        observation,
+        guide,
     )
 
     assert (groups, queries) == (_GROUPS, _QUERIES)
@@ -469,13 +476,18 @@ def _make_sampling_model(monkeypatch):
     model._prefill_guided_prefix = (  # noqa: SLF001
         guide_pi0.GuidePi0._prefill_guided_prefix.__get__(model)  # noqa: SLF001
     )
+    model._prefill_guided_prefix_with_memory = (  # noqa: SLF001
+        guide_pi0.GuidePi0._prefill_guided_prefix_with_memory.__get__(model)  # noqa: SLF001
+    )
+    model._validate_guide_memory_observation = (  # noqa: SLF001
+        guide_pi0.GuidePi0._validate_guide_memory_observation  # noqa: SLF001
+    )
+    model.sample_guided_actions_with_memory = guide_pi0.GuidePi0.sample_guided_actions_with_memory.__get__(model)
     return model, guide_encoder_stub, prefix, suffix, llm, action_out_proj
 
 
 def test_sample_guided_actions_prefills_once_and_reuses_kv_cache(monkeypatch) -> None:
-    model, guide_encoder_stub, prefix, suffix, llm, action_out_proj = (
-        _make_sampling_model(monkeypatch)
-    )
+    model, guide_encoder_stub, prefix, suffix, llm, action_out_proj = _make_sampling_model(monkeypatch)
     observation = _make_observation()
     guide = _make_guide()
     grouped_noise = jnp.arange(
@@ -543,14 +555,122 @@ def test_sample_guided_actions_prefills_once_and_reuses_kv_cache(monkeypatch) ->
     )
     np.testing.assert_array_equal(
         runtime_call["positions"],
-        jnp.sum(prefix_mask, axis=-1)[:, None]
-        + jnp.cumsum(suffix.mask, axis=-1)
-        - 1,
+        jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix.mask, axis=-1) - 1,
     )
 
     # The action block is one bidirectional block, not token-by-token causal.
     assert bool(runtime_call["mask"][0, 0, -1])
     assert bool(runtime_call["mask"][0, 1, -2])
+
+
+def test_sample_guided_actions_with_memory_skips_guide_encoder(monkeypatch) -> None:
+    model, guide_encoder_stub, prefix, suffix, llm, action_out_proj = _make_sampling_model(monkeypatch)
+    grouped_noise = jnp.arange(
+        _GROUPS * _QUERIES * _ACTION_HORIZON * _ACTION_DIM,
+        dtype=jnp.float32,
+    ).reshape(_GROUPS, _QUERIES, _ACTION_HORIZON, _ACTION_DIM)
+
+    actions = guide_pi0.GuidePi0.sample_guided_actions_with_memory(
+        model,
+        jax.random.key(0),
+        _make_observation(),
+        guide_memory=guide_encoder_stub.memory,
+        num_steps=1,
+        noise=grouped_noise,
+    )
+
+    np.testing.assert_array_equal(actions, grouped_noise)
+    assert guide_encoder_stub.calls == []
+    assert len(prefix.calls) == 1
+    assert len(suffix.calls) == 1
+    assert len(llm.calls) == 2
+    assert len(action_out_proj.calls) == 1
+
+
+def test_raw_and_cached_guide_sampling_are_equivalent_with_fixed_noise(monkeypatch) -> None:
+    model, guide_encoder_stub, *_ = _make_sampling_model(monkeypatch)
+    guide = _make_guide()
+    grouped_noise = jnp.arange(
+        _GROUPS * _QUERIES * _ACTION_HORIZON * _ACTION_DIM,
+        dtype=jnp.float32,
+    ).reshape(_GROUPS, _QUERIES, _ACTION_HORIZON, _ACTION_DIM)
+
+    raw_actions = guide_pi0.GuidePi0.sample_guided_actions(
+        model,
+        jax.random.key(0),
+        _make_observation(),
+        guide=guide,
+        num_steps=1,
+        noise=grouped_noise,
+    )
+    cached_actions = guide_pi0.GuidePi0.sample_guided_actions_with_memory(
+        model,
+        jax.random.key(1),
+        _make_observation(),
+        guide_memory=guide_encoder_stub.memory,
+        num_steps=1,
+        noise=grouped_noise,
+    )
+
+    np.testing.assert_array_equal(cached_actions, raw_actions)
+    assert guide_encoder_stub.calls == [guide]
+
+
+@pytest.mark.parametrize(
+    ("memory", "message"),
+    [
+        (
+            guide_encoder.GuideMemory(
+                tokens=jnp.zeros((1, _GUIDE_TOKENS, _PREFIX_WIDTH)),
+                token_mask=jnp.ones((1, _GUIDE_TOKENS), dtype=jnp.bool_),
+            ),
+            "share G",
+        ),
+        (
+            guide_encoder.GuideMemory(
+                tokens=jnp.zeros((_GROUPS, _GUIDE_TOKENS, _PREFIX_WIDTH)),
+                token_mask=jnp.ones((_GROUPS, _GUIDE_TOKENS + 1), dtype=jnp.bool_),
+            ),
+            "share \\[G, S\\]",
+        ),
+        (
+            guide_encoder.GuideMemory(
+                tokens=jnp.zeros((_GROUPS, _GUIDE_TOKENS, _PREFIX_WIDTH)),
+                token_mask=jnp.ones((_GROUPS, _GUIDE_TOKENS), dtype=jnp.float32),
+            ),
+            "boolean dtype",
+        ),
+        (
+            guide_encoder.GuideMemory(
+                tokens=jnp.zeros((_GROUPS, _GUIDE_TOKENS)),
+                token_mask=jnp.ones((_GROUPS, _GUIDE_TOKENS), dtype=jnp.bool_),
+            ),
+            "tokens must have shape",
+        ),
+        (
+            guide_encoder.GuideMemory(
+                tokens=jnp.zeros((_GROUPS, _GUIDE_TOKENS, _PREFIX_WIDTH)),
+                token_mask=jnp.ones((_GROUPS, _GUIDE_TOKENS, 1), dtype=jnp.bool_),
+            ),
+            "token_mask must have shape",
+        ),
+    ],
+)
+def test_sample_guided_actions_with_memory_validates_memory(
+    monkeypatch,
+    memory,
+    message,
+) -> None:
+    model, *_ = _make_sampling_model(monkeypatch)
+
+    with pytest.raises(ValueError, match=message):
+        guide_pi0.GuidePi0.sample_guided_actions_with_memory(
+            model,
+            jax.random.key(0),
+            _make_observation(),
+            guide_memory=memory,
+            num_steps=1,
+        )
 
 
 def test_sample_guided_actions_rejects_flat_noise(monkeypatch) -> None:

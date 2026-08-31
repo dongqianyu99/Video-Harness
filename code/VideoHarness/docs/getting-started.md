@@ -96,8 +96,8 @@ artifacts, or run logs.
 
 ## 4. Run one complete episode in debug mode
 
-The build requires two same-task episodes for support/query metadata; the annotation
-limit below processes exactly one complete episode.
+The annotation limit below processes exactly one complete episode. The build is
+document-only and may select a single episode for a bounded smoke run.
 
 ```bash
 export VH_DEBUG_RUN=/path/to/runs/video-harness-debug
@@ -106,9 +106,8 @@ uv run video-harness build \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --output-root "$VH_DEBUG_RUN" \
   --sample-hz 1 \
-  --supports-per-query 1 \
   --max-tasks 1 \
-  --episodes-per-task 2
+  --episodes-per-task 1
 
 uv run video-harness annotate \
   --provider "$VH_PROVIDER" \
@@ -151,8 +150,7 @@ export VH_RUN=/path/to/runs/video-harness-full
 uv run video-harness build \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --output-root "$VH_RUN" \
-  --sample-hz 1 \
-  --supports-per-query 1
+  --sample-hz 1
 ```
 
 Start with two to four Document workers. Evidence Units inside one Document remain
@@ -234,9 +232,9 @@ JSONL:
 --documents-root "$VH_RUN/documents-$VH_PROVIDER"
 ```
 
-The loader scans `<official-task-name>/*.document.jsonl` once at startup, validates the
-episode/task/build relationships, and builds an in-memory catalog. Training batches do
-not repeatedly scan the directory.
+The loader scans `<official-task-name>/*.document.jsonl`, validates accepted and
+quarantined Documents, and builds a stable in-memory catalog. Training batches do not
+repeatedly scan the directory.
 
 ## Output layout
 
@@ -245,7 +243,6 @@ not repeatedly scan the directory.
 ├── dataset.json
 ├── episodes.jsonl
 ├── documents.jsonl                     # planned source manifest
-├── pairs.jsonl
 ├── documents.<provider>.jsonl          # merge/report compatibility index
 ├── documents-<provider>/               # Pi0.5 Guidance input
 │   └── <official-task-name>/

@@ -10,7 +10,7 @@ import jax
 import numpy as np
 
 from openpi.models.guide_inputs import GuideInput
-from openpi.training.guide_dataset import GuideBindingRecord
+from openpi.training.guide_dataset import GuideRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,15 +38,15 @@ def _freeze_guide(guide: GuideInput) -> GuideInput:
 class ProcessLocalGuideResolver:
     """Lazy per-process resolver with a bounded materialized-Guide LRU.
 
-    PyTorch ``spawn`` workers receive only the resolver factory.  The actual
-    VideoHarness bundle, tokenizer, FFmpeg loader, and cache are created after
-    the worker starts and are never shared across process boundaries.
+    PyTorch ``spawn`` workers receive only the resolver factory with compact
+    parent-validated snapshots. Tokenizers, FFmpeg loaders, and caches are
+    created after the worker starts and are never shared across processes.
     """
 
     def __init__(
         self,
         *,
-        resolver_factory: Callable[[], Callable[[GuideBindingRecord], GuideInput]],
+        resolver_factory: Callable[[], Callable[[GuideRecord], GuideInput]],
         max_entries: int = 0,
         max_bytes: int = 0,
     ) -> None:
@@ -63,7 +63,7 @@ class ProcessLocalGuideResolver:
 
     def _reset_runtime(self) -> None:
         self._owner_pid: int | None = None
-        self._resolver: Callable[[GuideBindingRecord], GuideInput] | None = None
+        self._resolver: Callable[[GuideRecord], GuideInput] | None = None
         self._cache: OrderedDict[str, tuple[GuideInput, int]] = OrderedDict()
         self._cache_bytes = 0
         self._hits = 0
@@ -83,7 +83,7 @@ class ProcessLocalGuideResolver:
         self._max_bytes = state["_max_bytes"]
         self._reset_runtime()
 
-    def _ensure_process(self) -> Callable[[GuideBindingRecord], GuideInput]:
+    def _ensure_process(self) -> Callable[[GuideRecord], GuideInput]:
         pid = os.getpid()
         if self._owner_pid != pid or self._resolver is None:
             self._reset_runtime()
@@ -124,9 +124,9 @@ class ProcessLocalGuideResolver:
             self._evictions += 1
         return frozen
 
-    def __call__(self, record: GuideBindingRecord) -> GuideInput:
+    def __call__(self, record: GuideRecord) -> GuideInput:
         resolver = self._ensure_process()
-        key = record.support_document_id
+        key = record.document_id
         if self._cache_enabled() and key in self._cache:
             guide, size = self._cache.pop(key)
             self._cache[key] = (guide, size)
@@ -147,10 +147,10 @@ class ProcessLocalGuideResolver:
 class ConstantResolverFactory:
     """Pickle-friendly adapter for single-process tests and custom resolvers."""
 
-    def __init__(self, resolver: Callable[[GuideBindingRecord], GuideInput]) -> None:
+    def __init__(self, resolver: Callable[[GuideRecord], GuideInput]) -> None:
         if not callable(resolver):
             raise ValueError("resolver must be callable")
         self._resolver = resolver
 
-    def __call__(self) -> Callable[[GuideBindingRecord], GuideInput]:
+    def __call__(self) -> Callable[[GuideRecord], GuideInput]:
         return self._resolver

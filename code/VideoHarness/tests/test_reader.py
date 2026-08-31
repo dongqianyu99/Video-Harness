@@ -3,92 +3,43 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
-import re
-import shutil
-from dataclasses import FrozenInstanceError
 from pathlib import Path
-from typing import Any
 
 import pytest
 from _support import annotate_boundaries, set_document_quality
-
-from video_harness.evidence import (
-    EVIDENCE_SCHEMA_VERSION,
-    compose_evidence_record,
-    mock_evidence_record,
-)
+from video_harness.evidence import EVIDENCE_SCHEMA_VERSION
 from video_harness.reader import (
-    GuideArtifactBundle,
+    GuideDocumentCatalog,
     GuidePlan,
     build_guide_plan,
-    load_guide_artifact_bundle,
+    load_guide_document_catalog,
 )
 from video_harness.robodojo import EpisodeRecord, VideoSlice
-from video_harness.sampling import BEHAVIOR_DOCUMENT_SCHEMA_VERSION, plan_document
-
-_BUILD_ID = "build-m4a-test"
-_TASK_INDEX = 3
-_TASK_INSTRUCTION = "Put bread into the toaster."
+from video_harness.sampling import plan_document
 
 
-def _changed_evidence() -> dict[str, Any]:
-    views = ("cam_high", "cam_left_wrist", "cam_right_wrist")
-    return compose_evidence_record(
-        {
-            "motion_summary": "The gripper transports the bread slice and releases it into the toaster.",
-            "before_boundary_observation": {
-                view: "The bread slice is outside the toaster." for view in views
-            },
-            "after_boundary_observation": {
-                view: "The bread slice is inside the toaster." for view in views
-            },
-            "boundary_conflicts": {"before": None, "after": None},
-            "detail_observation": "The detail sheet supports the insertion motion.",
-            "unit_interpretation": {
-                "action_description": "The robot inserts the bread slice into the toaster.",
-                "task_role": "This Evidence Unit loads one bread slice for the toasting task.",
-            },
-            "causal_validation": {
-                "status": "pass",
-                "reason": "The Boundary states and motion summary support the insertion.",
-            },
-        },
-        quality_status="accepted",
-    )
-
-
-def _gripper_close_evidence() -> dict[str, Any]:
-    record = _changed_evidence()
-    record["motion_summary"] = "The gripper closes around the stationary bread slice."
-    record["unit_interpretation"] = {
-        "action_description": "The robot closes the gripper around the bread slice.",
-        "task_role": "This Evidence Unit establishes a grasp before transport.",
-    }
-    return record
-
-
-def _document(
+def _source(
     episode_index: int,
     *,
-    build_id: str = _BUILD_ID,
-    records_by_order: dict[int, dict[str, Any]] | None = None,
-    statuses_by_order: dict[int, str] | None = None,
-) -> dict[str, Any]:
-    source = EpisodeRecord(
+    task_index: int = 3,
+    task_instruction: str = "Put bread into the toaster.",
+    length: int = 51,
+) -> EpisodeRecord:
+    return EpisodeRecord(
         episode_index=episode_index,
-        task_index=_TASK_INDEX,
-        task_instruction=_TASK_INSTRUCTION,
+        task_index=task_index,
+        task_instruction=task_instruction,
         task_kind="benchmark",
-        length=101,
-        dataset_from_index=episode_index * 101,
-        dataset_to_index=(episode_index + 1) * 101,
+        length=length,
+        dataset_from_index=episode_index * length,
+        dataset_to_index=(episode_index + 1) * length,
         data_path="data/chunk-000/file-000.parquet",
         videos=tuple(
             VideoSlice(
                 key=key,
                 path=f"videos/{key}/chunk-000/file-000.mp4",
                 from_timestamp=0.0,
-                to_timestamp=101 / 25,
+                to_timestamp=length / 25,
             )
             for key in (
                 "observation.images.cam_high",
@@ -97,517 +48,285 @@ def _document(
             )
         ),
     )
-    document = plan_document(source, build_id=build_id)
-    records_by_order = records_by_order or {}
-    statuses_by_order = statuses_by_order or {}
 
-    for order, unit in enumerate(document["evidence_units"]):
-        status = statuses_by_order.get(order)
-        record = records_by_order.get(order)
-        if status is None:
-            status = "complete" if record is not None else "pending"
 
-        if status in {"pending", "failed"}:
-            record = None
-            provenance = None
-        else:
-            record = copy.deepcopy(record or _changed_evidence())
-            provenance = {
+def _document(
+    episode_index: int,
+    changed_evidence: dict,
+    *,
+    build_id: str = "catalog-build",
+    task_index: int = 3,
+    task_instruction: str = "Put bread into the toaster.",
+    length: int = 51,
+    quality_status: str = "accepted",
+) -> dict:
+    document = plan_document(
+        _source(
+            episode_index,
+            task_index=task_index,
+            task_instruction=task_instruction,
+            length=length,
+        ),
+        build_id=build_id,
+    )
+    annotate_boundaries(document)
+    for unit in document["evidence_units"]:
+        unit["annotation"] = {
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
+            "status": "complete",
+            "record": copy.deepcopy(changed_evidence),
+            "provenance": {
                 "call1": {
-                    "provider": "test-provider",
+                    "provider": "test",
                     "model": "test-motion",
                     "prompt_version": "test-inspection",
                 },
                 "call2": {
-                    "provider": "test-provider",
+                    "provider": "test",
                     "model": "test-evidence",
                     "prompt_version": "test-evidence",
                 },
                 "repair": None,
-            }
-
-        unit["annotation"] = {
-            "schema_version": EVIDENCE_SCHEMA_VERSION,
-            "status": status,
-            "record": record,
-            "provenance": provenance,
+            },
         }
-
-    unit_statuses = {
-        unit["annotation"]["status"] for unit in document["evidence_units"]
-    }
-    if unit_statuses == {"pending"}:
-        annotate_boundaries(document, status="pending")
-    elif unit_statuses == {"mock"}:
-        annotate_boundaries(document, status="mock")
-    else:
-        annotate_boundaries(document, status="complete")
-    statuses = unit_statuses | {
-        boundary["annotation"]["status"] for boundary in document["boundary_states"]
-    }
-    document["status"] = (
-        "planned"
-        if statuses == {"pending"}
-        else "annotated"
-        if statuses == {"complete"}
-        else "mock-annotated"
-        if statuses == {"mock"}
-        else "partially-annotated"
-    )
-    set_document_quality(
-        document,
-        "accepted"
-        if document["status"] == "annotated"
-        else "quarantined"
-        if document["status"] == "mock-annotated"
-        else "pending",
-    )
+    document["status"] = "annotated"
+    set_document_quality(document, quality_status)
     return document
 
 
-def _pair(
-    query_episode_index: int = 1,
-    support_episode_index: int = 10,
-    *,
-    build_id: str = _BUILD_ID,
-    pair_id: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "schema_version": "video-harness.support-query-pair",
-        "build_id": build_id,
-        "pair_id": pair_id or f"pair-q{query_episode_index}-s{support_episode_index}",
-        "task_index": _TASK_INDEX,
-        "task_instruction": _TASK_INSTRUCTION,
-        "query_episode_index": query_episode_index,
-        "support_episode_index": support_episode_index,
-        "support_rank": 0,
-        "support_document_id": f"robodojo/episode-{support_episode_index:07d}",
-        "guide_schema_version": BEHAVIOR_DOCUMENT_SCHEMA_VERSION,
-    }
-
-
-def _dataset(
-    *, build_id: str = _BUILD_ID, supports_per_query: int = 1
-) -> dict[str, Any]:
-    return {
-        "schema_version": "video-harness.robodojo-source",
-        "task_scope": "benchmark-34",
-        "episodes": 2,
-        "tasks": 1,
-        "frames": 202,
-        "fps": 25,
-        "episode_counts_by_task_index": {str(_TASK_INDEX): 2},
-        "build_id": build_id,
-        "source_dataset": "RoboDojo-Benchmark/RoboDojo/data/RoboDojo_lerobot_v30_video",
-        "source_revision": "main",
-        "sample_hz": 1,
-        "supports_per_query": supports_per_query,
-        "document_camera": "observation.images.cam_high",
-        "benchmark_source_episodes": 2,
-        "selection": {"max_tasks": 1, "episodes_per_task": 2},
-    }
-
-
-def _write_json(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-
-
-def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
-    path.write_text(
-        "".join(json.dumps(value, sort_keys=True) + "\n" for value in values),
-        encoding="utf-8",
-    )
-
-
-def _write_bundle(
-    tmp_path: Path,
-    *,
-    documents: list[dict[str, Any]] | None = None,
-    pairs: list[dict[str, Any]] | None = None,
-    dataset: dict[str, Any] | None = None,
-) -> tuple[Path, Path, Path]:
-    dataset_path = tmp_path / "dataset.json"
-    documents_path = tmp_path / "documents-openai"
-    pairs_path = tmp_path / "pairs.jsonl"
-
-    _write_json(dataset_path, dataset or _dataset())
-    for position, document in enumerate(documents or [_document(1), _document(10)]):
-        task_root = documents_path / f"task-{document['source']['task_index']}"
+def _write_documents(root: Path, documents: list[dict]) -> None:
+    for position, document in enumerate(documents):
+        task_root = root / f"arbitrary-folder-{position:02d}"
         task_root.mkdir(parents=True, exist_ok=True)
-        _write_jsonl(
-            task_root
-            / f"episode-{document['source']['episode_index']:07d}-{position}.document.jsonl",
-            [document],
+        path = task_root / (
+            f"episode-{document['source']['episode_index']:07d}.document.jsonl"
         )
-    _write_jsonl(pairs_path, pairs or [_pair()])
-    return dataset_path, documents_path, pairs_path
-
-
-def test_load_artifact_bundle_is_typed_and_read_only(tmp_path: Path) -> None:
-    paths = _write_bundle(tmp_path)
-
-    bundle = load_guide_artifact_bundle(
-        dataset_path=paths[0],
-        documents_path=paths[1],
-        pairs_path=paths[2],
-    )
-
-    assert isinstance(bundle, GuideArtifactBundle)
-    assert bundle.build_id == _BUILD_ID
-    assert bundle.supports_per_query == 1
-    assert {source.document_id for source in bundle.documents} == {
-        "robodojo/episode-0000001",
-        "robodojo/episode-0000010",
-    }
-    assert len(bundle.support_bindings) == 1
-    binding = bundle.support_bindings[0]
-    assert binding.query_episode_index == 1
-    assert binding.support_episode_index == 10
-    assert binding.support_document_id == "robodojo/episode-0000010"
-
-    with pytest.raises(FrozenInstanceError):
-        bundle.build_id = "other-build"
-
-
-def test_loader_rejects_missing_artifact_file(tmp_path: Path) -> None:
-    paths = _write_bundle(tmp_path)
-    shutil.rmtree(paths[1])
-
-    with pytest.raises(FileNotFoundError, match=re.escape(str(paths[1]))):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
+        path.write_text(
+            json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
 
 
-def test_loader_reports_malformed_jsonl_with_path_and_line(tmp_path: Path) -> None:
-    paths = _write_bundle(tmp_path)
-    document_file = next(paths[1].glob("*/*.document.jsonl"))
-    document_file.write_text(
-        json.dumps(_document(10)) + "\n" + "{malformed\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match=f"{re.escape(str(document_file))}.*line 2"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
-
-
-def test_loader_rejects_duplicate_document_id(tmp_path: Path) -> None:
-    document = _document(10)
-    paths = _write_bundle(tmp_path, documents=[document, copy.deepcopy(document)])
-
-    with pytest.raises(ValueError, match="duplicate document_id"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
-
-
-def test_loader_rejects_duplicate_pair_id(tmp_path: Path) -> None:
-    pair = _pair()
-    paths = _write_bundle(tmp_path, pairs=[pair, copy.deepcopy(pair)])
-
-    with pytest.raises(ValueError, match="duplicate pair_id"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
-
-
-@pytest.mark.parametrize("mismatched_artifact", ["dataset", "document", "pair"])
-def test_loader_rejects_build_id_mismatch(
-    tmp_path: Path, mismatched_artifact: str
+def test_catalog_is_document_only_stable_and_filters_quarantine(
+    tmp_path: Path, changed_evidence
 ) -> None:
-    documents = [_document(1), _document(10)]
-    dataset = _dataset()
-    pairs = [_pair()]
-    if mismatched_artifact == "dataset":
-        dataset["build_id"] = "other-build"
-    elif mismatched_artifact == "document":
-        documents[1]["build_id"] = "other-build"
-    else:
-        pairs[0]["build_id"] = "other-build"
-    paths = _write_bundle(tmp_path, documents=documents, pairs=pairs, dataset=dataset)
+    accepted_late = _document(12, changed_evidence)
+    accepted_early = _document(10, changed_evidence)
+    quarantined = _document(
+        11, changed_evidence, quality_status="quarantined"
+    )
+    root = tmp_path / "documents"
+    _write_documents(root, [accepted_late, quarantined, accepted_early])
 
-    with pytest.raises(ValueError, match="build_id"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
+    catalog = load_guide_document_catalog(root)
 
+    assert isinstance(catalog, GuideDocumentCatalog)
+    assert catalog.build_id == "catalog-build"
+    assert len(catalog.catalog_digest) == 64
+    assert [entry.source_episode_index for entry in catalog.documents] == [10, 12]
+    assert [entry.source_episode_index for entry in catalog.exclusions] == [11]
+    assert catalog.documents_for_task(3) == catalog.documents
+    assert {entry.task_instruction for entry in catalog.documents} == {
+        "Put bread into the toaster."
+    }
+    assert catalog.by_document_id(
+        "robodojo/episode-0000010"
+    ).document_path.is_absolute()
 
-def test_loader_rejects_pair_schema_mismatch_and_unknown_keys(tmp_path: Path) -> None:
-    pair = _pair()
-    pair["guide_schema_version"] = "wrong-guide-schema"
-    paths = _write_bundle(tmp_path, pairs=[pair])
-
-    with pytest.raises(ValueError, match="guide_schema_version"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
-
-    pair = _pair()
-    pair["unexpected"] = True
-    paths = _write_bundle(tmp_path, pairs=[pair])
-    with pytest.raises(ValueError, match="exactly|unknown|schema"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
+    second_root = tmp_path / "documents-second"
+    _write_documents(second_root, [accepted_early, accepted_late, quarantined])
+    assert (
+        load_guide_document_catalog(second_root).catalog_digest
+        == catalog.catalog_digest
+    )
 
 
-def test_loader_rejects_missing_support_document(tmp_path: Path) -> None:
-    pair = _pair()
-    pair["support_document_id"] = "robodojo/episode-9999999"
-    paths = _write_bundle(tmp_path, pairs=[pair])
+def test_catalog_is_deeply_read_only(tmp_path: Path, changed_evidence) -> None:
+    root = tmp_path / "documents"
+    _write_documents(root, [_document(10, changed_evidence)])
+    catalog = load_guide_document_catalog(root)
 
-    with pytest.raises(ValueError, match="support document"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        catalog.build_id = "other"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        catalog.documents[0].document["build_id"] = "other"  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "message"),
+    ("mutation", "message"),
     [
-        ("support_episode_index", 11, "support episode"),
-        ("task_index", 4, "task"),
-        ("task_instruction", "different task", "task"),
+        ("build", "build_id"),
+        ("duplicate", "Duplicate document_id"),
+        ("instruction", "inconsistent task instructions"),
+        ("pending", "nonterminal"),
     ],
 )
-def test_loader_rejects_support_identity_mismatch(
-    tmp_path: Path,
-    field: str,
-    value: Any,
-    message: str,
+def test_catalog_fails_closed_on_cross_document_drift(
+    tmp_path: Path, changed_evidence, mutation: str, message: str
 ) -> None:
-    pair = _pair()
-    pair[field] = value
-    paths = _write_bundle(tmp_path, pairs=[pair])
+    first = _document(10, changed_evidence)
+    second = _document(11, changed_evidence)
+    if mutation == "build":
+        second["build_id"] = "other-build"
+    elif mutation == "duplicate":
+        second = copy.deepcopy(first)
+    elif mutation == "instruction":
+        second["task_instruction"] = "A different instruction."
+    else:
+        second = plan_document(_source(11), build_id="catalog-build")
 
+    root = tmp_path / "documents"
+    _write_documents(root, [first, second])
     with pytest.raises(ValueError, match=message):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
+        load_guide_document_catalog(root)
 
 
-def test_loader_rejects_query_support_collision(tmp_path: Path) -> None:
-    pair = _pair(query_episode_index=10, support_episode_index=10)
-    paths = _write_bundle(tmp_path, pairs=[pair])
-
-    with pytest.raises(ValueError, match="different|support=query|query"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
-
-
-def test_loader_rejects_multiple_supports_for_one_query(tmp_path: Path) -> None:
-    documents = [_document(1), _document(10), _document(11)]
-    pairs = [_pair(support_episode_index=10), _pair(support_episode_index=11)]
-    paths = _write_bundle(tmp_path, documents=documents, pairs=pairs)
-
-    with pytest.raises(ValueError, match="one support|multiple|query"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
-
-
-def test_loader_rejects_non_single_support_configuration(tmp_path: Path) -> None:
-    paths = _write_bundle(tmp_path, dataset=_dataset(supports_per_query=2))
-
-    with pytest.raises(ValueError, match="supports_per_query"):
-        load_guide_artifact_bundle(
-            dataset_path=paths[0],
-            documents_path=paths[1],
-            pairs_path=paths[2],
-        )
-
-
-def _bundle_for_plan(
+def test_catalog_allows_one_instruction_to_name_multiple_tasks(
     tmp_path: Path,
-    *,
-    support_document: dict[str, Any],
-    documents: list[dict[str, Any]] | None = None,
-) -> tuple[GuideArtifactBundle, dict[str, Any]]:
-    query_document = _document(1)
-    documents = documents or [query_document, support_document]
-    paths = _write_bundle(tmp_path, documents=documents)
-    bundle = load_guide_artifact_bundle(
-        dataset_path=paths[0],
-        documents_path=paths[1],
-        pairs_path=paths[2],
-    )
-    return bundle, support_document
-
-
-def test_build_plan_selects_trainable_units_and_preserves_identity(
-    tmp_path: Path,
+    changed_evidence,
 ) -> None:
-    support_document = _document(
-        10,
-        records_by_order={
-            0: _changed_evidence(),
-            1: _gripper_close_evidence(),
-            2: _changed_evidence(),
-            3: _changed_evidence(),
-        },
+    first = _document(10, changed_evidence)
+    second = _document(11, changed_evidence)
+    second["source"]["task_index"] = 4
+    root = tmp_path / "documents"
+    _write_documents(root, [first, second])
+
+    catalog = load_guide_document_catalog(root)
+
+    candidates = tuple(
+        document
+        for document in catalog.documents
+        if document.task_instruction == first["task_instruction"]
     )
-    original = copy.deepcopy(support_document)
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
+    assert [document.task_index for document in candidates] == [3, 4]
+
+
+def test_catalog_reports_malformed_or_multi_record_files(
+    tmp_path: Path, changed_evidence
+) -> None:
+    root = tmp_path / "documents"
+    _write_documents(root, [_document(10, changed_evidence)])
+    path = next(root.glob("*/*.document.jsonl"))
+    path.write_text("{bad json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"line 1"):
+        load_guide_document_catalog(root)
+
+    path.write_text(
+        json.dumps(_document(10, changed_evidence))
+        + "\n"
+        + json.dumps(_document(11, changed_evidence))
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exactly one record"):
+        load_guide_document_catalog(root)
+
+
+def test_catalog_requires_at_least_one_accepted_document(
+    tmp_path: Path, changed_evidence
+) -> None:
+    root = tmp_path / "documents"
+    _write_documents(
+        root, [_document(10, changed_evidence, quality_status="quarantined")]
+    )
+    with pytest.raises(ValueError, match="no accepted"):
+        load_guide_document_catalog(root)
+
+
+def test_plan_projects_shared_boundaries_and_current_semantics(
+    tmp_path: Path, changed_evidence
+) -> None:
+    document = _document(10, changed_evidence)
+    original = copy.deepcopy(document)
+    root = tmp_path / "documents"
+    _write_documents(root, [document])
+    catalog = load_guide_document_catalog(root)
 
     plan = build_guide_plan(
-        bundle,
-        query_episode_index=1,
-        profile="actuator",
+        catalog,
+        document_id="robodojo/episode-0000010",
     )
 
     assert isinstance(plan, GuidePlan)
-    assert plan.query_episode_index == 1
-    assert plan.support_document_id == "robodojo/episode-0000010"
-    assert [unit.unit_id for unit in plan.units] == [
-        "u0000",
-        "u0001",
-        "u0002",
-        "u0003",
+    assert plan.document_id == "robodojo/episode-0000010"
+    assert plan.source_episode_index == 10
+    assert [boundary.slot for boundary in plan.boundaries] == [0, 1, 2]
+    assert [boundary.episode_frame_index for boundary in plan.boundaries] == [
+        0,
+        25,
+        50,
     ]
-    assert [unit.order for unit in plan.units] == [0, 1, 2, 3]
-    assert [frame.episode_frame_index for frame in plan.frames] == [0, 25, 50, 75, 100]
+    assert [boundary.timestamp_s for boundary in plan.boundaries] == [0.0, 1.0, 2.0]
+    assert all(len(boundary.view_texts) == 3 for boundary in plan.boundaries)
+    assert plan.boundaries[0].view_texts == (
+        document["boundary_states"][0]["annotation"]["record"]["observation"][
+            "cam_high"
+        ],
+        document["boundary_states"][0]["annotation"]["record"]["observation"][
+            "cam_left_wrist"
+        ],
+        document["boundary_states"][0]["annotation"]["record"]["observation"][
+            "cam_right_wrist"
+        ],
+    )
     assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [
         (0, 1),
         (1, 2),
-        (2, 3),
-        (3, 4),
     ]
-    assert all(unit.transition_text.startswith("Motion:") for unit in plan.units)
-    assert all(
-        unit.provenance["call1"]["provider"] == "test-provider" for unit in plan.units
-    )
-    assert support_document == original
+    transition = plan.units[0].transition_text
+    assert transition.startswith("Motion:")
+    assert "Detail:" in transition
+    assert "Action:" in transition
+    assert "Task role:" in transition
+    assert "Causal validation" not in transition
+    assert "reason" not in transition.lower()
+    assert document == original
+
+    plan_fields = {field.name for field in dataclasses.fields(plan)}
+    assert not {
+        "query_episode_index",
+        "support_document_id",
+        "profile",
+        "provenance",
+    } & plan_fields
+    unit_fields = {field.name for field in dataclasses.fields(plan.units[0])}
+    assert "provenance" not in unit_fields
 
 
-def test_build_plan_reuses_shared_slots_for_adjacent_selected_units(
-    tmp_path: Path,
+def test_plan_preserves_gap_when_one_of_ten_units_is_rejected(
+    tmp_path: Path, changed_evidence
 ) -> None:
-    support_document = _document(
-        10,
-        records_by_order={order: _changed_evidence() for order in range(4)},
-    )
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
+    document = _document(10, changed_evidence, length=251)
+    rejected = document["evidence_units"][1]["annotation"]["record"]
+    rejected["quality_status"] = "quarantined"
+    rejected["causal_validation"] = {
+        "status": "retry",
+        "reason": "The transition remains unresolved.",
+    }
+    set_document_quality(document, "accepted")
+    root = tmp_path / "documents"
+    _write_documents(root, [document])
 
-    plan = build_guide_plan(bundle, query_episode_index=1)
+    catalog = load_guide_document_catalog(root)
+    plan = build_guide_plan(catalog, document_id=document["document_id"])
 
-    assert [(unit.before_slot, unit.after_slot) for unit in plan.units] == [
+    assert [unit.order for unit in plan.units] == [0, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [(unit.before_slot, unit.after_slot) for unit in plan.units[:2]] == [
         (0, 1),
-        (1, 2),
         (2, 3),
-        (3, 4),
     ]
-    assert plan.units[0].after_slot == plan.units[1].before_slot
+    assert [boundary.order for boundary in plan.boundaries[:4]] == [0, 1, 2, 3]
 
 
-def test_build_plan_rejects_skipped_units(tmp_path: Path) -> None:
-    support_document = _document(
-        10,
-        records_by_order={0: _changed_evidence(), 2: _changed_evidence()},
-    )
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
-
-    with pytest.raises(ValueError, match="quality-accepted"):
-        build_guide_plan(bundle, query_episode_index=1)
-
-
-def test_build_plan_rejects_pending_failed_or_mock_units(tmp_path: Path) -> None:
-    support_document = _document(
-        10,
-        records_by_order={
-            0: _changed_evidence(),
-            1: _gripper_close_evidence(),
-            2: mock_evidence_record(),
-        },
-        statuses_by_order={2: "mock", 3: "pending"},
-    )
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
-
-    with pytest.raises(ValueError, match="quality-accepted"):
-        build_guide_plan(bundle, query_episode_index=1)
-
-
-@pytest.mark.parametrize("quarantine_target", ["unit", "boundary", "document"])
-def test_build_plan_fails_closed_instead_of_building_partial_guide(
-    tmp_path: Path, quarantine_target: str
+def test_plan_rejects_unknown_or_excluded_document(
+    tmp_path: Path, changed_evidence
 ) -> None:
-    support_document = _document(
-        10,
-        records_by_order={order: _changed_evidence() for order in range(4)},
-    )
-    if quarantine_target == "document":
-        set_document_quality(support_document, "quarantined")
-    if quarantine_target == "unit":
-        support_document["evidence_units"][1]["annotation"]["record"][
-            "quality_status"
-        ] = "quarantined"
-        support_document["evidence_units"][1]["annotation"]["record"][
-            "causal_validation"
-        ] = {
-            "status": "retry",
-            "reason": "Automatic repair was unresolved.",
-        }
-        set_document_quality(support_document, "quarantined")
-    elif quarantine_target == "boundary":
-        support_document["boundary_states"][2]["annotation"]["record"][
-            "quality_status"
-        ] = "quarantined"
-        set_document_quality(support_document, "quarantined")
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
+    root = tmp_path / "documents"
+    accepted = _document(10, changed_evidence)
+    excluded = _document(11, changed_evidence, quality_status="quarantined")
+    _write_documents(root, [accepted, excluded])
+    catalog = load_guide_document_catalog(root)
 
-    with pytest.raises(ValueError, match="episode-0000010"):
-        build_guide_plan(bundle, query_episode_index=1)
-
-
-def test_build_plan_fails_closed_when_no_unit_is_trainable(tmp_path: Path) -> None:
-    support_document = _document(
-        10,
-        records_by_order={0: mock_evidence_record()},
-    )
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
-
-    with pytest.raises(ValueError, match="robodojo/episode-0000010"):
-        build_guide_plan(bundle, query_episode_index=1)
-
-
-def test_guide_plan_is_token_neutral_and_has_no_image_payload(tmp_path: Path) -> None:
-    support_document = _document(
-        10,
-        records_by_order={order: _changed_evidence() for order in range(4)},
-    )
-    bundle, _ = _bundle_for_plan(tmp_path, support_document=support_document)
-
-    plan = build_guide_plan(bundle, query_episode_index=1)
-
-    field_names = {field.name for field in dataclasses.fields(plan)}
-    assert "images" not in field_names
-    assert "tokens" not in field_names
-    assert "observation" not in field_names
-    assert "actions" not in field_names
-    assert all(isinstance(frame.episode_frame_index, int) for frame in plan.frames)
-    assert all(isinstance(unit.transition_text, str) for unit in plan.units)
-    assert all(not isinstance(unit.transition_text, bytes) for unit in plan.units)
+    for document_id in (excluded["document_id"], "missing"):
+        with pytest.raises(ValueError, match="No accepted"):
+            build_guide_plan(catalog, document_id=document_id)

@@ -1,9 +1,8 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
+import pickle
 from types import MappingProxyType
-from typing import Any
+from types import SimpleNamespace
 
 import jax
 import numpy as np
@@ -11,42 +10,28 @@ import pytest
 
 from openpi.models.guide_inputs import GuideInput
 from openpi.models.guide_materializer import GuideMaterializerConfig
-from openpi.training.guide_dataset import GuideBindingIndex
-from openpi.training.robodojo_guide_resolver import RoboDojoGuideMaterializationConfig
+from openpi.training import robodojo_guide_resolver as _resolver_module
+from openpi.training.guide_dataset import GuideRecord
+from openpi.training.robodojo_guide_resolver import GuideDocumentSnapshot
+from openpi.training.robodojo_guide_resolver import RoboDojoGuideResolverFactory
 from openpi.training.robodojo_guide_resolver import VideoHarnessGuideResolver
+from openpi.training.robodojo_guide_resolver import preflight_guide_media
 
 
 @dataclass(frozen=True)
-class _Binding:
-    query_episode_index: int
-    support_episode_index: int
-    task_index: int
-    support_document_id: str
-
-
-@dataclass(frozen=True)
-class _Source:
-    document_id: str
-    episode_index: int
-    task_index: int
-    document: MappingProxyType
-
-
-@dataclass(frozen=True)
-class _Bundle:
-    documents: tuple[_Source, ...]
-
-
-@dataclass(frozen=True)
-class _FrameRef:
-    document_id: str
-    episode_index: int
+class _Boundary:
+    boundary_id: str
+    order: int
+    slot: int
     episode_frame_index: int
     timestamp_s: float
+    view_texts: tuple[str, str, str]
 
 
 @dataclass(frozen=True)
 class _Unit:
+    unit_id: str
+    order: int
     before_slot: int
     after_slot: int
     transition_text: str
@@ -54,246 +39,361 @@ class _Unit:
 
 @dataclass(frozen=True)
 class _Plan:
-    query_episode_index: int
-    support_document_id: str
-    support_episode_index: int
+    document_id: str
+    source_episode_index: int
     task_index: int
-    frames: tuple[_FrameRef, ...]
+    task_instruction: str
+    boundaries: tuple[_Boundary, ...]
     units: tuple[_Unit, ...]
 
 
-def _rgb(value: int) -> np.ndarray:
-    return np.full((2, 4, 3), value, dtype=np.uint8)
+@dataclass(frozen=True)
+class _Source:
+    document_id: str
+    source_episode_index: int
+    task_index: int
+    task_instruction: str
+    document: MappingProxyType
 
 
-def _make_setup() -> tuple[GuideBindingIndex, _Bundle, _Plan]:
-    binding_index = GuideBindingIndex.from_bindings(
-        [_Binding(1, 10, 3, "doc-support")]
-    )
-    document = MappingProxyType(
-        {
-            "document_id": "doc-support",
-            "source": MappingProxyType(
-                {
-                    "episode_index": 10,
-                    "task_index": 3,
-                    "episode_length": 3,
-                    "fps": 25,
-                    "video_path": "videos/support.mp4",
-                }
-            ),
-        }
-    )
-    source = _Source("doc-support", 10, 3, document)
-    plan = _Plan(
-        query_episode_index=1,
-        support_document_id="doc-support",
-        support_episode_index=10,
-        task_index=3,
-        frames=(
-            _FrameRef("doc-support", 10, 0, 0.0),
-            _FrameRef("doc-support", 10, 2, 0.08),
-        ),
-        units=(_Unit(0, 1, "Observed before: move. Observed after: contact."),),
-    )
-    return binding_index, _Bundle((source,)), plan
+class _Catalog:
+    def __init__(self, source: _Source):
+        self.source = source
+
+    def by_document_id(self, document_id: str) -> _Source:
+        if document_id != self.source.document_id:
+            raise ValueError(document_id)
+        return self.source
+
+
+class _CatalogMany:
+    def __init__(self, sources: tuple[_Source, ...]):
+        self.sources = {source.document_id: source for source in sources}
+
+    def by_document_id(self, document_id: str) -> _Source:
+        return self.sources[document_id]
+
+
+class _Tokenizer:
+    def __init__(self, length: int):
+        self.length = length
+        self.calls: list[str] = []
+
+    def tokenize_text(self, text: str):
+        self.calls.append(text)
+        tokens = np.zeros(self.length, dtype=np.int32)
+        mask = np.zeros(self.length, dtype=np.bool_)
+        tokens[:2] = [1, 2]
+        mask[:2] = True
+        return tokens, mask
 
 
 class _FrameLoader:
     def __init__(self):
-        self.calls: list[tuple[Any, dict[str, Any]]] = []
+        self.calls = []
 
-    def load_rgb(self, document: Any, frame_ref: dict[str, Any]) -> np.ndarray:
-        self.calls.append((document, frame_ref))
-        return _rgb(80 + frame_ref["episode_frame_index"])
-
-
-class _BatchFrameLoader(_FrameLoader):
-    def __init__(self):
-        super().__init__()
-        self.batch_calls: list[tuple[Any, tuple[dict[str, Any], ...]]] = []
-
-    def load_rgb_many(self, document: Any, frame_refs):
+    def load_views_rgb_many(self, document, frame_refs):
         refs = tuple(frame_refs)
-        self.batch_calls.append((document, refs))
-        return tuple(_rgb(80 + ref["episode_frame_index"]) for ref in refs)
-
-
-class _Tokenizer:
-    def __init__(self):
-        self.calls: list[str] = []
-
-    def tokenize_text(self, text: str) -> tuple[np.ndarray, np.ndarray]:
-        self.calls.append(text)
-        return (
-            np.asarray([1, 2, 0, 0], dtype=np.int32),
-            np.asarray([True, True, False, False], dtype=np.bool_),
+        self.calls.append((document, refs))
+        return tuple(
+            tuple(np.full((4, 6, 3), 20 * view + ref["episode_frame_index"], dtype=np.uint8) for view in range(3))
+            for ref in refs
         )
 
 
-def test_resolver_builds_guide_input_from_support_frames_only():
-    binding_index, bundle, plan = _make_setup()
-    frame_loader = _FrameLoader()
-    tokenizer = _Tokenizer()
-    plan_calls: list[tuple[int, str]] = []
+def _setup():
+    record = GuideRecord(0, "doc", 10, 3, "stack blocks")
+    source = _Source(
+        "doc",
+        10,
+        3,
+        "stack blocks",
+        MappingProxyType({"document_id": "doc", "source": MappingProxyType({})}),
+    )
+    plan = _Plan(
+        "doc",
+        10,
+        3,
+        "stack blocks",
+        (
+            _Boundary("b0000", 0, 0, 0, 0.0, ("h0", "l0", "r0")),
+            _Boundary("b0001", 1, 1, 10, 0.4, ("h1", "l1", "r1")),
+        ),
+        (_Unit("u0000", 0, 0, 1, "move then place"),),
+    )
+    return record, _Catalog(source), plan
 
-    def plan_builder(bundle_arg, *, query_episode_index: int, profile: str):
-        assert bundle_arg is bundle
-        plan_calls.append((query_episode_index, profile))
+
+def _config(**overrides):
+    values = {
+        "max_boundaries": 2,
+        "max_units": 1,
+        "max_boundary_text_tokens": 4,
+        "max_transition_text_tokens": 5,
+        "boundary_num_queries": 2,
+        "transition_num_queries": 1,
+    }
+    values.update(overrides)
+    return GuideMaterializerConfig(**values)
+
+
+def test_resolver_builds_three_view_guide_from_document_record() -> None:
+    record, catalog, plan = _setup()
+    frame_loader = _FrameLoader()
+    boundary_tokenizer = _Tokenizer(4)
+    transition_tokenizer = _Tokenizer(5)
+    calls = []
+
+    def plan_builder(catalog_arg, *, document_id):
+        calls.append((catalog_arg, document_id))
         return plan
 
     resolver = VideoHarnessGuideResolver(
-        artifact_bundle=bundle,
-        binding_index=binding_index,
-        dataset_root=Path("/explicit/dataset"),
-        tokenizer=tokenizer,
-        materializer_config=GuideMaterializerConfig(2, 1, 4),
+        document_catalog=catalog,
+        guide_records=(record,),
+        dataset_root=Path("/dataset"),
+        boundary_tokenizer=boundary_tokenizer,
+        transition_tokenizer=transition_tokenizer,
+        materializer_config=_config(),
         frame_loader=frame_loader,
         plan_builder=plan_builder,
     )
 
-    guide = resolver(binding_index.by_binding_index(0))
+    guide = resolver(record)
 
     assert isinstance(guide, GuideInput)
-    assert guide.images.shape == (1, 2, 224, 224, 3)
-    assert guide.text_tokens.shape == (1, 1, 4)
-    assert guide.unit_mask.tolist() == [[True]]
-    assert plan_calls == [(1, "actuator")]
-    assert tokenizer.calls == [plan.units[0].transition_text]
-    assert [call[1] for call in frame_loader.calls] == [
+    assert guide.boundary_images.shape == (1, 2, 3, 224, 224, 3)
+    assert guide.boundary_text_tokens.shape == (1, 2, 3, 4)
+    assert guide.transition_text_tokens.shape == (1, 1, 5)
+    assert calls == [(catalog, "doc")]
+    assert boundary_tokenizer.calls == ["h0", "l0", "r0", "h1", "l1", "r1"]
+    assert transition_tokenizer.calls == ["move then place"]
+    assert frame_loader.calls[0][1] == (
         {"episode_frame_index": 0, "timestamp_s": 0.0},
-        {"episode_frame_index": 2, "timestamp_s": 0.08},
-    ]
-    assert all(call[0] is bundle.documents[0].document for call in frame_loader.calls)
-    assert np.asarray(guide.images).shape[-1] == 3
+        {"episode_frame_index": 10, "timestamp_s": 0.4},
+    )
     assert all(not isinstance(leaf, str) for leaf in jax.tree_util.tree_leaves(guide))
 
 
-def test_resolver_prefers_one_batch_decode_for_all_unique_guide_frames():
-    binding_index, bundle, plan = _make_setup()
-    frame_loader = _BatchFrameLoader()
-    resolver = VideoHarnessGuideResolver(
-        artifact_bundle=bundle,
-        binding_index=binding_index,
-        dataset_root=Path("/explicit/dataset"),
-        tokenizer=_Tokenizer(),
-        materializer_config=GuideMaterializerConfig(2, 1, 4),
-        frame_loader=frame_loader,
-        plan_builder=lambda *_args, **_kwargs: plan,
+def test_worker_factory_uses_pickled_parent_snapshot_without_catalog_reload(
+    monkeypatch,
+) -> None:
+    record, catalog, plan = _setup()
+    frame_loader = _FrameLoader()
+    imports = []
+
+    def import_module(name):
+        imports.append(name)
+        if name == "video_harness.reader":
+            raise AssertionError("worker must not reload the Document catalog")
+        if name == "openpi.models.tokenizer":
+            return SimpleNamespace(PaligemmaTokenizer=_Tokenizer)
+        raise AssertionError(f"unexpected import {name!r}")
+
+    monkeypatch.setattr(_resolver_module.importlib, "import_module", import_module)
+    monkeypatch.setattr(
+        _resolver_module,
+        "_default_frame_loader",
+        lambda _root: frame_loader,
     )
-
-    resolver(binding_index.by_binding_index(0))
-
-    assert frame_loader.calls == []
-    assert len(frame_loader.batch_calls) == 1
-    assert frame_loader.batch_calls[0][1] == (
-        {"episode_frame_index": 0, "timestamp_s": 0.0},
-        {"episode_frame_index": 2, "timestamp_s": 0.08},
+    factory = RoboDojoGuideResolverFactory(
+        dataset_root=Path("/dataset"),
+        guide_records=(record,),
+        document_snapshots=(
+            GuideDocumentSnapshot.from_guide_document(catalog.source),
+        ),
+        guide_plans=(plan,),
+        materializer_config=_config(),
+        materializer_configs_by_guide={},
     )
+    assert factory.document_snapshots[0].document == {
+        "document_id": "doc",
+        "source": {},
+    }
+
+    resolver = pickle.loads(pickle.dumps(factory))()
+    guide = resolver(record)
+
+    assert isinstance(guide, GuideInput)
+    assert imports == ["openpi.models.tokenizer"]
+    assert frame_loader.calls[0][0]["document_id"] == "doc"
 
 
-def test_resolver_uses_binding_specific_materializer_bucket():
-    binding_index, bundle, plan = _make_setup()
+def test_resolver_uses_guide_specific_bucket() -> None:
+    record, catalog, plan = _setup()
     resolver = VideoHarnessGuideResolver(
-        artifact_bundle=bundle,
-        binding_index=binding_index,
-        dataset_root=Path("/explicit/dataset"),
-        tokenizer=_Tokenizer(),
-        materializer_config=GuideMaterializerConfig(8, 4, 4),
-        materializer_configs_by_binding={
-            0: GuideMaterializerConfig(3, 2, 4)
-        },
+        document_catalog=catalog,
+        guide_records=(record,),
+        dataset_root=Path("/dataset"),
+        boundary_tokenizer=_Tokenizer(4),
+        transition_tokenizer=_Tokenizer(5),
+        materializer_config=_config(max_boundaries=4, max_units=3),
+        materializer_configs_by_guide={0: _config(max_boundaries=3, max_units=2)},
         frame_loader=_FrameLoader(),
         plan_builder=lambda *_args, **_kwargs: plan,
     )
 
-    guide = resolver(binding_index.by_binding_index(0))
+    guide = resolver(record)
 
-    assert guide.images.shape == (1, 3, 224, 224, 3)
+    assert guide.boundary_images.shape[:3] == (1, 3, 3)
     assert guide.unit_mask.shape == (1, 2)
 
 
-def test_resolver_rejects_non_rgb_frame_from_video_harness_boundary():
-    binding_index, bundle, plan = _make_setup()
-
-    class _GrayscaleLoader:
-        def load_rgb(self, _document, _frame_ref):
-            return np.full((2, 4), 100, dtype=np.uint8)
-
+def test_resolver_rejects_unregistered_record() -> None:
+    record, catalog, plan = _setup()
     resolver = VideoHarnessGuideResolver(
-        artifact_bundle=bundle,
-        binding_index=binding_index,
-        dataset_root=Path("/explicit/dataset"),
-        tokenizer=_Tokenizer(),
-        materializer_config=GuideMaterializerConfig(2, 1, 4),
-        frame_loader=_GrayscaleLoader(),
+        document_catalog=catalog,
+        guide_records=(record,),
+        dataset_root=Path("/dataset"),
+        boundary_tokenizer=_Tokenizer(4),
+        transition_tokenizer=_Tokenizer(5),
+        materializer_config=_config(),
+        frame_loader=_FrameLoader(),
         plan_builder=lambda *_args, **_kwargs: plan,
     )
 
-    with pytest.raises(ValueError, match=r"RGB"):
-        resolver(binding_index.by_binding_index(0))
+    with pytest.raises(ValueError, match="immutable record"):
+        resolver(GuideRecord(0, "other", 10, 3, "stack blocks"))
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda plan: _Plan(2, plan.support_document_id, 10, 3, plan.frames, plan.units),
-        lambda plan: _Plan(1, "other-document", 10, 3, plan.frames, plan.units),
-        lambda plan: _Plan(1, plan.support_document_id, 99, 3, plan.frames, plan.units),
-        lambda plan: _Plan(1, plan.support_document_id, 10, 99, plan.frames, plan.units),
-        lambda plan: _Plan(1, plan.support_document_id, 10, 3, plan.frames, ()),
-    ],
-)
-def test_resolver_rejects_plan_identity_or_empty_units(mutate):
-    binding_index, bundle, plan = _make_setup()
-    invalid_plan = mutate(plan)
+@pytest.mark.parametrize("field", ["document_id", "source_episode_index", "task_index", "task_instruction"])
+def test_resolver_rejects_plan_identity_drift(field: str) -> None:
+    record, catalog, plan = _setup()
+    values = dict(plan.__dict__)
+    values[field] = "other" if isinstance(values[field], str) else values[field] + 1
+    invalid = _Plan(**values)
     resolver = VideoHarnessGuideResolver(
-        artifact_bundle=bundle,
-        binding_index=binding_index,
-        dataset_root=Path("/explicit/dataset"),
-        tokenizer=_Tokenizer(),
-        materializer_config=GuideMaterializerConfig(2, 1, 4),
+        document_catalog=catalog,
+        guide_records=(record,),
+        dataset_root=Path("/dataset"),
+        boundary_tokenizer=_Tokenizer(4),
+        transition_tokenizer=_Tokenizer(5),
+        materializer_config=_config(),
         frame_loader=_FrameLoader(),
-        plan_builder=lambda *_args, **_kwargs: invalid_plan,
+        plan_builder=lambda *_args, **_kwargs: invalid,
     )
 
-    with pytest.raises(ValueError, match=r"binding_index|document|mismatch|trainable"):
-        resolver(binding_index.by_binding_index(0))
+    with pytest.raises(ValueError, match=f"GuidePlan {field} mismatch"):
+        resolver(record)
 
 
-def test_resolver_rejects_encoded_frame_payload_inside_xpolicylab():
-    binding_index, bundle, plan = _make_setup()
+def test_resolver_rejects_non_rgb_or_missing_view_payload() -> None:
+    record, catalog, plan = _setup()
 
     class _BadLoader:
-        def load(self, _document, _frame_ref):
-            return b"encoded-image-payload"
+        def load_views_rgb_many(self, _document, _refs):
+            return ((np.zeros((4, 6), dtype=np.uint8),) * 3,) * 2
 
     resolver = VideoHarnessGuideResolver(
-        artifact_bundle=bundle,
-        binding_index=binding_index,
-        dataset_root=Path("/explicit/dataset"),
-        tokenizer=_Tokenizer(),
-        materializer_config=GuideMaterializerConfig(2, 1, 4),
+        document_catalog=catalog,
+        guide_records=(record,),
+        dataset_root=Path("/dataset"),
+        boundary_tokenizer=_Tokenizer(4),
+        transition_tokenizer=_Tokenizer(5),
+        materializer_config=_config(),
         frame_loader=_BadLoader(),
         plan_builder=lambda *_args, **_kwargs: plan,
     )
 
-    with pytest.raises(ValueError, match=r"RGB|frame"):
-        resolver(binding_index.by_binding_index(0))
+    with pytest.raises(ValueError, match="RGB"):
+        resolver(record)
 
 
-def test_materialization_config_has_explicit_dataset_root_and_budgets():
-    config = RoboDojoGuideMaterializationConfig(
-        dataset_root=Path("/dataset"),
-        profile="actuator",
-        max_frames=4,
-        max_units=2,
-        max_text_tokens=8,
+def _preflight_setup():
+    record_a, _, plan_a = _setup()
+    record_b = GuideRecord(1, "doc-b", 11, 4, "close drawer")
+    source_a = _Source(
+        "doc",
+        10,
+        3,
+        "stack blocks",
+        MappingProxyType({"document_id": "doc", "source": MappingProxyType({})}),
+    )
+    source_b = _Source(
+        "doc-b",
+        11,
+        4,
+        "close drawer",
+        MappingProxyType({"document_id": "doc-b", "source": MappingProxyType({})}),
+    )
+    plan_b = _Plan(
+        "doc-b",
+        11,
+        4,
+        "close drawer",
+        (_Boundary("b0000", 0, 0, 5, 0.2, ("h", "l", "r")),),
+        (_Unit("u0000", 0, 0, 0, "close"),),
+    )
+    return (
+        (record_b, record_a),
+        _CatalogMany((source_a, source_b)),
+        {"doc": plan_a, "doc-b": plan_b},
     )
 
-    materializer_config = config.to_materializer_config()
 
-    assert config.dataset_root == Path("/dataset")
-    assert materializer_config.max_frames == 4
-    assert materializer_config.max_units == 2
-    assert materializer_config.max_text_tokens == 8
+def test_preflight_decodes_all_guides_in_stable_order_and_returns_counts() -> None:
+    records, catalog, plans = _preflight_setup()
+    frame_loader = _FrameLoader()
+
+    counts = preflight_guide_media(
+        document_catalog=catalog,
+        guide_records=records,
+        plans_by_document=plans,
+        dataset_root=Path("/dataset"),
+        frame_loader=frame_loader,
+    )
+
+    assert counts == {"documents": 2, "boundaries": 3, "camera_frames": 9}
+    assert [call[0]["document_id"] for call in frame_loader.calls] == ["doc", "doc-b"]
+    assert frame_loader.calls[0][1] == (
+        {"episode_frame_index": 0, "timestamp_s": 0.0},
+        {"episode_frame_index": 10, "timestamp_s": 0.4},
+    )
+    assert frame_loader.calls[1][1] == ({"episode_frame_index": 5, "timestamp_s": 0.2},)
+
+
+def test_preflight_late_decode_failure_has_guide_context() -> None:
+    records, catalog, plans = _preflight_setup()
+
+    class _FailingLoader(_FrameLoader):
+        def load_views_rgb_many(self, document, frame_refs):
+            if document["document_id"] == "doc-b":
+                self.calls.append((document, tuple(frame_refs)))
+                raise RuntimeError("corrupt media")
+            return super().load_views_rgb_many(document, frame_refs)
+
+    frame_loader = _FailingLoader()
+    with pytest.raises(
+        ValueError,
+        match=("media preflight failed for guide_index=1, document_id='doc-b', source_episode_index=11: corrupt media"),
+    ):
+        preflight_guide_media(
+            document_catalog=catalog,
+            guide_records=records,
+            plans_by_document=plans,
+            dataset_root=Path("/dataset"),
+            frame_loader=frame_loader,
+        )
+
+    assert [call[0]["document_id"] for call in frame_loader.calls] == ["doc", "doc-b"]
+
+
+@pytest.mark.parametrize("failure", ["short", "malformed"])
+def test_preflight_rejects_short_or_malformed_boundary_payloads(failure: str) -> None:
+    record, catalog, plan = _setup()
+
+    class _BadLoader:
+        def load_views_rgb_many(self, _document, refs):
+            if failure == "short":
+                return tuple((np.zeros((4, 6, 3), dtype=np.uint8),) * 3 for _ in tuple(refs)[:-1])
+            return tuple((np.zeros((4, 6), dtype=np.uint8),) * 3 for _ in refs)
+
+    expected = "unexpected number of Boundaries" if failure == "short" else "RGB shape"
+    with pytest.raises(ValueError, match=expected):
+        preflight_guide_media(
+            document_catalog=catalog,
+            guide_records=(record,),
+            plans_by_document={"doc": plan},
+            dataset_root=Path("/dataset"),
+            frame_loader=_BadLoader(),
+        )

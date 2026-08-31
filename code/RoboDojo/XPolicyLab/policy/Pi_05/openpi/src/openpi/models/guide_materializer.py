@@ -8,301 +8,393 @@ import numpy as np
 import torch
 
 from openpi.models.guide_inputs import GuideInput
+from openpi.models.guide_tokens import BOUNDARY_MEMORY_KIND
+from openpi.models.guide_tokens import TRANSITION_MEMORY_KIND
 from openpi.shared import image_tools
 
 
 @dataclass(frozen=True)
 class GuideMaterializerConfig:
-    max_frames: int
+    max_boundaries: int
     max_units: int
-    max_text_tokens: int
+    max_boundary_text_tokens: int
+    max_transition_text_tokens: int
+    boundary_num_queries: int = 8
+    transition_num_queries: int = 4
     image_size: tuple[int, int] = (224, 224)
 
 
-FrameDecoder = Callable[[Any], np.ndarray]
-FramesDecoder = Callable[[Sequence[Any]], Sequence[np.ndarray]]
+BoundaryDecoder = Callable[[Any], np.ndarray]
+BoundariesDecoder = Callable[[Sequence[Any]], Sequence[np.ndarray]]
 
 
 def materialize_guide(
     plan: Any,
     *,
-    frame_decoder: FrameDecoder,
-    frames_decoder: FramesDecoder | None = None,
-    tokenizer: Any,
+    boundary_decoder: BoundaryDecoder,
+    boundaries_decoder: BoundariesDecoder | None = None,
+    boundary_tokenizer: Any,
+    transition_tokenizer: Any,
     config: GuideMaterializerConfig,
 ) -> GuideInput:
     _validate_materializer_config(config)
     _validate_plan_sizes(plan, config)
-
-    images, image_mask = _materialize_frames(
+    boundary_images, boundary_image_mask, boundary_mask = _materialize_boundaries(
         plan,
-        frame_decoder=frame_decoder,
-        frames_decoder=frames_decoder,
+        boundary_decoder=boundary_decoder,
+        boundaries_decoder=boundaries_decoder,
         config=config,
     )
-
-    text_tokens, text_mask = _materialize_text(
+    boundary_text_tokens, boundary_text_mask = _materialize_boundary_text(
         plan,
-        tokenizer=tokenizer,
+        tokenizer=boundary_tokenizer,
         config=config,
     )
-
-    unit_mask, before_slot, after_slot = _materialize_unit_slots(
+    transition_text_tokens, transition_text_mask = _materialize_transition_text(
+        plan,
+        tokenizer=transition_tokenizer,
+        config=config,
+    )
+    unit_mask = _validate_unit_slots(plan, config=config)
+    source_kind, source_index, source_offset, memory_mask = _materialize_memory_map(
         plan,
         config=config,
     )
-
     return GuideInput(
-        images=images[None, ...],
-        image_mask=image_mask[None, ...],
-        text_tokens=text_tokens[None, ...],
-        text_mask=text_mask[None, ...],
+        boundary_images=boundary_images[None, ...],
+        boundary_image_mask=boundary_image_mask[None, ...],
+        boundary_text_tokens=boundary_text_tokens[None, ...],
+        boundary_text_mask=boundary_text_mask[None, ...],
+        transition_text_tokens=transition_text_tokens[None, ...],
+        transition_text_mask=transition_text_mask[None, ...],
+        boundary_mask=boundary_mask[None, ...],
         unit_mask=unit_mask[None, ...],
-        before_slot=before_slot[None, ...],
-        after_slot=after_slot[None, ...],
+        memory_source_kind=source_kind[None, ...],
+        memory_source_index=source_index[None, ...],
+        memory_source_offset=source_offset[None, ...],
+        memory_mask=memory_mask[None, ...],
     )
 
 
 def _validate_materializer_config(config: GuideMaterializerConfig) -> None:
-    for name in ("max_frames", "max_units", "max_text_tokens"):
+    for name in (
+        "max_boundaries",
+        "max_units",
+        "max_boundary_text_tokens",
+        "max_transition_text_tokens",
+        "boundary_num_queries",
+        "transition_num_queries",
+    ):
         value = getattr(config, name)
-
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
-
     if tuple(config.image_size) != (224, 224):
         raise ValueError(
             f"Guide images must use the Pi0.5 size (224, 224), got {config.image_size!r}"
         )
 
 
-def _validate_plan_sizes(
-    plan: Any,
-    config: GuideMaterializerConfig,
-) -> None:
-    if not hasattr(plan, "frames") or not hasattr(plan, "units"):
-        raise ValueError("plan must provide frames and units")
-
-    frame_count = len(plan.frames)
-    unit_count = len(plan.units)
-
-    if frame_count > config.max_frames:
+def _validate_plan_sizes(plan: Any, config: GuideMaterializerConfig) -> None:
+    if not hasattr(plan, "boundaries") or not hasattr(plan, "units"):
+        raise ValueError("plan must provide boundaries and units")
+    if not plan.boundaries or not plan.units:
+        raise ValueError("plan must provide at least one Boundary and accepted Unit")
+    if len(plan.boundaries) > config.max_boundaries:
         raise ValueError(
-            f"GuidePlan contains {frame_count} frames, "
-            f"exceeding max_frames={config.max_frames}"
+            f"GuidePlan contains {len(plan.boundaries)} Boundaries, "
+            f"exceeding max_boundaries={config.max_boundaries}"
         )
-
-    if unit_count > config.max_units:
+    if len(plan.units) > config.max_units:
         raise ValueError(
-            f"GuidePlan contains {unit_count} units, "
-            f"exceeding max_units={config.max_units}"
+            f"GuidePlan contains {len(plan.units)} units, exceeding max_units={config.max_units}"
         )
+    previous_order = -1
+    previous_frame = -1
+    previous_timestamp = -1.0
+    for slot, boundary in enumerate(plan.boundaries):
+        if getattr(boundary, "slot", slot) != slot:
+            raise ValueError("GuidePlan Boundary slots must be dense and ordered")
+        order = getattr(boundary, "order", None)
+        frame = getattr(boundary, "episode_frame_index", None)
+        timestamp = getattr(boundary, "timestamp_s", None)
+        if (
+            isinstance(order, bool)
+            or not isinstance(order, int)
+            or order <= previous_order
+        ):
+            raise ValueError("GuidePlan Boundary order must advance strictly")
+        if (
+            isinstance(frame, bool)
+            or not isinstance(frame, (int, np.integer))
+            or int(frame) <= previous_frame
+        ):
+            raise ValueError("GuidePlan Boundary frames must advance strictly")
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or float(timestamp) <= previous_timestamp
+        ):
+            raise ValueError("GuidePlan Boundary timestamps must advance strictly")
+        previous_order = order
+        previous_frame = int(frame)
+        previous_timestamp = float(timestamp)
 
 
-def _validate_decoded_frame(frame: Any) -> np.ndarray:
-    if not isinstance(frame, np.ndarray):
+def _validate_decoded_boundary(value: Any) -> np.ndarray:
+    if not isinstance(value, np.ndarray):
         raise ValueError(
-            f"decoded frame must be a numpy.ndarray, got {type(frame).__name__}"
+            f"decoded Boundary must be a numpy.ndarray, got {type(value).__name__}"
         )
-
-    if frame.ndim != 3 or frame.shape[-1] != 3:
+    if value.ndim != 4 or value.shape[0] != 3 or value.shape[-1] != 3:
         raise ValueError(
-            f"decoded frame must have RGB shape [H, W, 3], got {frame.shape}"
+            "decoded Boundary must have three-view RGB shape [3, H, W, 3], "
+            f"got {value.shape}"
         )
-
-    if frame.shape[0] <= 0 or frame.shape[1] <= 0:
-        raise ValueError(f"decoded frame must have positive height and width, got {frame.shape}")
-
-    if frame.dtype != np.uint8:
-        raise ValueError(f"decoded frame must have dtype uint8, got {frame.dtype}")
-
-    return frame
+    if value.shape[1] <= 0 or value.shape[2] <= 0:
+        raise ValueError(f"decoded Boundary has an empty spatial dimension: {value.shape}")
+    if value.dtype != np.uint8:
+        raise ValueError(f"decoded Boundary must have dtype uint8, got {value.dtype}")
+    return value
 
 
-def _preprocess_frame_batch(
-    frames: Sequence[np.ndarray],
+def _preprocess_boundary_batch(
+    boundaries: Sequence[np.ndarray],
     *,
     config: GuideMaterializerConfig,
 ) -> np.ndarray:
-    if not frames:
-        return np.empty((0, *config.image_size, 3), dtype=np.float32)
-    validated = tuple(_validate_decoded_frame(frame) for frame in frames)
-    shapes = {frame.shape for frame in validated}
+    validated = tuple(_validate_decoded_boundary(value) for value in boundaries)
+    shapes = {value.shape for value in validated}
     if len(shapes) != 1:
         raise ValueError(
-            f"all decoded Guide frames must share one RGB shape, got {sorted(shapes)}"
+            f"all decoded Boundaries must share one three-view RGB shape, got {sorted(shapes)}"
         )
-
-    normalized = np.stack(validated, axis=0).astype(np.float32) / 127.5 - 1.0
+    flat = np.stack(validated, axis=0).reshape(
+        len(validated) * 3,
+        validated[0].shape[1],
+        validated[0].shape[2],
+        3,
+    )
+    normalized = flat.astype(np.float32) / 127.5 - 1.0
     resized = image_tools.resize_with_pad_torch(
         torch.from_numpy(normalized),
         config.image_size[0],
         config.image_size[1],
     )
-    resized_array = np.asarray(resized.cpu().numpy(), dtype=np.float32)
-    if resized_array.ndim == 3:
-        resized_array = resized_array[None, ...]
-    expected_shape = (len(validated), *config.image_size, 3)
-    if resized_array.shape != expected_shape:
-        raise ValueError(
-            f"resized frame batch must have shape {expected_shape}, got {resized_array.shape}"
-        )
-    return resized_array
+    result = np.asarray(resized.cpu().numpy(), dtype=np.float32)
+    return result.reshape(len(validated), 3, *config.image_size, 3)
 
 
-def _materialize_frames(
+def _materialize_boundaries(
     plan: Any,
     *,
-    frame_decoder: FrameDecoder,
-    frames_decoder: FramesDecoder | None,
+    boundary_decoder: BoundaryDecoder,
+    boundaries_decoder: BoundariesDecoder | None,
     config: GuideMaterializerConfig,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     height, width = config.image_size
     images = np.full(
-        (config.max_frames, height, width, 3),
+        (config.max_boundaries, 3, height, width, 3),
         -1.0,
         dtype=np.float32,
     )
-    image_mask = np.zeros(config.max_frames, dtype=np.bool_)
-
-    if frames_decoder is None:
-        decoded_frames = tuple(frame_decoder(frame_ref) for frame_ref in plan.frames)
+    image_mask = np.zeros((config.max_boundaries, 3), dtype=np.bool_)
+    boundary_mask = np.zeros(config.max_boundaries, dtype=np.bool_)
+    if boundaries_decoder is None:
+        decoded = tuple(boundary_decoder(boundary) for boundary in plan.boundaries)
     else:
-        decoded_frames = tuple(frames_decoder(plan.frames))
-        if len(decoded_frames) != len(plan.frames):
+        decoded = tuple(boundaries_decoder(plan.boundaries))
+        if len(decoded) != len(plan.boundaries):
             raise ValueError(
-                "frames_decoder must return exactly one frame per GuidePlan frame: "
-                f"expected {len(plan.frames)}, got {len(decoded_frames)}"
+                "boundaries_decoder must return exactly one item per GuidePlan Boundary"
             )
+    preprocessed = _preprocess_boundary_batch(decoded, config=config)
+    count = len(plan.boundaries)
+    images[:count] = preprocessed
+    image_mask[:count] = True
+    boundary_mask[:count] = True
+    return images, image_mask, boundary_mask
 
-    preprocessed = _preprocess_frame_batch(decoded_frames, config=config)
-    images[: len(decoded_frames)] = preprocessed
 
-    image_mask[: len(plan.frames)] = True
-    return images, image_mask
+def _tokenize_text(
+    tokenizer: Any,
+    text: str,
+    *,
+    expected_tokens: int,
+    context: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    tokenize_text = getattr(tokenizer, "tokenize_text", None)
+    if not callable(tokenize_text):
+        raise ValueError("tokenizer must provide a callable tokenize_text method")
+    try:
+        tokens, mask = tokenize_text(text)
+    except ValueError as exc:
+        raise ValueError(f"failed to tokenize {context}: {exc}") from exc
+    expected_shape = (expected_tokens,)
+    if not isinstance(tokens, np.ndarray) or tokens.shape != expected_shape:
+        raise ValueError(
+            f"tokenizer tokens for {context} must have shape {expected_shape}"
+        )
+    if not isinstance(mask, np.ndarray) or mask.shape != expected_shape:
+        raise ValueError(f"tokenizer mask for {context} must have shape {expected_shape}")
+    if tokens.dtype != np.int32 or mask.dtype != np.bool_:
+        raise ValueError(f"tokenizer output for {context} must be int32 tokens and bool mask")
+    if not np.any(mask):
+        raise ValueError(f"tokenizer produced empty text for {context}")
+    return tokens, mask
 
 
-def _materialize_text(
+def _materialize_boundary_text(
     plan: Any,
     *,
     tokenizer: Any,
     config: GuideMaterializerConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
-    tokenize_text = getattr(tokenizer, "tokenize_text", None)
-
-    if not callable(tokenize_text):
-        raise ValueError("tokenizer must provide a callable tokenize_text method")
-
-    text_tokens = np.zeros(
-        (config.max_units, config.max_text_tokens),
+    tokens = np.zeros(
+        (config.max_boundaries, 3, config.max_boundary_text_tokens),
         dtype=np.int32,
     )
-    text_mask = np.zeros(
-        (config.max_units, config.max_text_tokens),
-        dtype=np.bool_,
+    mask = np.zeros(tokens.shape, dtype=np.bool_)
+    for boundary_index, boundary in enumerate(plan.boundaries):
+        view_texts = getattr(boundary, "view_texts", None)
+        if not isinstance(view_texts, tuple) or len(view_texts) != 3:
+            raise ValueError(
+                f"Boundary {boundary_index} view_texts must be a three-item tuple"
+            )
+        for view, text in enumerate(view_texts):
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(
+                    f"Boundary {boundary_index} view {view} text must be non-empty"
+                )
+            tokens[boundary_index, view], mask[boundary_index, view] = _tokenize_text(
+                tokenizer,
+                text,
+                expected_tokens=config.max_boundary_text_tokens,
+                context=f"Boundary {boundary_index} view {view}",
+            )
+    return tokens, mask
+
+
+def _materialize_transition_text(
+    plan: Any,
+    *,
+    tokenizer: Any,
+    config: GuideMaterializerConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    tokens = np.zeros(
+        (config.max_units, config.max_transition_text_tokens),
+        dtype=np.int32,
     )
-
-    expected_shape = (config.max_text_tokens,)
-
+    mask = np.zeros(tokens.shape, dtype=np.bool_)
     for unit_index, unit in enumerate(plan.units):
-        if not isinstance(unit.transition_text, str):
-            raise ValueError(
-                f"unit {unit_index} transition_text must be str, "
-                f"got {type(unit.transition_text).__name__}"
-            )
-
-        try:
-            tokens, mask = tokenize_text(unit.transition_text)
-        except ValueError as exc:
-            raise ValueError(
-                f"failed to tokenize Guide unit {unit_index}: {exc}"
-            ) from exc
-
-        if not isinstance(tokens, np.ndarray) or not isinstance(mask, np.ndarray):
-            raise ValueError(
-                f"tokenizer output for unit {unit_index} must be numpy arrays"
-            )
-
-        if tokens.shape != expected_shape:
-            raise ValueError(
-                f"tokenizer tokens for unit {unit_index} must have shape "
-                f"{expected_shape}, got {tokens.shape}"
-            )
-
-        if mask.shape != expected_shape:
-            raise ValueError(
-                f"tokenizer mask for unit {unit_index} must have shape "
-                f"{expected_shape}, got {mask.shape}"
-            )
-
-        if tokens.dtype != np.int32:
-            raise ValueError(
-                f"tokenizer tokens for unit {unit_index} must have dtype int32, "
-                f"got {tokens.dtype}"
-            )
-
-        if mask.dtype != np.bool_:
-            raise ValueError(
-                f"tokenizer mask for unit {unit_index} must have dtype bool, "
-                f"got {mask.dtype}"
-            )
-
-        text_tokens[unit_index] = tokens
-        text_mask[unit_index] = mask
-
-    return text_tokens, text_mask
+        text = getattr(unit, "transition_text", None)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"unit {unit_index} transition_text must be non-empty")
+        tokens[unit_index], mask[unit_index] = _tokenize_text(
+            tokenizer,
+            text,
+            expected_tokens=config.max_transition_text_tokens,
+            context=f"transition {unit_index}",
+        )
+    return tokens, mask
 
 
-def _validate_frame_slot(
-    slot: Any,
+def _validate_slot(
+    value: Any,
     *,
     unit_index: int,
-    slot_name: str,
-    frame_count: int,
+    name: str,
+    boundary_count: int,
 ) -> int:
-    if isinstance(slot, bool) or not isinstance(slot, (int, np.integer)):
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"unit {unit_index} {name} must be an integer")
+    result = int(value)
+    if result < 0 or result >= boundary_count:
         raise ValueError(
-            f"unit {unit_index} {slot_name} must be an integer, got {slot!r}"
+            f"unit {unit_index} {name}={result} is outside [0, {boundary_count})"
         )
-
-    slot_value = int(slot)
-
-    if slot_value < 0 or slot_value >= frame_count:
-        raise ValueError(
-            f"unit {unit_index} {slot_name}={slot_value} is outside "
-            f"the valid frame range [0, {frame_count})"
-        )
-
-    return slot_value
+    return result
 
 
-def _materialize_unit_slots(
+def _validate_unit_slots(
     plan: Any,
     *,
     config: GuideMaterializerConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    frame_count = len(plan.frames)
-
+) -> np.ndarray:
     unit_mask = np.zeros(config.max_units, dtype=np.bool_)
-    before_slot = np.zeros(config.max_units, dtype=np.int32)
-    after_slot = np.zeros(config.max_units, dtype=np.int32)
-
+    previous_order = -1
     for unit_index, unit in enumerate(plan.units):
-        before_value = _validate_frame_slot(
+        order = getattr(unit, "order", None)
+        if isinstance(order, bool) or not isinstance(order, int) or order <= previous_order:
+            raise ValueError("GuidePlan units must preserve strictly increasing canonical order")
+        previous_order = order
+        before = _validate_slot(
             unit.before_slot,
             unit_index=unit_index,
-            slot_name="before_slot",
-            frame_count=frame_count,
+            name="before_slot",
+            boundary_count=len(plan.boundaries),
         )
-        after_value = _validate_frame_slot(
+        after = _validate_slot(
             unit.after_slot,
             unit_index=unit_index,
-            slot_name="after_slot",
-            frame_count=frame_count,
+            name="after_slot",
+            boundary_count=len(plan.boundaries),
         )
-
-        before_slot[unit_index] = before_value
-        after_slot[unit_index] = after_value
+        if before >= after:
+            raise ValueError("Each GuidePlan Unit must advance to a later Boundary")
+        if plan.boundaries[after].order != plan.boundaries[before].order + 1:
+            raise ValueError("Each GuidePlan Unit must reference adjacent canonical Boundaries")
         unit_mask[unit_index] = True
+    return unit_mask
 
-    return unit_mask, before_slot, after_slot
+
+def _materialize_memory_map(
+    plan: Any,
+    *,
+    config: GuideMaterializerConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    sequence = (
+        config.max_boundaries * config.boundary_num_queries
+        + config.max_units * config.transition_num_queries
+    )
+    source_kind = np.zeros(sequence, dtype=np.int32)
+    source_index = np.zeros(sequence, dtype=np.int32)
+    source_offset = np.zeros(sequence, dtype=np.int32)
+    memory_mask = np.zeros(sequence, dtype=np.bool_)
+    emitted_boundaries: set[int] = set()
+    cursor = 0
+    previous_after: int | None = None
+
+    def emit(kind: int, index: int, count: int) -> None:
+        nonlocal cursor
+        end = cursor + count
+        source_kind[cursor:end] = kind
+        source_index[cursor:end] = index
+        source_offset[cursor:end] = np.arange(count, dtype=np.int32)
+        memory_mask[cursor:end] = True
+        cursor = end
+
+    for unit_index, unit in enumerate(plan.units):
+        before = int(unit.before_slot)
+        after = int(unit.after_slot)
+        if before != previous_after:
+            if previous_after is not None and before <= previous_after:
+                raise ValueError(
+                    "GuidePlan discontinuities must advance to a later Boundary"
+                )
+            if before in emitted_boundaries:
+                raise ValueError("GuidePlan chain revisits a non-adjacent Boundary")
+            emit(BOUNDARY_MEMORY_KIND, before, config.boundary_num_queries)
+            emitted_boundaries.add(before)
+        elif before not in emitted_boundaries:
+            raise ValueError("GuidePlan shared Boundary was not emitted")
+
+        emit(TRANSITION_MEMORY_KIND, unit_index, config.transition_num_queries)
+        if after in emitted_boundaries:
+            raise ValueError("GuidePlan chain revisits an emitted after Boundary")
+        emit(BOUNDARY_MEMORY_KIND, after, config.boundary_num_queries)
+        emitted_boundaries.add(after)
+        previous_after = after
+
+    if emitted_boundaries != set(range(len(plan.boundaries))):
+        raise ValueError("GuidePlan contains a Boundary not referenced by accepted Units")
+    return source_kind, source_index, source_offset, memory_mask

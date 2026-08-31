@@ -13,8 +13,8 @@ import torch
 
 from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_inputs import validate_guide_conditioned_batch
-from openpi.training.guide_dataset import GuideBindingIndex
-from openpi.training.guide_dataset import GuideBoundDataset
+from openpi.training.guide_dataset import GuideCatalog
+from openpi.training.guide_dataset import GuidedDataset
 
 
 def _require_nonnegative_integer(value: Any, *, name: str) -> int:
@@ -28,7 +28,7 @@ class GuidedDataLoader:
 
     def __init__(
         self,
-        dataset: GuideBoundDataset,
+        dataset: GuidedDataset,
         *,
         batch_sampler: Any,
         collator: Any,
@@ -39,7 +39,7 @@ class GuidedDataLoader:
         worker_timeout_s: float = 0.0,
         worker_torch_threads: int = 1,
         data_config: Any | None = None,
-        binding_index: GuideBindingIndex | None = None,
+        guide_catalog: GuideCatalog | None = None,
         host_metadata: dict[str, Any] | None = None,
     ):
         if isinstance(num_workers, bool) or not isinstance(num_workers, Integral) or num_workers < 0:
@@ -96,7 +96,7 @@ class GuidedDataLoader:
         self._num_batches = None if num_batches is None else int(num_batches)
         self._epoch = 0
         self._data_config = data_config
-        self._binding_index = binding_index
+        self._guide_catalog = guide_catalog
         self._host_metadata = {} if host_metadata is None else dict(host_metadata)
         loader_kwargs: dict[str, Any] = {}
         if num_workers > 0:
@@ -143,8 +143,8 @@ class GuidedDataLoader:
         return self._data_loader
 
     @property
-    def binding_index(self) -> GuideBindingIndex | None:
-        return self._binding_index
+    def guide_catalog(self) -> GuideCatalog | None:
+        return self._guide_catalog
 
     @property
     def host_metadata(self) -> dict[str, Any]:

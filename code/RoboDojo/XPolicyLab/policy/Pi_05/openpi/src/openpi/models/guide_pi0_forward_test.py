@@ -14,6 +14,7 @@ _FRAMES = 3
 _PATCHES = 2
 _UNITS = 2
 _TEXT_TOKENS = 4
+_BOUNDARY_TEXT_TOKENS = 3
 _WIDTH = 5
 _QUERIES = 3
 _IMAGE_HEIGHT = 2
@@ -22,37 +23,34 @@ _IMAGE_WIDTH = 3
 
 def _make_guide() -> GuideInput:
     return GuideInput(
-        images=jnp.arange(
-            _GROUPS * _FRAMES * _IMAGE_HEIGHT * _IMAGE_WIDTH * 3,
+        boundary_images=jnp.arange(
+            _GROUPS * _FRAMES * 3 * _IMAGE_HEIGHT * _IMAGE_WIDTH * 3,
             dtype=jnp.float32,
-        ).reshape(_GROUPS, _FRAMES, _IMAGE_HEIGHT, _IMAGE_WIDTH, 3),
-        image_mask=jnp.array(
-            [[True, True, False], [True, False, True]],
-            dtype=jnp.bool_,
+        ).reshape(_GROUPS, _FRAMES, 3, _IMAGE_HEIGHT, _IMAGE_WIDTH, 3),
+        boundary_image_mask=jnp.ones((_GROUPS, _FRAMES, 3), dtype=jnp.bool_),
+        boundary_text_tokens=jnp.arange(
+            _GROUPS * _FRAMES * 3 * _BOUNDARY_TEXT_TOKENS,
+            dtype=jnp.int32,
+        ).reshape(_GROUPS, _FRAMES, 3, _BOUNDARY_TEXT_TOKENS),
+        boundary_text_mask=jnp.ones(
+            (_GROUPS, _FRAMES, 3, _BOUNDARY_TEXT_TOKENS), dtype=jnp.bool_
         ),
-        text_tokens=jnp.arange(
+        transition_text_tokens=jnp.arange(
             _GROUPS * _UNITS * _TEXT_TOKENS,
             dtype=jnp.int32,
         ).reshape(_GROUPS, _UNITS, _TEXT_TOKENS),
-        text_mask=jnp.array(
-            [
-                [[True, True, True, False], [True, False, False, False]],
-                [[True, True, False, False], [False, False, False, False]],
-            ],
-            dtype=jnp.bool_,
+        transition_text_mask=jnp.ones(
+            (_GROUPS, _UNITS, _TEXT_TOKENS), dtype=jnp.bool_
         ),
+        boundary_mask=jnp.ones((_GROUPS, _FRAMES), dtype=jnp.bool_),
         unit_mask=jnp.array(
             [[True, True], [True, False]],
             dtype=jnp.bool_,
         ),
-        before_slot=jnp.array(
-            [[0, 1], [1, -1]],
-            dtype=jnp.int32,
-        ),
-        after_slot=jnp.array(
-            [[1, 2], [2, -1]],
-            dtype=jnp.int32,
-        ),
+        memory_source_kind=jnp.zeros((_GROUPS, 8), dtype=jnp.int32),
+        memory_source_index=jnp.zeros((_GROUPS, 8), dtype=jnp.int32),
+        memory_source_offset=jnp.zeros((_GROUPS, 8), dtype=jnp.int32),
+        memory_mask=jnp.ones((_GROUPS, 8), dtype=jnp.bool_),
     )
 
 
@@ -89,23 +87,33 @@ class _RecordingGuideFeatureEncoder:
 
     def __call__(
         self,
-        frame_tokens,
-        frame_mask,
-        text_embeddings,
-        text_mask,
+        boundary_image_tokens,
+        boundary_image_mask,
+        boundary_text_embeddings,
+        boundary_text_mask,
+        transition_text_embeddings,
+        transition_text_mask,
+        boundary_mask,
         unit_mask,
-        before_slot,
-        after_slot,
+        memory_source_kind,
+        memory_source_index,
+        memory_source_offset,
+        memory_mask,
     ) -> guide_encoder.GuideMemory:
         self.calls.append(
             (
-                frame_tokens,
-                frame_mask,
-                text_embeddings,
-                text_mask,
+                boundary_image_tokens,
+                boundary_image_mask,
+                boundary_text_embeddings,
+                boundary_text_mask,
+                transition_text_embeddings,
+                transition_text_mask,
+                boundary_mask,
                 unit_mask,
-                before_slot,
-                after_slot,
+                memory_source_kind,
+                memory_source_index,
+                memory_source_offset,
+                memory_mask,
             )
         )
         tokens = jnp.ones(
@@ -139,36 +147,59 @@ def test_encode_guide_uses_shared_backbones_once_and_preserves_group_shapes() ->
 
     memory = guide_pi0.GuidePi0.encode_guide(model, guide)
 
-    assert image_encoder.calls == [((_GROUPS * _FRAMES, _IMAGE_HEIGHT, _IMAGE_WIDTH, 3), False)]
-    assert text_embedder.calls == [((_GROUPS * _UNITS, _TEXT_TOKENS), "embed")]
+    assert image_encoder.calls == [
+        ((_GROUPS * _FRAMES * 3, _IMAGE_HEIGHT, _IMAGE_WIDTH, 3), False)
+    ]
+    assert text_embedder.calls == [
+        ((_GROUPS * _FRAMES * 3, _BOUNDARY_TEXT_TOKENS), "embed"),
+        ((_GROUPS * _UNITS, _TEXT_TOKENS), "embed"),
+    ]
     assert len(guide_encoder_stub.calls) == 1
 
     (
-        frame_tokens,
-        frame_mask,
-        text_embeddings,
-        text_mask,
+        boundary_image_tokens,
+        boundary_image_mask,
+        boundary_text_embeddings,
+        boundary_text_mask,
+        transition_text_embeddings,
+        transition_text_mask,
+        boundary_mask,
         unit_mask,
-        before_slot,
-        after_slot,
+        memory_source_kind,
+        memory_source_index,
+        memory_source_offset,
+        memory_mask,
     ) = guide_encoder_stub.calls[0]
 
-    expected_frame_tokens = jnp.arange(
-        _GROUPS * _FRAMES * _PATCHES * _WIDTH,
+    expected_boundary_image_tokens = jnp.arange(
+        _GROUPS * _FRAMES * 3 * _PATCHES * _WIDTH,
         dtype=jnp.float32,
-    ).reshape(_GROUPS, _FRAMES, _PATCHES, _WIDTH)
-    expected_text_embeddings = jnp.arange(
+    ).reshape(_GROUPS, _FRAMES, 3, _PATCHES, _WIDTH)
+    expected_boundary_text_embeddings = jnp.arange(
+        _GROUPS * _FRAMES * 3 * _BOUNDARY_TEXT_TOKENS * _WIDTH,
+        dtype=jnp.float32,
+    ).reshape(_GROUPS, _FRAMES, 3, _BOUNDARY_TEXT_TOKENS, _WIDTH)
+    expected_transition_text_embeddings = jnp.arange(
         _GROUPS * _UNITS * _TEXT_TOKENS * _WIDTH,
         dtype=jnp.float32,
     ).reshape(_GROUPS, _UNITS, _TEXT_TOKENS, _WIDTH)
 
-    np.testing.assert_array_equal(frame_tokens, expected_frame_tokens)
-    np.testing.assert_array_equal(text_embeddings, expected_text_embeddings)
-    np.testing.assert_array_equal(frame_mask, guide.image_mask)
-    np.testing.assert_array_equal(text_mask, guide.text_mask)
+    np.testing.assert_array_equal(boundary_image_tokens, expected_boundary_image_tokens)
+    np.testing.assert_array_equal(
+        boundary_text_embeddings, expected_boundary_text_embeddings
+    )
+    np.testing.assert_array_equal(
+        transition_text_embeddings, expected_transition_text_embeddings
+    )
+    np.testing.assert_array_equal(boundary_image_mask, guide.boundary_image_mask)
+    np.testing.assert_array_equal(boundary_text_mask, guide.boundary_text_mask)
+    np.testing.assert_array_equal(transition_text_mask, guide.transition_text_mask)
+    np.testing.assert_array_equal(boundary_mask, guide.boundary_mask)
     np.testing.assert_array_equal(unit_mask, guide.unit_mask)
-    np.testing.assert_array_equal(before_slot, guide.before_slot)
-    np.testing.assert_array_equal(after_slot, guide.after_slot)
+    np.testing.assert_array_equal(memory_source_kind, guide.memory_source_kind)
+    np.testing.assert_array_equal(memory_source_index, guide.memory_source_index)
+    np.testing.assert_array_equal(memory_source_offset, guide.memory_source_offset)
+    np.testing.assert_array_equal(memory_mask, guide.memory_mask)
 
     assert memory.tokens.shape == (_GROUPS, _UNITS * _QUERIES, _WIDTH)
     assert memory.token_mask.shape == (_GROUPS, _UNITS * _QUERIES)

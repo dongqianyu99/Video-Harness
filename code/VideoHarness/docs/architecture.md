@@ -65,7 +65,9 @@ src/video_harness/
 └── renderer.py            # deterministic Guide Views
 ```
 
-Existing pairing, training-split, and Actuator reader behavior remain independent from the media execution layer.
+The reader consumes only canonical per-episode Documents. It builds a stable accepted
+Document catalog and projects a selected `document_id` into shared Boundary States and
+ordered transition Units. This catalog/plan contract is the sole policy-consumer input.
 
 ## Evidence Unit state machine
 
@@ -95,7 +97,7 @@ NORMAL_COMPILE
 ```
 
 `QUARANTINED` is an automatic terminal state, not a human work queue. Default
-Readers and training splits require a complete `ACCEPTED` document. Human review
+Readers require an `ACCEPTED` document. Human review
 is reserved for sampled Harness evaluation and does not block corpus generation.
 
 Document acceptance uses a 90% Evidence-Unit coverage threshold rather than requiring
@@ -202,9 +204,11 @@ and request payloads are released after the Evidence Unit finishes.
 - canonical documents store source references and evidence, never generated media;
 - provider responses bind by document/unit/request role, never completion order.
 
-Pi0.5 keeps its per-transition Guide resampler. Boundary images are decoded and
-encoded once as unique frame slots; adjacent transitions may reference the same
-encoded Boundary token without duplicating source media or canonical state text.
+Pi0.5 materializes each unique Boundary as three synchronized camera images plus
+three view-specific state descriptions and resamples it to `K_B` tokens. Accepted
+Transition text is independently resampled to `K_T` tokens. The reader then packs
+the two memories in canonical `Boundary, Transition, Boundary` order, so adjacent
+Transitions share one encoded Boundary and rejected-Unit gaps remain explicit.
 
 ## Configuration
 

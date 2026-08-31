@@ -15,6 +15,10 @@ from typing import Any
 RUN_MANIFEST_SCHEMA_VERSION = "openpi.guided-run.v0"
 
 
+class GuidedResumeContractError(ValueError):
+    """Raised before mutating a run whose resume contract drifted."""
+
+
 @dataclass(frozen=True, slots=True)
 class GuidedRunLayout:
     root: Path
@@ -128,6 +132,73 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)
+
+
+def _normalized_run_config(value: Any) -> dict[str, Any]:
+    config = _jsonable(value)
+    if not isinstance(config, dict):
+        raise ValueError("guided run config must serialize to an object")
+    normalized = dict(config)
+    normalized.pop("resume", None)
+    normalized.pop("overwrite", None)
+    return normalized
+
+
+def validate_guided_run_resume(
+    layout: GuidedRunLayout,
+    *,
+    run_config: Any,
+    runtime_data: dict[str, Any] | None = None,
+) -> None:
+    """Fail closed when a resume request changes its data/model contract."""
+
+    if not getattr(run_config, "resume", False):
+        return
+    try:
+        manifest = json.loads(layout.manifest.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        raise GuidedResumeContractError(
+            f"cannot validate guided resume manifest: {layout.manifest}"
+        ) from exc
+    previous_config = manifest.get("config")
+    if not isinstance(previous_config, dict):
+        raise GuidedResumeContractError("guided resume manifest has no config object")
+    if _normalized_run_config(previous_config) != _normalized_run_config(run_config):
+        raise GuidedResumeContractError(
+            "guided resume config does not match the original run"
+        )
+    if runtime_data is None:
+        return
+    previous_runtime = manifest.get("runtime")
+    previous_data = (
+        previous_runtime.get("data") if isinstance(previous_runtime, dict) else None
+    )
+    if not isinstance(previous_data, dict):
+        raise GuidedResumeContractError(
+            "guided resume manifest has no runtime data contract"
+        )
+    contract_keys = (
+        "catalog_build_id",
+        "catalog_digest",
+        "task_sample_digest",
+        "guide_bucket_digest",
+        "guide_representation_digest",
+        "guide_length_buckets",
+        "guide_bucket_counts",
+        "guide_boundary_num_queries",
+        "guide_transition_num_queries",
+        "guides_per_batch",
+        "queries_per_guide",
+        "remainder_strategy",
+        "gradient_accumulation_steps",
+    )
+    expected = _jsonable(runtime_data)
+    for key in contract_keys:
+        if previous_data.get(key) != expected.get(key):
+            raise GuidedResumeContractError(
+                f"guided resume runtime data contract changed for {key!r}: "
+                f"previous={previous_data.get(key)!r}, current={expected.get(key)!r}"
+            )
 
 
 def write_guided_run_manifest(

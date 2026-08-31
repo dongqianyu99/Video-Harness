@@ -44,13 +44,18 @@ def _make_observation() -> _model.Observation:
 
 def _make_guide() -> GuideInput:
     return GuideInput(
-        images=jnp.zeros((_GROUPS, 2, 1, 1, 3), dtype=jnp.float32),
-        image_mask=jnp.ones((_GROUPS, 2), dtype=jnp.bool_),
-        text_tokens=jnp.zeros((_GROUPS, 1, 2), dtype=jnp.int32),
-        text_mask=jnp.ones((_GROUPS, 1, 2), dtype=jnp.bool_),
+        boundary_images=jnp.zeros((_GROUPS, 2, 3, 1, 1, 3), dtype=jnp.float32),
+        boundary_image_mask=jnp.ones((_GROUPS, 2, 3), dtype=jnp.bool_),
+        boundary_text_tokens=jnp.zeros((_GROUPS, 2, 3, 2), dtype=jnp.int32),
+        boundary_text_mask=jnp.ones((_GROUPS, 2, 3, 2), dtype=jnp.bool_),
+        transition_text_tokens=jnp.zeros((_GROUPS, 1, 2), dtype=jnp.int32),
+        transition_text_mask=jnp.ones((_GROUPS, 1, 2), dtype=jnp.bool_),
+        boundary_mask=jnp.ones((_GROUPS, 2), dtype=jnp.bool_),
         unit_mask=jnp.ones((_GROUPS, 1), dtype=jnp.bool_),
-        before_slot=jnp.zeros((_GROUPS, 1), dtype=jnp.int32),
-        after_slot=jnp.ones((_GROUPS, 1), dtype=jnp.int32),
+        memory_source_kind=jnp.zeros((_GROUPS, 3), dtype=jnp.int32),
+        memory_source_index=jnp.zeros((_GROUPS, 3), dtype=jnp.int32),
+        memory_source_offset=jnp.zeros((_GROUPS, 3), dtype=jnp.int32),
+        memory_mask=jnp.ones((_GROUPS, 3), dtype=jnp.bool_),
     )
 
 

@@ -1,25 +1,39 @@
 from __future__ import annotations
 
+import hashlib
+
 from flax import struct
 import jax
 import jax.numpy as jnp
 
 from openpi.models import model as _model
 
+GUIDE_REPRESENTATION_DIGEST = hashlib.sha256(
+
+        b"boundary=[cam_high_image,cam_high_text,cam_left_wrist_image,"
+        b"cam_left_wrist_text,cam_right_wrist_image,cam_right_wrist_text];"
+        b"transition=text_only;memory=interleaved_boundary_transition;"
+        b"causal_reason=host_only"
+
+).hexdigest()
+
 
 @struct.dataclass
 class GuideInput:
     """Model-facing Behavior Document tensors for one grouped Guide bank."""
 
-    images: jax.Array
-    image_mask: jax.Array
-
-    text_tokens: jax.Array
-    text_mask: jax.Array
+    boundary_images: jax.Array
+    boundary_image_mask: jax.Array
+    boundary_text_tokens: jax.Array
+    boundary_text_mask: jax.Array
+    transition_text_tokens: jax.Array
+    transition_text_mask: jax.Array
+    boundary_mask: jax.Array
     unit_mask: jax.Array
-
-    before_slot: jax.Array
-    after_slot: jax.Array
+    memory_source_kind: jax.Array
+    memory_source_index: jax.Array
+    memory_source_offset: jax.Array
+    memory_mask: jax.Array
 
 
 @struct.dataclass

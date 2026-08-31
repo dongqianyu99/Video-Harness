@@ -5,209 +5,159 @@ import pytest
 
 from openpi.models import guide_tokens
 
-_GROUPS = 2
-_FRAMES = 3
-_PATCHES = 2
-_TEXT_TOKENS = 2
-_WIDTH = 3
-_UNITS = 3
 
+def test_boundary_assembly_interleaves_each_views_image_and_text() -> None:
+    images = jnp.arange(1 * 2 * 3 * 2 * 4, dtype=jnp.float32).reshape(1, 2, 3, 2, 4)
+    text = (1000 + jnp.arange(1 * 2 * 3 * 3 * 4, dtype=jnp.float32)).reshape(1, 2, 3, 3, 4)
+    image_mask = jnp.ones((1, 2, 3), dtype=jnp.bool_)
+    text_mask = jnp.ones((1, 2, 3, 3), dtype=jnp.bool_)
+    boundary_mask = jnp.ones((1, 2), dtype=jnp.bool_)
 
-def _make_inputs(*, masked: bool = False):
-    frame_tokens = jnp.arange(
-        _GROUPS * _FRAMES * _PATCHES * _WIDTH,
-        dtype=jnp.float32,
-    ).reshape(_GROUPS, _FRAMES, _PATCHES, _WIDTH)
-    text_embeddings = (
-        jnp.arange(
-            _GROUPS * _UNITS * _TEXT_TOKENS * _WIDTH,
-            dtype=jnp.float32,
-        ).reshape(_GROUPS, _UNITS, _TEXT_TOKENS, _WIDTH)
-        + 1000.0
+    batch = guide_tokens.assemble_boundary_tokens(
+        images,
+        image_mask,
+        text,
+        text_mask,
+        boundary_mask,
     )
 
-    frame_mask = jnp.ones((_GROUPS, _FRAMES), dtype=jnp.bool_)
-    text_mask = jnp.ones((_GROUPS, _UNITS, _TEXT_TOKENS), dtype=jnp.bool_)
-    unit_mask = jnp.ones((_GROUPS, _UNITS), dtype=jnp.bool_)
-    before_slot = jnp.array(
-        [[0, 1, 2], [1, 2, 0]],
-        dtype=jnp.int32,
-    )
-    after_slot = jnp.array(
-        [[1, 2, 0], [2, 0, 1]],
-        dtype=jnp.int32,
-    )
-
-    if masked:
-        frame_mask = jnp.array(
-            [[True, False, True], [False, True, True]],
-            dtype=jnp.bool_,
-        )
-        text_mask = jnp.array(
-            [
-                [[True, False], [False, True], [True, True]],
-                [[False, True], [True, False], [True, True]],
-            ],
-            dtype=jnp.bool_,
-        )
-        unit_mask = jnp.array(
-            [[True, True, False], [True, False, True]],
-            dtype=jnp.bool_,
-        )
-        before_slot = jnp.array(
-            [[0, 1, -1], [2, -1, 0]],
-            dtype=jnp.int32,
-        )
-        after_slot = jnp.array(
-            [[1, 2, -1], [0, -1, 1]],
-            dtype=jnp.int32,
-        )
-
-    return frame_tokens, frame_mask, text_embeddings, text_mask, unit_mask, before_slot, after_slot
-
-
-def _assemble(inputs):
-    return guide_tokens.assemble_unit_tokens(*inputs)
-
-
-def test_unit_token_batch_is_a_jax_pytree() -> None:
-    value = guide_tokens.UnitTokenBatch(
-        tokens=jnp.zeros((_GROUPS, _UNITS, 2 * _PATCHES + _TEXT_TOKENS, _WIDTH)),
-        token_mask=jnp.ones((_GROUPS, _UNITS, 2 * _PATCHES + _TEXT_TOKENS), dtype=jnp.bool_),
-        role_ids=jnp.zeros((_GROUPS, _UNITS, 2 * _PATCHES + _TEXT_TOKENS), dtype=jnp.int32),
-    )
-
-    leaves = jax.tree_util.tree_leaves(value)
-    assert len(leaves) == 3
-    mapped = jax.tree_util.tree_map(lambda leaf: leaf, value)
-    assert jax.tree_util.tree_structure(mapped) == jax.tree_util.tree_structure(value)
-    jitted = jax.jit(lambda batch: batch)(value)
-    np.testing.assert_array_equal(jitted.tokens, value.tokens)
-
-
-def test_assembly_orders_before_text_after_and_assigns_roles() -> None:
-    inputs = _make_inputs()
-    frame_tokens, _, text_embeddings, _, _, before_slot, after_slot = inputs
-
-    batch = _assemble(inputs)
-    group_indices = jnp.arange(_GROUPS)[:, None]
-    expected_before = frame_tokens[group_indices, before_slot]
-    expected_after = frame_tokens[group_indices, after_slot]
-    expected_tokens = jnp.concatenate(
-        [expected_before, text_embeddings, expected_after],
+    expected = jnp.concatenate(
+        [segment for view in range(3) for segment in (images[:, :, view], text[:, :, view])],
         axis=2,
     )
-    expected_roles = jnp.concatenate(
-        [
-            jnp.full((_GROUPS, _UNITS, _PATCHES), guide_tokens.BEFORE_ROLE, dtype=jnp.int32),
-            jnp.full((_GROUPS, _UNITS, _TEXT_TOKENS), guide_tokens.TEXT_ROLE, dtype=jnp.int32),
-            jnp.full((_GROUPS, _UNITS, _PATCHES), guide_tokens.AFTER_ROLE, dtype=jnp.int32),
-        ],
-        axis=2,
+    assert batch.tokens.shape == (1, 2, 15, 4)
+    np.testing.assert_array_equal(batch.tokens, expected)
+    np.testing.assert_array_equal(
+        batch.role_ids[0, 0],
+        np.repeat(np.arange(6, dtype=np.int32), [2, 3, 2, 3, 2, 3]),
     )
 
-    assert batch.tokens.shape == (_GROUPS, _UNITS, 2 * _PATCHES + _TEXT_TOKENS, _WIDTH)
-    np.testing.assert_array_equal(batch.tokens, expected_tokens)
-    np.testing.assert_array_equal(batch.token_mask, jnp.ones(batch.token_mask.shape, dtype=jnp.bool_))
-    np.testing.assert_array_equal(batch.role_ids, expected_roles)
 
+def test_boundary_assembly_masks_padding_exactly_and_requires_three_views() -> None:
+    images = jnp.ones((1, 2, 3, 2, 4), dtype=jnp.float32)
+    text = jnp.ones((1, 2, 3, 3, 4), dtype=jnp.float32)
+    image_mask = jnp.ones((1, 2, 3), dtype=jnp.bool_)
+    text_mask = jnp.ones((1, 2, 3, 3), dtype=jnp.bool_)
+    boundary_mask = jnp.array([[True, False]])
 
-def test_adjacent_units_can_share_a_boundary_frame() -> None:
-    inputs = _make_inputs()
-    batch = _assemble(inputs)
-
-    np.testing.assert_array_equal(batch.tokens[0, 0, -_PATCHES:], batch.tokens[0, 1, :_PATCHES])
-    np.testing.assert_array_equal(batch.tokens[0, 1, -_PATCHES:], batch.tokens[0, 2, :_PATCHES])
-    np.testing.assert_array_equal(batch.tokens[1, 0, -_PATCHES:], batch.tokens[1, 1, :_PATCHES])
-
-
-def test_masks_are_combined_and_masked_values_are_exactly_zero() -> None:
-    inputs = _make_inputs(masked=True)
-    frame_tokens, frame_mask, text_embeddings, text_mask, unit_mask, before_slot, after_slot = inputs
-    batch = _assemble(inputs)
-
-    safe_before_slot = jnp.where(unit_mask, before_slot, 0)
-    safe_after_slot = jnp.where(unit_mask, after_slot, 0)
-    group_indices = jnp.arange(_GROUPS)[:, None]
-    before_frame_mask = frame_mask[group_indices, safe_before_slot]
-    after_frame_mask = frame_mask[group_indices, safe_after_slot]
-    expected_mask = jnp.concatenate(
-        [
-            jnp.repeat(unit_mask[..., None] & before_frame_mask[..., None], _PATCHES, axis=2),
-            unit_mask[..., None] & text_mask,
-            jnp.repeat(unit_mask[..., None] & after_frame_mask[..., None], _PATCHES, axis=2),
-        ],
-        axis=2,
+    batch = guide_tokens.assemble_boundary_tokens(
+        images,
+        image_mask,
+        text,
+        text_mask,
+        boundary_mask,
     )
 
-    expected_tokens = jnp.concatenate(
-        [
-            frame_tokens[group_indices, safe_before_slot],
-            text_embeddings,
-            frame_tokens[group_indices, safe_after_slot],
-        ],
-        axis=2,
+    np.testing.assert_array_equal(batch.tokens[0, 1], 0.0)
+    assert not np.any(batch.token_mask[0, 1])
+    with pytest.raises(ValueError, match="exactly 3 views"):
+        guide_tokens.assemble_boundary_tokens(
+            images[:, :, :2],
+            image_mask[:, :, :2],
+            text[:, :, :2],
+            text_mask[:, :, :2],
+            boundary_mask,
+        )
+
+
+def test_transition_assembly_contains_only_text() -> None:
+    text = jnp.arange(1 * 2 * 3 * 4, dtype=jnp.float32).reshape(1, 2, 3, 4)
+    text_mask = jnp.array([[[True, True, False], [True, True, True]]])
+    unit_mask = jnp.array([[True, False]])
+
+    batch = guide_tokens.assemble_transition_tokens(text, text_mask, unit_mask)
+
+    assert batch.tokens.shape == text.shape
+    np.testing.assert_array_equal(batch.tokens[0, 0, 2], 0.0)
+    np.testing.assert_array_equal(batch.tokens[0, 1], 0.0)
+    np.testing.assert_array_equal(batch.role_ids, 0)
+
+
+def test_pack_guide_tokens_preserves_host_interleaving_and_type() -> None:
+    boundary_memory = jnp.asarray([[[[10.0], [11.0]], [[20.0], [21.0]], [[30.0], [31.0]]]])
+    transition_memory = jnp.asarray([[[[100.0]], [[200.0]]]])
+    boundary_mask = jnp.array([[True, True, True]])
+    unit_mask = jnp.array([[True, True]])
+    # B0, T0, B1, T1, B2
+    kind = jnp.array([[0, 0, 1, 0, 0, 1, 0, 0]], dtype=jnp.int32)
+    index = jnp.array([[0, 0, 0, 1, 1, 1, 2, 2]], dtype=jnp.int32)
+    offset = jnp.array([[0, 1, 0, 0, 1, 0, 0, 1]], dtype=jnp.int32)
+    mask = jnp.ones((1, 8), dtype=jnp.bool_)
+    type_embeddings = jnp.asarray([[1000.0], [2000.0]])
+
+    packed = guide_tokens.pack_guide_tokens(
+        boundary_memory,
+        transition_memory,
+        boundary_mask,
+        unit_mask,
+        kind,
+        index,
+        offset,
+        mask,
+        type_embeddings,
     )
-    expected_tokens = jnp.where(expected_mask[..., None], expected_tokens, 0.0)
 
-    np.testing.assert_array_equal(batch.token_mask, expected_mask)
-    np.testing.assert_array_equal(batch.tokens, expected_tokens)
-    assert np.all(np.isfinite(batch.tokens))
-    np.testing.assert_array_equal(batch.tokens[0, 2], 0.0)
-    np.testing.assert_array_equal(batch.tokens[1, 1], 0.0)
-    assert set(np.asarray(batch.role_ids).tolist()[0][0]) <= {
-        guide_tokens.BEFORE_ROLE,
-        guide_tokens.TEXT_ROLE,
-        guide_tokens.AFTER_ROLE,
-    }
+    np.testing.assert_array_equal(
+        packed.tokens[..., 0],
+        [[1010, 1011, 2100, 1020, 1021, 2200, 1030, 1031]],
+    )
 
 
-def test_padding_unit_negative_slots_do_not_read_last_frame() -> None:
-    inputs = _make_inputs(masked=True)
-    frame_tokens = inputs[0].at[:, -1].set(999_999.0)
-    batch = _assemble((frame_tokens, *inputs[1:]))
+def test_pack_guide_tokens_supports_boundary_boundary_gap_and_tail_padding() -> None:
+    boundary_memory = jnp.arange(1 * 4 * 2 * 1, dtype=jnp.float32).reshape(1, 4, 2, 1)
+    transition_memory = jnp.arange(1 * 2 * 1 * 1, dtype=jnp.float32).reshape(1, 2, 1, 1)
+    # B0,T0,B1,B2,T1,B3, then two pads.
+    kind = jnp.array([[0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0]], dtype=jnp.int32)
+    index = jnp.array([[0, 0, 0, 1, 1, 2, 2, 1, 3, 3, 0, 0]], dtype=jnp.int32)
+    offset = jnp.array([[0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0]], dtype=jnp.int32)
+    mask = jnp.array([[True] * 10 + [False, False]])
 
-    np.testing.assert_array_equal(batch.tokens[0, 2], 0.0)
-    np.testing.assert_array_equal(batch.tokens[1, 1], 0.0)
-    assert np.all(batch.token_mask[0, 2] == 0)
-    assert np.all(batch.token_mask[1, 1] == 0)
+    packed = guide_tokens.pack_guide_tokens(
+        boundary_memory,
+        transition_memory,
+        jnp.ones((1, 4), dtype=jnp.bool_),
+        jnp.ones((1, 2), dtype=jnp.bool_),
+        kind,
+        index,
+        offset,
+        mask,
+        jnp.zeros((2, 1), dtype=jnp.float32),
+    )
 
-
-def test_jit_assembly_matches_eager() -> None:
-    inputs = _make_inputs(masked=True)
-    eager = _assemble(inputs)
-    jitted = jax.jit(_assemble)(inputs)
-
-    np.testing.assert_array_equal(jitted.tokens, eager.tokens)
-    np.testing.assert_array_equal(jitted.token_mask, eager.token_mask)
-    np.testing.assert_array_equal(jitted.role_ids, eager.role_ids)
-
-
-def test_valid_unit_out_of_range_slot_fails_in_eager_mode() -> None:
-    inputs = _make_inputs()
-    bad_before_slot = inputs[5].at[0, 0].set(_FRAMES)
-
-    with pytest.raises(ValueError, match="before_slot"):
-        _assemble((*inputs[:5], bad_before_slot, inputs[6]))
+    assert packed.tokens.shape == (1, 12, 1)
+    np.testing.assert_array_equal(packed.tokens[0, 10:], 0.0)
+    np.testing.assert_array_equal(packed.token_mask, mask)
 
 
-def test_valid_unit_negative_slot_fails_in_eager_mode() -> None:
-    inputs = _make_inputs()
-    bad_after_slot = inputs[6].at[0, 0].set(-1)
+def test_pack_guide_tokens_rejects_duplicate_or_incomplete_map() -> None:
+    boundary_memory = jnp.zeros((1, 1, 2, 4))
+    transition_memory = jnp.zeros((1, 1, 1, 4))
+    with pytest.raises(ValueError, match=r"duplicate|cover"):
+        guide_tokens.pack_guide_tokens(
+            boundary_memory,
+            transition_memory,
+            jnp.ones((1, 1), dtype=jnp.bool_),
+            jnp.ones((1, 1), dtype=jnp.bool_),
+            jnp.array([[0, 0, 0]], dtype=jnp.int32),
+            jnp.zeros((1, 3), dtype=jnp.int32),
+            jnp.array([[0, 0, 1]], dtype=jnp.int32),
+            jnp.ones((1, 3), dtype=jnp.bool_),
+            jnp.zeros((2, 4)),
+        )
 
-    with pytest.raises(ValueError, match="after_slot"):
-        _assemble((*inputs[:6], bad_after_slot))
 
-
-def test_shape_and_dtype_errors_fail_clearly_in_eager_mode() -> None:
-    inputs = _make_inputs()
-    frame_tokens, frame_mask, text_embeddings, text_mask, unit_mask, before_slot, after_slot = inputs
-
-    with pytest.raises(ValueError, match="frame_mask"):
-        _assemble((frame_tokens, frame_mask.astype(jnp.int32), text_embeddings, text_mask, unit_mask, before_slot, after_slot))
-
-    with pytest.raises(ValueError, match="text_embeddings"):
-        _assemble((frame_tokens, frame_mask, text_embeddings[..., :-1], text_mask, unit_mask, before_slot, after_slot))
-
-    with pytest.raises(ValueError, match="text_mask"):
-        _assemble((frame_tokens, frame_mask, text_embeddings, text_mask[..., :-1], unit_mask, before_slot, after_slot))
+def test_pack_guide_tokens_jits() -> None:
+    args = (
+        jnp.zeros((1, 1, 1, 2)),
+        jnp.zeros((1, 1, 1, 2)),
+        jnp.ones((1, 1), dtype=jnp.bool_),
+        jnp.ones((1, 1), dtype=jnp.bool_),
+        jnp.array([[0, 1]], dtype=jnp.int32),
+        jnp.array([[0, 0]], dtype=jnp.int32),
+        jnp.array([[0, 0]], dtype=jnp.int32),
+        jnp.ones((1, 2), dtype=jnp.bool_),
+        jnp.zeros((2, 2)),
+    )
+    eager = guide_tokens.pack_guide_tokens(*args)
+    compiled = jax.jit(guide_tokens.pack_guide_tokens)(*args)
+    np.testing.assert_array_equal(compiled.tokens, eager.tokens)

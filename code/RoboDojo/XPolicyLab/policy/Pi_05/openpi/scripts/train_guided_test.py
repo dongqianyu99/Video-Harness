@@ -9,15 +9,17 @@ from types import SimpleNamespace
 import flax.nnx as nnx
 import jax
 import numpy as np
+import pytest
+
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.shared.normalize import NormStats
 from openpi.training import checkpoints
 from openpi.training.guide_train_config import GuidedTrainRunConfig
-from openpi.training.guide_train_step_test import _make_batch, _make_state, _TinyGuidedModel
+from openpi.training.guide_train_step_test import _make_batch
+from openpi.training.guide_train_step_test import _make_state
+from openpi.training.guide_train_step_test import _TinyGuidedModel
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 import openpi.training.sharding as stock_sharding
-import pytest
-
 from scripts import train_guided as _train
 
 
@@ -25,16 +27,14 @@ def _guided_data(tmp_path: Path) -> RoboDojoGuidedDataConfig:
     return RoboDojoGuidedDataConfig(
         repo_id="fake",
         dataset_root=tmp_path / "dataset",
-        dataset_artifact_path=tmp_path / "dataset.json",
         documents_root=tmp_path / "documents",
-        pairs_artifact_path=tmp_path / "pairs.jsonl",
-        batch_size=2,
+        guides_per_batch=1,
+        queries_per_guide=2,
         seed=0,
-        profile="actuator",
-        max_frames=2,
+        max_boundaries=2,
         max_units=1,
-        max_text_tokens=4,
-        query_episode_indices=(37,),
+        max_boundary_text_tokens=4,
+        max_transition_text_tokens=4,
     )
 
 
@@ -52,7 +52,7 @@ def _run_config(tmp_path: Path) -> GuidedTrainRunConfig:
     )
 
 
-def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path) -> None:
+def test_argument_entry_builds_task_level_data_config(monkeypatch, tmp_path: Path) -> None:
     captured = {}
 
     def fake_run(run_config):
@@ -65,14 +65,15 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
         base_params_path=tmp_path / "base",
         repo_id="RoboDojo",
         dataset_root=tmp_path / "dataset",
-        dataset_artifact=tmp_path / "dataset.json",
         documents_root=tmp_path / "documents",
-        pairs_artifact=tmp_path / "pairs.jsonl",
-        query_episode_index=37,
-        batch_size=2,
-        max_frames=2,
+        guides_per_batch=2,
+        queries_per_guide=3,
+        max_boundaries=2,
         max_units=1,
-        max_text_tokens=4,
+        max_boundary_text_tokens=5,
+        max_transition_text_tokens=4,
+        guide_boundary_num_queries=12,
+        guide_transition_num_queries=8,
         experiment_name="guided",
         checkpoint_dir=tmp_path / "checkpoint",
         num_train_steps=1,
@@ -80,7 +81,6 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
         save_interval=1,
         fsdp_devices=1,
         seed=0,
-        profile="actuator",
         overwrite=False,
         resume=False,
         wandb_enabled=False,
@@ -88,11 +88,12 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
 
     _train._run_from_args(args)  # noqa: SLF001
 
-    assert captured["run_config"].guided_data.query_episode_indices == (37,)
+    data = captured["run_config"].guided_data
+    assert (data.guides_per_batch, data.queries_per_guide) == (2, 3)
+    assert (data.guide_boundary_num_queries, data.guide_transition_num_queries) == (12, 8)
+    assert data.guide_length_buckets is None
     assert captured["run_config"].base_params_path == tmp_path / "base"
 
-    args.query_episode_index = None
-    args.split_manifest = tmp_path / "training-split.json"
     args.guide_length_bucket = ["1:2"]
     args.remainder_strategy = "pad_mask"
     args.gradient_accumulation_steps = 2
@@ -100,10 +101,8 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
     args.allow_effective_batch_mismatch = True
     _train._run_from_args(args)  # noqa: SLF001
     formal_data = captured["run_config"].guided_data
-    assert formal_data.query_episode_indices is None
-    assert formal_data.split_manifest_path == args.split_manifest
     assert formal_data.require_all_tasks
-    assert formal_data.guide_length_buckets[0].bucket_id == "u1-f2"
+    assert formal_data.guide_length_buckets[0].bucket_id == "u1-b2"
     assert formal_data.remainder_strategy == "pad_mask"
     assert formal_data.gradient_accumulation_steps == 2
     assert captured["run_config"].gradient_accumulation_steps == 2
@@ -115,13 +114,6 @@ def test_argument_entry_builds_explicit_query_scope(monkeypatch, tmp_path: Path)
     tracked = captured["run_config"]
     assert tracked.run_dir == args.run_dir
     assert tracked.checkpoint_dir == args.run_dir / "checkpoints"
-
-
-def test_argument_entry_rejects_unscoped_training():
-    with pytest.raises(ValueError, match="split-manifest"):
-        _train._run_from_args(  # noqa: SLF001
-            Namespace(query_episode_index=None, split_manifest=None)
-        )
 
 
 def test_runtime_validation_requires_full_dense_guided_config(tmp_path: Path) -> None:
@@ -178,7 +170,8 @@ def test_runtime_validation_aligns_effective_batch_with_official_global_256(
 ) -> None:
     guided_data = dataclasses.replace(
         _guided_data(tmp_path),
-        batch_size=64,
+        guides_per_batch=4,
+        queries_per_guide=16,
         gradient_accumulation_steps=4,
     )
     run_config = dataclasses.replace(
@@ -197,7 +190,7 @@ def test_runtime_validation_aligns_effective_batch_with_official_global_256(
 
     _train._validate_runtime_config(run_config, resolved)  # noqa: SLF001
 
-    mismatched_data = dataclasses.replace(guided_data, batch_size=32)
+    mismatched_data = dataclasses.replace(guided_data, queries_per_guide=8)
     mismatched = dataclasses.replace(run_config, guided_data=mismatched_data)
     with pytest.raises(ValueError, match="effective global batch"):
         _train._validate_runtime_config(  # noqa: SLF001

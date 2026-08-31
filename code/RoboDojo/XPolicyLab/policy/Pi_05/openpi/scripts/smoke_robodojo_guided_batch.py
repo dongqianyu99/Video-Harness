@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+import dataclasses
 import importlib
 import json
 from pathlib import Path
@@ -9,24 +9,28 @@ import sys
 from typing import Any
 
 import numpy as np
-from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig, create_robodojo_guided_data_loader
+
+from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
+from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Read one real RoboDojo Guide-conditioned Pi0.5 batch.")
+    parser = argparse.ArgumentParser(
+        description="Read one real task-level RoboDojo Guidance batch."
+    )
     parser.add_argument("--native-config-name", required=True)
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--dataset-artifact", type=Path, required=True)
     parser.add_argument("--documents-root", type=Path, required=True)
-    parser.add_argument("--pairs-artifact", type=Path, required=True)
-    parser.add_argument("--query-episode-index", type=int, required=True)
-    parser.add_argument("--batch-size", type=int, required=True)
-    parser.add_argument("--max-frames", type=int, required=True)
+    parser.add_argument("--guides-per-batch", type=int, required=True)
+    parser.add_argument("--queries-per-guide", type=int, required=True)
+    parser.add_argument("--max-boundaries", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
-    parser.add_argument("--max-text-tokens", type=int, required=True)
+    parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
+    parser.add_argument("--max-transition-text-tokens", type=int, required=True)
+    parser.add_argument("--guide-boundary-num-queries", type=int, default=8)
+    parser.add_argument("--guide-transition-num-queries", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--profile", default="actuator")
     parser.add_argument("--num-batches", type=int, default=1)
     return parser
 
@@ -35,108 +39,61 @@ def _shape(value: Any) -> list[int]:
     return list(np.asarray(value).shape)
 
 
-def _valid_count(mask: Any) -> int:
-    return int(np.asarray(mask, dtype=np.bool_).sum())
-
-
-def _slot_summary(batch: Any) -> dict[str, int | None]:
-    unit_mask = np.asarray(batch.guide.unit_mask)[0].astype(bool)
-    before = np.asarray(batch.guide.before_slot)[0][unit_mask]
-    after = np.asarray(batch.guide.after_slot)[0][unit_mask]
-    if before.size == 0:
-        return {
-            "before_min": None,
-            "before_max": None,
-            "after_min": None,
-            "after_max": None,
-        }
-    return {
-        "before_min": int(before.min()),
-        "before_max": int(before.max()),
-        "after_min": int(after.min()),
-        "after_max": int(after.max()),
-    }
-
-
-def _support_summary(
-    config: RoboDojoGuidedDataConfig,
-    query_episode_index: int,
-) -> dict[str, Any]:
-    reader = importlib.import_module("video_harness.reader")
-    bundle = reader.load_guide_artifact_bundle(
-        dataset_path=config.dataset_artifact_path,
-        documents_path=config.documents_root,
-        pairs_path=config.pairs_artifact_path,
-    )
-    matches = [binding for binding in bundle.support_bindings if binding.query_episode_index == query_episode_index]
-    if len(matches) != 1:
-        raise ValueError(
-            f"expected one support binding for query_episode_index={query_episode_index}, found {len(matches)}"
-        )
-    binding = matches[0]
-    return {
-        "support_episode": binding.support_episode_index,
-        "support_document": binding.support_document_id,
-    }
-
-
 def _run(args: argparse.Namespace) -> dict[str, Any]:
-    config_module = importlib.import_module("openpi.training.config")
-    native_config = config_module.get_config(args.native_config_name)
-    guided_config = RoboDojoGuidedDataConfig(
+    native_config = importlib.import_module("openpi.training.config").get_config(
+        args.native_config_name
+    )
+    config = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
-        dataset_artifact_path=args.dataset_artifact,
         documents_root=args.documents_root,
-        pairs_artifact_path=args.pairs_artifact,
-        batch_size=args.batch_size,
+        guides_per_batch=args.guides_per_batch,
+        queries_per_guide=args.queries_per_guide,
         seed=args.seed,
-        profile=args.profile,
-        max_frames=args.max_frames,
+        max_boundaries=args.max_boundaries,
         max_units=args.max_units,
-        max_text_tokens=args.max_text_tokens,
-        query_episode_indices=(args.query_episode_index,),
+        max_boundary_text_tokens=args.max_boundary_text_tokens,
+        max_transition_text_tokens=args.max_transition_text_tokens,
+        guide_boundary_num_queries=args.guide_boundary_num_queries,
+        guide_transition_num_queries=args.guide_transition_num_queries,
     )
     loader = create_robodojo_guided_data_loader(
-        native_config,
-        guided_config,
-        num_batches=args.num_batches,
+        native_config, config, num_batches=args.num_batches
     )
     batch = next(iter(loader))
-
-    sampler = loader.batch_sampler
-    stats = [asdict(item) for item in getattr(sampler, "stats", ())]
-    image_values = np.asarray(batch.guide.images)
+    catalog = loader.guide_catalog
+    assert catalog is not None
+    values = np.asarray(batch.guide.boundary_images)
     return {
         "native_config": args.native_config_name,
         "repo_id": args.repo_id,
-        "query_episode": args.query_episode_index,
-        **_support_summary(guided_config, args.query_episode_index),
+        "catalog_digest": catalog.catalog_digest,
+        "accepted_guides": len(catalog.records),
+        "catalog_examples": [dataclasses.asdict(record) for record in catalog.records[:5]],
         "G": int(batch.actions.shape[0]),
         "Q": int(batch.actions.shape[1]),
-        "observation_image_shapes": {key: _shape(value) for key, value in batch.observation.images.items()},
+        "observation_image_shapes": {
+            key: _shape(value) for key, value in batch.observation.images.items()
+        },
         "state_shape": _shape(batch.observation.state),
         "action_shape": _shape(batch.actions),
-        "guide_image_shape": _shape(batch.guide.images),
-        "guide_text_shape": _shape(batch.guide.text_tokens),
-        "guide_unit_shape": _shape(batch.guide.unit_mask),
-        "valid_frame_count": _valid_count(batch.guide.image_mask),
-        "valid_unit_count": _valid_count(batch.guide.unit_mask),
-        "valid_token_count": _valid_count(batch.guide.text_mask),
-        "slot_range": _slot_summary(batch),
-        "image_min": float(image_values.min()),
-        "image_max": float(image_values.max()),
-        "sampler_stats": stats,
-        "sampler_total_samples": int(getattr(sampler, "total_samples", 0)),
-        "sampler_used_samples": int(getattr(sampler, "used_samples", 0)),
-        "sampler_dropped_samples": int(getattr(sampler, "dropped_samples", 0)),
+        "boundary_image_shape": _shape(batch.guide.boundary_images),
+        "boundary_text_shape": _shape(batch.guide.boundary_text_tokens),
+        "transition_text_shape": _shape(batch.guide.transition_text_tokens),
+        "valid_boundaries": int(np.asarray(batch.guide.boundary_mask).sum()),
+        "valid_units": int(np.asarray(batch.guide.unit_mask).sum()),
+        "valid_memory_tokens": int(np.asarray(batch.guide.memory_mask).sum()),
+        "image_min": float(values.min()),
+        "image_max": float(values.max()),
+        "sampler_stats": dataclasses.asdict(loader.batch_sampler.stats),
+        "host_metadata": loader.host_metadata,
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        print(json.dumps(_run(args), indent=2, sort_keys=True))
+        print(json.dumps(_run(args), indent=2, sort_keys=True, default=str))
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

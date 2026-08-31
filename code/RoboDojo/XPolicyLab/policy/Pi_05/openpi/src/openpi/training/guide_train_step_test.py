@@ -37,7 +37,9 @@ class _TinyGuidedModel(_model.BaseModel):
     def compute_guided_loss(self, rng, batch: GuideConditionedBatch, *, train: bool = False):
         del rng, train
         _CALL_COUNTER["count"] += 1
-        guide_signal = jnp.mean(batch.guide.images) + jnp.mean(batch.guide.text_tokens)
+        guide_signal = jnp.mean(batch.guide.boundary_images) + jnp.mean(
+            batch.guide.transition_text_tokens
+        )
         prediction = batch.actions * self.native_backbone + guide_signal * self.guide_encoder
         return jnp.square(prediction)
 
@@ -64,13 +66,18 @@ def _make_batch() -> GuideConditionedBatch:
         tokenized_prompt_mask=jnp.ones((1, 2, 4), dtype=jnp.bool_),
     )
     guide = GuideInput(
-        images=jnp.ones((1, 2, 4, 4, 3), dtype=jnp.float32),
-        image_mask=jnp.ones((1, 2), dtype=jnp.bool_),
-        text_tokens=jnp.ones((1, 1, 4), dtype=jnp.int32),
-        text_mask=jnp.ones((1, 1, 4), dtype=jnp.bool_),
+        boundary_images=jnp.ones((1, 2, 3, 4, 4, 3), dtype=jnp.float32),
+        boundary_image_mask=jnp.ones((1, 2, 3), dtype=jnp.bool_),
+        boundary_text_tokens=jnp.ones((1, 2, 3, 4), dtype=jnp.int32),
+        boundary_text_mask=jnp.ones((1, 2, 3, 4), dtype=jnp.bool_),
+        transition_text_tokens=jnp.ones((1, 1, 4), dtype=jnp.int32),
+        transition_text_mask=jnp.ones((1, 1, 4), dtype=jnp.bool_),
+        boundary_mask=jnp.ones((1, 2), dtype=jnp.bool_),
         unit_mask=jnp.ones((1, 1), dtype=jnp.bool_),
-        before_slot=jnp.zeros((1, 1), dtype=jnp.int32),
-        after_slot=jnp.ones((1, 1), dtype=jnp.int32),
+        memory_source_kind=jnp.zeros((1, 20), dtype=jnp.int32),
+        memory_source_index=jnp.zeros((1, 20), dtype=jnp.int32),
+        memory_source_offset=jnp.zeros((1, 20), dtype=jnp.int32),
+        memory_mask=jnp.ones((1, 20), dtype=jnp.bool_),
     )
     return GuideConditionedBatch(
         observation=observation,

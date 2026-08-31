@@ -1,10 +1,12 @@
-# XPolicyLab deploy: policy server env=uv; run setup_eval_policy_server.sh with this env.
 #!/usr/bin/env bash
+# XPolicyLab deploy: policy server env=uv; run setup_eval_policy_server.sh with this env.
 set -euo pipefail
 
 POLICY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENPI_ROOT="${POLICY_DIR}/openpi"
 XPOLICYLAB_ROOT="$(cd "${POLICY_DIR}/../.." && pwd)"
+CODE_ROOT="$(cd "${POLICY_DIR}/../../../.." && pwd)"
+VIDEO_HARNESS_ROOT="${CODE_ROOT}/VideoHarness"
 
 echo "[Pi_05] OPENPI_ROOT=${OPENPI_ROOT}"
 
@@ -18,7 +20,8 @@ UV_LINK_MODE=copy GIT_LFS_SKIP_SMUDGE=1 uv sync --group lerobot
 UV_LINK_MODE=copy GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
 uv pip install -e "${XPOLICYLAB_ROOT}"
-uv run python -c "import XPolicyLab; print('XPolicyLab ok')"
+uv pip install -e "${VIDEO_HARNESS_ROOT}"
+uv run python -c "import XPolicyLab, video_harness; print('XPolicyLab + VideoHarness ok')"
 
 echo "[Pi_05] Installation finished."
 echo "[Pi_05] Activate: source ${OPENPI_ROOT}/.venv/bin/activate"

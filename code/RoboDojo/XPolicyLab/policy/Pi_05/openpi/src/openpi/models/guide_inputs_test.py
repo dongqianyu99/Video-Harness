@@ -13,18 +13,18 @@ from openpi.models.guide_inputs import validate_guide_conditioned_batch
 
 def _make_guide() -> GuideInput:
     return GuideInput(
-        images=jnp.arange(2 * 3 * 2 * 2 * 3, dtype=jnp.uint8).reshape(2, 3, 2, 2, 3),
-        image_mask=jnp.array([[True, True, False], [True, False, False]]),
-        text_tokens=jnp.arange(2 * 2 * 4, dtype=jnp.int32).reshape(2, 2, 4),
-        text_mask=jnp.array(
-            [
-                [[True, True, True, False], [True, True, False, False]],
-                [[True, True, False, False], [False, False, False, False]],
-            ]
-        ),
+        boundary_images=jnp.zeros((2, 3, 3, 2, 2, 3), dtype=jnp.float32),
+        boundary_image_mask=jnp.ones((2, 3, 3), dtype=jnp.bool_),
+        boundary_text_tokens=jnp.zeros((2, 3, 3, 4), dtype=jnp.int32),
+        boundary_text_mask=jnp.ones((2, 3, 3, 4), dtype=jnp.bool_),
+        transition_text_tokens=jnp.arange(2 * 2 * 4, dtype=jnp.int32).reshape(2, 2, 4),
+        transition_text_mask=jnp.ones((2, 2, 4), dtype=jnp.bool_),
+        boundary_mask=jnp.array([[True, True, True], [True, True, False]]),
         unit_mask=jnp.array([[True, True], [True, False]]),
-        before_slot=jnp.array([[0, 1], [0, 1]], dtype=jnp.int32),
-        after_slot=jnp.array([[1, 2], [1, 1]], dtype=jnp.int32),
+        memory_source_kind=jnp.zeros((2, 8), dtype=jnp.int32),
+        memory_source_index=jnp.zeros((2, 8), dtype=jnp.int32),
+        memory_source_offset=jnp.zeros((2, 8), dtype=jnp.int32),
+        memory_mask=jnp.ones((2, 8), dtype=jnp.bool_),
     )
 
 
