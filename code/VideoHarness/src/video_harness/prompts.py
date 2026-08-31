@@ -5,14 +5,14 @@ from typing import Any
 
 from .camera_contract import CAMERA_VIEWS, camera_spec, system_prompt_camera_contract
 
-PROMPT_VERSION = "video-harness.evidence.v9"
-INSPECTION_PROMPT_VERSION = "video-harness.inspection.v7"
+PROMPT_VERSION = "video-harness.evidence.v10"
+INSPECTION_PROMPT_VERSION = "video-harness.inspection.v8"
 TOOL_NAME = "record_transition_evidence"
 INSPECTION_TOOL_NAME = "locate_temporal_detail"
 REPAIR_TOOL_NAME = "resolve_transition_repair"
 SEQUENCE_AUDIT_TOOL_NAME = "audit_sequence_consistency"
-REPAIR_PROMPT_VERSION = "video-harness.repair.v10"
-SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v7"
+REPAIR_PROMPT_VERSION = "video-harness.repair.v11"
+SEQUENCE_AUDIT_PROMPT_VERSION = "video-harness.sequence-audit.v8"
 CAMERA_CONTRACT = system_prompt_camera_contract()
 ACTION_EVIDENCE_CONTRACT = """Action-evidence contract:
 - Claims of grasp, hold, release, or contact require direct supporting visual evidence from the corresponding wrist camera.
@@ -186,7 +186,7 @@ Always select one cam_high ROI over the interaction_window, using the smallest r
 
 When task-blind context from the immediately preceding Evidence Unit is supplied, treat it as a fallible continuity hypothesis. Its final frame and the current Evidence Unit's first frame refer to the shared temporal boundary. Use current visual evidence to confirm, qualify, or correct whether an interaction persists, changes, or ends; never invent continuity merely to agree with the prior summary.
 
-Return exactly one locate_temporal_detail tool call and no other text."""
+"""
 
 
 SYSTEM_PROMPT = f"""You are the Video Harness task-conditioned evidence compiler. You receive a task-blind motion_summary from Call 1, synchronized original-resolution BEFORE and AFTER Boundary images from cam_high, cam_left_wrist, and cam_right_wrist, measured gripper aperture aligned with Call 1 keyframes, existing canonical descriptions of those Boundary States when available, a cam_high detail sheet, and a coarse task instruction.
@@ -203,7 +203,7 @@ Describe only the fine interaction evidence that the detail sheet directly shows
 
 {GRIPPER_STATE_CONTRACT}
 
-Do not invent hidden substeps, future states, success, trajectories, velocities, coordinates, forces, joint values, or precise poses. Return exactly one record_transition_evidence tool call and no other text."""
+Do not invent hidden substeps, future states, success, trajectories, velocities, coordinates, forces, joint values, or precise poses."""
 
 
 REPAIR_SYSTEM_PROMPT = f"""You are the Video Harness automatic transition repair adjudicator. A normal compilation attempt was inconsistent or a Sequence Audit identified an unexplained transition. Re-examine the supplied full temporal sheets, Boundary images, measured gripper aperture, canonical context, and prior outputs as fallible evidence.
@@ -218,10 +218,10 @@ Resolve only the identified Evidence Unit. If the visual evidence supports one c
 
 {GRIPPER_STATE_CONTRACT}
 
-Return exactly one resolve_transition_repair tool call and no other text."""
+"""
 
 
-SEQUENCE_AUDIT_SYSTEM_PROMPT = """You are the Video Harness sole semantic sequence auditor. The canonical sequence is ordered chronologically as alternating Boundary State and Evidence Unit entries. Check each adjacent Boundary–Unit–Boundary transition and also track persistent entities and their relations to the end effectors across the complete sequence. Check whether every Boundary State change is explained by its connecting Evidence Unit, whether each action_description is entailed by its motion_summary and detail_observation, and whether each task_role matches the demonstrated task state. Report only material issues that require automatic repair. Target the Boundary whose static description needs replacement, or otherwise the specific Evidence Unit whose transition text needs repair. Each reason must describe the contradiction at its declared target. An empty issue list means the complete canonical sequence is coherent. Return exactly one audit_sequence_consistency tool call and no other text."""
+SEQUENCE_AUDIT_SYSTEM_PROMPT = """You are the Video Harness sole semantic sequence auditor. The canonical sequence is ordered chronologically as alternating Boundary State and Evidence Unit entries. Check each adjacent Boundary–Unit–Boundary transition and also track persistent entities and their relations to the end effectors across the complete sequence. Check whether every Boundary State change is explained by its connecting Evidence Unit, whether each action_description is entailed by its motion_summary and detail_observation, and whether each task_role matches the demonstrated task state. Report only material issues that require automatic repair. Target the Boundary whose static description needs replacement, or otherwise the specific Evidence Unit whose transition text needs repair. Each reason must describe the contradiction at its declared target. An empty issue list means the complete canonical sequence is coherent."""
 
 
 def inspection_user_prompt(

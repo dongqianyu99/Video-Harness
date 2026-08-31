@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from types import SimpleNamespace
 
@@ -18,12 +19,19 @@ from video_harness.camera_contract import image_label
 from video_harness.gripper_state import GripperState
 from video_harness.prompts import (
     EVIDENCE_SCHEMA,
+    INSPECTION_PROMPT_VERSION,
     INSPECTION_SCHEMA,
     INSPECTION_SYSTEM_PROMPT,
+    INSPECTION_TOOL_NAME,
     PROMPT_VERSION,
+    REPAIR_PROMPT_VERSION,
+    REPAIR_SCHEMA,
     REPAIR_SYSTEM_PROMPT,
+    REPAIR_TOOL_NAME,
     SEQUENCE_AUDIT_PROMPT_VERSION,
+    SEQUENCE_AUDIT_SCHEMA,
     SEQUENCE_AUDIT_SYSTEM_PROMPT,
+    SEQUENCE_AUDIT_TOOL_NAME,
     SYSTEM_PROMPT,
     TOOL_NAME,
 )
@@ -137,13 +145,54 @@ def test_prompt_and_schema_define_progressive_calls() -> None:
     )
     assert "alternating boundary state and evidence unit entries" in audit_prompt
     assert "action_description is entailed by its motion_summary" in audit_prompt
-    assert SEQUENCE_AUDIT_PROMPT_VERSION == "video-harness.sequence-audit.v7"
+    assert INSPECTION_PROMPT_VERSION == "video-harness.inspection.v8"
+    assert PROMPT_VERSION == "video-harness.evidence.v10"
+    assert REPAIR_PROMPT_VERSION == "video-harness.repair.v11"
+    assert SEQUENCE_AUDIT_PROMPT_VERSION == "video-harness.sequence-audit.v8"
+    assert all(
+        "tool call" not in prompt.lower()
+        for prompt in (
+            INSPECTION_SYSTEM_PROMPT,
+            SYSTEM_PROMPT,
+            REPAIR_SYSTEM_PROMPT,
+            SEQUENCE_AUDIT_SYSTEM_PROMPT,
+        )
+    )
     before = EVIDENCE_SCHEMA["properties"]["before_boundary_observation"]["anyOf"][0]
     assert set(before["required"]) == {
         "cam_high",
         "cam_left_wrist",
         "cam_right_wrist",
     }
+
+
+def test_provider_schemas_follow_strict_object_contract() -> None:
+    def check(schema):
+        if schema.get("type") == "object":
+            assert schema.get("additionalProperties") is False
+            assert set(schema.get("properties", {})) == set(schema.get("required", []))
+            for child in schema["properties"].values():
+                check(child)
+        if schema.get("type") == "array":
+            check(schema["items"])
+        for child in schema.get("anyOf", []):
+            check(child)
+
+    for schema in (
+        INSPECTION_SCHEMA,
+        EVIDENCE_SCHEMA,
+        REPAIR_SCHEMA,
+        SEQUENCE_AUDIT_SCHEMA,
+    ):
+        check(schema)
+    for name in (
+        INSPECTION_TOOL_NAME,
+        TOOL_NAME,
+        REPAIR_TOOL_NAME,
+        SEQUENCE_AUDIT_TOOL_NAME,
+    ):
+        assert len(name) <= 64
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", name)
 
 
 def test_request_requires_three_overviews_three_keyframe_sheets_and_six_boundary_images() -> (

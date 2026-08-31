@@ -12,6 +12,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .annotations import StructuredOutputError
+from .debug_artifacts import write_provider_error
+
 STATE_SCHEMA_VERSION = "video-harness.run-state"
 RUN_SUMMARY_SCHEMA_VERSION = "video-harness.run-summary"
 
@@ -147,9 +150,16 @@ class RunTracker:
 class TrackingBackend:
     """Record one logical provider call around an existing backend method."""
 
-    def __init__(self, backend: Any, tracker: RunTracker) -> None:
+    def __init__(
+        self,
+        backend: Any,
+        tracker: RunTracker,
+        *,
+        debug_root: Path | None = None,
+    ) -> None:
         self.backend = backend
         self.tracker = tracker
+        self.debug_root = debug_root
         self.provider = backend.provider
         self.model = backend.model
 
@@ -191,6 +201,38 @@ class TrackingBackend:
         try:
             result = method(request)
         except Exception as exc:
+            error_fields: dict[str, Any] = {}
+            if isinstance(exc, StructuredOutputError):
+                diagnostic = exc.diagnostic()
+                error_fields = {
+                    "structured_output_kind": diagnostic["kind"],
+                    "finish_reason": diagnostic["finish_reason"],
+                    "content_length": diagnostic["content_length"],
+                    "content_sha256": diagnostic["content_sha256"],
+                    "response_metadata": diagnostic["response_metadata"],
+                }
+                if self.debug_root is not None and api_call_index is not None:
+                    try:
+                        artifact = write_provider_error(
+                            root=self.debug_root,
+                            document_id=document_id or "unknown-document",
+                            unit_id=unit_id,
+                            stage=stage,
+                            api_call_index=api_call_index,
+                            value={
+                                **fields,
+                                "api_call_index": api_call_index,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                                **exc.diagnostic(include_raw=True),
+                            },
+                        )
+                    except (OSError, ValueError) as debug_exc:
+                        error_fields["debug_artifact_error"] = (
+                            f"{type(debug_exc).__name__}: {debug_exc}"
+                        )
+                    else:
+                        error_fields["debug_artifact"] = str(artifact)
             self.tracker.log(
                 "provider_call_failed",
                 **fields,
@@ -198,6 +240,7 @@ class TrackingBackend:
                 duration_ms=round((time.monotonic() - started) * 1000, 3),
                 error_type=type(exc).__name__,
                 error=str(exc),
+                **error_fields,
             )
             raise
         trace = getattr(result, "trace", None)
@@ -259,6 +302,7 @@ def summarize_run(root: Path) -> dict[str, Any]:
     stage_latencies: dict[str, list[float]] = defaultdict(list)
     usage_totals: Counter[str] = Counter()
     errors: Counter[str] = Counter()
+    structured_output_errors: Counter[str] = Counter()
     document_status: dict[str, str] = {}
     document_task: dict[str, str] = {}
     interrupted_documents: set[str] = set()
@@ -306,6 +350,8 @@ def summarize_run(root: Path) -> dict[str, Any]:
                     usage_totals.update(dict(_numeric_usage(event.get("usage"))))
             if event_name.endswith(("failed", "interrupted")):
                 errors[str(event.get("error_type", event_name))] += 1
+            if isinstance(event.get("structured_output_kind"), str):
+                structured_output_errors[event["structured_output_kind"]] += 1
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     task_totals: Counter[str] = Counter()
@@ -366,5 +412,6 @@ def summarize_run(root: Path) -> dict[str, Any]:
             key: round(value, 3) for key, value in sorted(usage_totals.items())
         },
         "errors": dict(sorted(errors.items())),
+        "structured_output_errors": dict(sorted(structured_output_errors.items())),
         "event_counts": dict(sorted(event_counts.items())),
     }

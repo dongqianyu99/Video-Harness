@@ -54,6 +54,33 @@ def write_sequence_audit_report(path: Path | None, value: Any) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def write_provider_error(
+    *,
+    root: Path | None,
+    document_id: str,
+    unit_id: str | None,
+    stage: str,
+    api_call_index: int,
+    value: Any,
+) -> Path | None:
+    if root is None:
+        return None
+    target = (
+        Path(root)
+        / _slug(document_id)
+        / "provider-errors"
+        / (
+            f"{_slug(stage)}-{_slug(unit_id or 'document')}-"
+            f"call-{api_call_index:06d}.json"
+        )
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise FileExistsError(f"provider error artifact already exists: {target}")
+    write_sequence_audit_report(target, value)
+    return target
+
+
 class DebugArtifactStore:
     """Optional per-Evidence-Unit filesystem sink; disabled mode performs no writes."""
 

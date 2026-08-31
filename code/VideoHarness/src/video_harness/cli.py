@@ -463,9 +463,15 @@ def _make_worker_context(
         thinking=config.thinking,
         reasoning_effort=config.reasoning_effort,
     )
-    inspection_backend = TrackingBackend(inspection_backend, tracker)
-    evidence_backend = TrackingBackend(evidence_backend, tracker)
-    repair_backend = TrackingBackend(repair_backend, tracker)
+    inspection_backend = TrackingBackend(
+        inspection_backend, tracker, debug_root=config.debug_root
+    )
+    evidence_backend = TrackingBackend(
+        evidence_backend, tracker, debug_root=config.debug_root
+    )
+    repair_backend = TrackingBackend(
+        repair_backend, tracker, debug_root=config.debug_root
+    )
     return _WorkerContext(
         pipeline=EvidenceUnitPipeline(
             inspection_backend=inspection_backend,
@@ -1245,7 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-mode",
         choices=("tool", "json"),
         default="tool",
-        help="structured-output protocol for OpenAI-compatible providers",
+        help="forced tool call or strict JSON Schema output",
     )
     annotate.add_argument(
         "--thinking",

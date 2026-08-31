@@ -82,8 +82,9 @@ export OPENAI_BASE_URL=https://api.deepseek.com
 ```
 
 OpenAI-compatible providers can return structured data through the existing forced
-tool-call protocol or through JSON Output. JSON Output supports thinking and uses
-local schema validation:
+tool-call protocol or through strict JSON Schema Output. JSON Schema Output supports
+thinking, requests `response_format=json_schema` with `strict=true`, and retains local
+schema validation as a second check:
 
 ```bash
 --output-mode json --thinking --reasoning-effort high
@@ -91,7 +92,8 @@ local schema validation:
 
 Thinking is enabled by default in JSON mode. Use `--no-thinking` to disable it, or
 choose `low`, `high`, or `max` with `--reasoning-effort`. Tool mode remains the
-default compatibility path and ignores the thinking options.
+default compatibility path and ignores the thinking options. JSON mode does not
+silently fall back to `json_object` or repair malformed provider output.
 
 ### Anthropic
 
@@ -142,7 +144,9 @@ uv run video-harness summarize-run \
 
 Debug mode retains decoded frames, three-view Unit videos, overview/keyframe/detail
 sheets, gripper samples, provider outputs, repair attempts, and manifests. Use it only
-for bounded inspection.
+for bounded inspection. Structured-output failures retain only safe metadata in normal
+run events; debug mode additionally writes the provider's final content under
+`debug/<document>/provider-errors/`. Reasoning content is never stored there.
 
 The final episode Document is written to:
 

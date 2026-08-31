@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass, is_dataclass
@@ -45,10 +46,90 @@ INSPECTION_MAX_OUTPUT_TOKENS = 768
 EVIDENCE_MAX_OUTPUT_TOKENS = 1200
 REPAIR_MAX_OUTPUT_TOKENS = 2048
 SEQUENCE_AUDIT_MAX_OUTPUT_TOKENS = 1024
+THINKING_MAX_OUTPUT_TOKENS = 16768
 
 
 class AnnotationError(RuntimeError):
     """Raised when a provider response cannot become trusted structured output."""
+
+
+class StructuredOutputError(AnnotationError):
+    """JSON response failure with safe metadata and optional debug-only content."""
+
+    def __init__(
+        self,
+        kind: str,
+        message: str,
+        *,
+        finish_reason: str | None = None,
+        raw_final_content: Any = None,
+        response_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.finish_reason = finish_reason
+        self.raw_final_content = raw_final_content
+        self.response_metadata = dict(response_metadata or {})
+
+    def diagnostic(self, *, include_raw: bool = False) -> dict[str, Any]:
+        raw = self.raw_final_content
+        if raw is None:
+            encoded = b""
+        elif isinstance(raw, str):
+            encoded = raw.encode("utf-8")
+        else:
+            encoded = json.dumps(
+                raw, ensure_ascii=False, sort_keys=True, default=str
+            ).encode("utf-8")
+        value = {
+            "kind": self.kind,
+            "finish_reason": self.finish_reason,
+            "content_length": len(encoded),
+            "content_sha256": hashlib.sha256(encoded).hexdigest(),
+            "response_metadata": self.response_metadata,
+        }
+        if include_raw:
+            value["raw_final_content"] = raw
+        return value
+
+
+def _tool_protocol_instructions(instructions: str, tool_name: str) -> str:
+    return (
+        f"{instructions.rstrip()}\n\n"
+        f"Return exactly one {tool_name} tool call and no other text."
+    )
+
+
+def _json_protocol_instructions(instructions: str) -> str:
+    return (
+        f"{instructions.rstrip()}\n\n"
+        "Return exactly one complete structured JSON object and no other text."
+    )
+
+
+def _json_response_metadata(response: Any) -> dict[str, Any]:
+    return {
+        "request_id": getattr(response, "id", None),
+        "response_model": getattr(response, "model", None),
+        "usage": _usage_dict(getattr(response, "usage", None)),
+    }
+
+
+def _json_response_error(
+    response: Any,
+    kind: str,
+    message: str,
+    *,
+    finish_reason: str | None = None,
+    raw_final_content: Any = None,
+) -> StructuredOutputError:
+    return StructuredOutputError(
+        kind,
+        message,
+        finish_reason=finish_reason,
+        raw_final_content=raw_final_content,
+        response_metadata=_json_response_metadata(response),
+    )
 
 
 @dataclass(frozen=True)
@@ -124,6 +205,24 @@ class ProviderTrace:
     request_id: str | None = None
     response_model: str | None = None
     usage: dict[str, Any] | None = None
+
+
+def _json_schema_validation_error(
+    role: str,
+    raw: dict[str, Any],
+    error: Exception,
+    trace: ProviderTrace,
+) -> StructuredOutputError:
+    return StructuredOutputError(
+        "schema_validation",
+        f"OpenAI returned invalid {role} structured output: {error}",
+        raw_final_content=raw,
+        response_metadata={
+            "request_id": trace.request_id,
+            "response_model": trace.response_model,
+            "usage": trace.usage,
+        },
+    )
 
 
 @dataclass(frozen=True)
@@ -479,7 +578,7 @@ def _openai_tool_call(
     )
     response = client.responses.create(
         model=model,
-        instructions=instructions,
+        instructions=_tool_protocol_instructions(instructions, tool_name),
         input=[{"role": "user", "content": content}],
         tools=[
             {
@@ -519,7 +618,6 @@ def _openai_json_call(
     thinking: bool,
     reasoning_effort: str,
 ) -> tuple[dict[str, Any], ProviderTrace]:
-    del tool_name
     chat_content = [
         (
             {"type": "text", "text": item["text"]}
@@ -532,8 +630,20 @@ def _openai_json_call(
         for item in content
     ]
     request_options: dict[str, Any] = {
-        "response_format": {"type": "json_object"},
-        "max_tokens": max(max_output_tokens, 8192) if thinking else max_output_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": tool_name,
+                "description": description,
+                "strict": True,
+                "schema": schema,
+            },
+        },
+        "max_tokens": (
+            max(max_output_tokens, THINKING_MAX_OUTPUT_TOKENS)
+            if thinking
+            else max_output_tokens
+        ),
         "extra_body": {
             "thinking": {"type": "enabled" if thinking else "disabled"}
         },
@@ -545,17 +655,85 @@ def _openai_json_call(
         messages=[
             {
                 "role": "system",
-                "content": (
-                    f"{instructions}\nReturn one JSON object for {description} "
-                    f"matching this JSON Schema: {json.dumps(schema)}"
-                ),
+                "content": _json_protocol_instructions(instructions),
             },
             {"role": "user", "content": chat_content},
         ],
         **request_options,
     )
-    message = response.choices[0].message
-    return _json_arguments(message.content, "OpenAI", role), _trace(response, model)
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise _json_response_error(
+            response,
+            "missing_choice",
+            f"OpenAI returned no {role} completion choice",
+        )
+    choice = choices[0]
+    finish_reason = getattr(choice, "finish_reason", None)
+    message = getattr(choice, "message", None)
+    if message is None:
+        raise _json_response_error(
+            response,
+            "missing_message",
+            f"OpenAI returned no {role} completion message",
+            finish_reason=finish_reason,
+        )
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        raise _json_response_error(
+            response,
+            "refusal",
+            f"OpenAI refused the {role} structured output",
+            finish_reason=finish_reason,
+            raw_final_content=refusal,
+        )
+    content_value = getattr(message, "content", None)
+    if finish_reason == "length":
+        raise _json_response_error(
+            response,
+            "truncated",
+            f"OpenAI truncated the {role} structured output",
+            finish_reason=finish_reason,
+            raw_final_content=content_value,
+        )
+    if finish_reason not in {None, "stop"}:
+        raise _json_response_error(
+            response,
+            "incomplete_finish",
+            f"OpenAI ended the {role} structured output with {finish_reason!r}",
+            finish_reason=finish_reason,
+            raw_final_content=content_value,
+        )
+    if content_value is None or (
+        isinstance(content_value, str) and not content_value.strip()
+    ):
+        raise _json_response_error(
+            response,
+            "empty_content",
+            f"OpenAI returned empty {role} structured output",
+            finish_reason=finish_reason,
+            raw_final_content=content_value,
+        )
+    if not isinstance(content_value, (dict, str)):
+        raise _json_response_error(
+            response,
+            "non_json",
+            f"OpenAI returned non-JSON {role} structured output",
+            finish_reason=finish_reason,
+            raw_final_content=content_value,
+        )
+    try:
+        parsed = _json_arguments(content_value, "OpenAI", role)
+    except AnnotationError as exc:
+        kind = "non_object" if "non-object" in str(exc) else "malformed_json"
+        raise _json_response_error(
+            response,
+            kind,
+            str(exc),
+            finish_reason=finish_reason,
+            raw_final_content=content_value,
+        ) from exc
+    return parsed, _trace(response, model)
 
 
 def _anthropic_tool_call(
@@ -573,7 +751,7 @@ def _anthropic_tool_call(
     response = client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=system,
+        system=_tool_protocol_instructions(system, tool_name),
         tools=[
             {
                 "name": tool_name,
@@ -672,6 +850,10 @@ class OpenAIBackend:
         try:
             inspection = validate_inspection_record(raw)
         except EvidenceValidationError as exc:
+            if self.output_mode == "json":
+                raise _json_schema_validation_error(
+                    "inspection", raw, exc, trace
+                ) from exc
             raise AnnotationError(
                 f"OpenAI returned invalid inspection output: {exc}"
             ) from exc
@@ -726,6 +908,10 @@ class OpenAIBackend:
         try:
             evidence = validate_call2_record(raw)
         except EvidenceValidationError as exc:
+            if self.output_mode == "json":
+                raise _json_schema_validation_error(
+                    "evidence", raw, exc, trace
+                ) from exc
             raise AnnotationError(
                 f"OpenAI returned invalid Call 2 evidence: {exc}"
             ) from exc
@@ -765,8 +951,14 @@ class OpenAIBackend:
             role="repair",
             max_output_tokens=REPAIR_MAX_OUTPUT_TOKENS,
         )
+        try:
+            repair = _validate_repair_result(raw)
+        except AnnotationError as exc:
+            if self.output_mode == "json":
+                raise _json_schema_validation_error("repair", raw, exc, trace) from exc
+            raise
         return RepairResult(
-            _validate_repair_result(raw),
+            repair,
             self.provider,
             self.model,
             trace=trace,
@@ -790,8 +982,16 @@ class OpenAIBackend:
             role="sequence audit",
             max_output_tokens=SEQUENCE_AUDIT_MAX_OUTPUT_TOKENS,
         )
+        try:
+            audit = _validate_sequence_audit(raw)
+        except AnnotationError as exc:
+            if self.output_mode == "json":
+                raise _json_schema_validation_error(
+                    "sequence audit", raw, exc, trace
+                ) from exc
+            raise
         return SequenceAuditResult(
-            _validate_sequence_audit(raw),
+            audit,
             self.provider,
             self.model,
             trace=trace,

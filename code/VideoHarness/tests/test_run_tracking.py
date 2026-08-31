@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from video_harness.annotations import StructuredOutputError
 from video_harness.run_tracking import (
     ApiCallBudgetExceeded,
     RunTracker,
@@ -76,6 +77,53 @@ def test_tracking_backend_records_provider_trace_and_usage(tmp_path) -> None:
     assert completed["usage"] == {"input_tokens": 10, "output_tokens": 2}
 
 
+def test_tracking_backend_saves_debug_only_structured_output_content(tmp_path) -> None:
+    class Backend:
+        provider = "openai"
+        model = "test-model"
+
+        @staticmethod
+        def inspect(request):
+            del request
+            raise StructuredOutputError(
+                "malformed_json",
+                "invalid inspection JSON",
+                finish_reason="stop",
+                raw_final_content='{"motion_summary":',
+                response_metadata={"request_id": "req-bad"},
+            )
+
+    tracker = RunTracker(tmp_path / "checkpoint", max_api_calls=2)
+    debug_root = tmp_path / "debug"
+    backend = TrackingBackend(Backend(), tracker, debug_root=debug_root)
+    request = SimpleNamespace(document_id="doc/1", unit_id="u0000")
+    for _ in range(2):
+        with pytest.raises(StructuredOutputError):
+            backend.inspect(request)
+
+    events = [
+        json.loads(line)
+        for line in tracker.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    failures = [event for event in events if event["event"] == "provider_call_failed"]
+    assert [event["structured_output_kind"] for event in failures] == [
+        "malformed_json",
+        "malformed_json",
+    ]
+    assert all("raw_final_content" not in event for event in failures)
+    artifacts = sorted(debug_root.glob("*/provider-errors/*.json"))
+    assert [path.name for path in artifacts] == [
+        "call1-u0000-call-000001.json",
+        "call1-u0000-call-000002.json",
+    ]
+    assert json.loads(artifacts[0].read_text())["raw_final_content"] == (
+        '{"motion_summary":'
+    )
+    assert summarize_run(tmp_path / "checkpoint")["structured_output_errors"] == {
+        "malformed_json": 2
+    }
+
+
 def test_run_summary_aggregates_tasks_usage_latency_and_errors(tmp_path) -> None:
     tracker = RunTracker(tmp_path, context={"shard_index": 0, "num_shards": 1})
     tracker.log("task_plan", tasks={"make toast": 2})
@@ -119,3 +167,4 @@ def test_run_summary_aggregates_tasks_usage_latency_and_errors(tmp_path) -> None
     assert summary["provider_calls"]["call2"]["latency_ms"]["p50"] == 160.0
     assert summary["usage_totals"] == {"input_tokens": 100.0, "output_tokens": 20.0}
     assert summary["errors"] == {"TimeoutError": 1}
+    assert summary["structured_output_errors"] == {}

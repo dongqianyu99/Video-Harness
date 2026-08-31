@@ -12,9 +12,16 @@ from video_harness.annotations import (
     ImagePayload,
     InspectionRequest,
     OpenAIBackend,
+    StructuredOutputError,
 )
 from video_harness.camera_contract import image_label
 from video_harness.gripper_state import GripperState
+from video_harness.prompts import (
+    EVIDENCE_SCHEMA,
+    INSPECTION_SCHEMA,
+    REPAIR_SCHEMA,
+    SEQUENCE_AUDIT_SCHEMA,
+)
 
 
 def _image(label: str) -> ImagePayload:
@@ -98,6 +105,7 @@ def test_openai_sdk_serializes_inspection_images_without_task() -> None:
     body = bodies[0]
     assert body["tools"][0]["strict"] is True
     assert body["max_output_tokens"] == 768
+    assert "locate_temporal_detail tool call" in body["instructions"]
     assert (
         sum(item["type"] == "input_image" for item in body["input"][0]["content"]) == 6
     )
@@ -210,14 +218,76 @@ def test_json_output_serializes_thinking_without_tools() -> None:
         ).inspect(_inspection_request())
 
     body = bodies[0]
-    assert body["response_format"] == {"type": "json_object"}
+    assert body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "locate_temporal_detail",
+            "description": "Locate the required cam_high detail region.",
+            "strict": True,
+            "schema": INSPECTION_SCHEMA,
+        },
+    }
     assert body["thinking"] == {"type": "enabled"}
     assert body["reasoning_effort"] == "max"
-    assert body["max_tokens"] == 8192
+    assert body["max_tokens"] == 16768
     assert "tools" not in body and "tool_choice" not in body
     content = body["messages"][1]["content"]
     assert sum(item["type"] == "image_url" for item in content) == 6
-    assert "JSON Schema" in body["messages"][0]["content"]
+    system = body["messages"][0]["content"]
+    assert "JSON Schema" not in system
+    assert "tool call" not in system
+    assert "structured JSON object" in system
+
+
+@pytest.mark.parametrize(
+    ("name", "schema"),
+    [
+        ("locate_temporal_detail", INSPECTION_SCHEMA),
+        ("record_transition_evidence", EVIDENCE_SCHEMA),
+        ("resolve_transition_repair", REPAIR_SCHEMA),
+        ("audit_sequence_consistency", SEQUENCE_AUDIT_SCHEMA),
+    ],
+)
+def test_json_output_serializes_each_role_schema(name, schema) -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "intentional local mock",
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": None,
+                }
+            },
+        )
+
+    client = openai.OpenAI(
+        api_key="local-test-key",
+        base_url="https://local.test/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    backend = OpenAIBackend("vision-model", client=client, output_mode="json")
+    with pytest.raises(openai.BadRequestError):
+        backend._call(
+            instructions="semantic instructions",
+            content=[],
+            tool_name=name,
+            description="structured output",
+            schema=schema,
+            role="test",
+            max_output_tokens=128,
+        )
+
+    assert bodies[0]["response_format"]["json_schema"] == {
+        "name": name,
+        "description": "structured output",
+        "strict": True,
+        "schema": schema,
+    }
 
 
 def test_json_output_is_parsed_and_validated() -> None:
@@ -266,6 +336,138 @@ def test_json_output_is_parsed_and_validated() -> None:
     assert result.inspection == output
 
 
+@pytest.mark.parametrize(
+    ("content", "finish_reason", "refusal", "kind"),
+    [
+        (None, "stop", None, "empty_content"),
+        ("", "stop", None, "empty_content"),
+        ('{"motion_summary":', "length", None, "truncated"),
+        ("{}", "content_filter", None, "incomplete_finish"),
+        ("```json\n{}\n```", "stop", None, "malformed_json"),
+        ("[]", "stop", None, "non_object"),
+        (None, "stop", "cannot comply", "refusal"),
+    ],
+)
+def test_json_output_failures_are_classified(
+    content, finish_reason, refusal, kind
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-failure",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "vision-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": content,
+                            "refusal": refusal,
+                        },
+                        "finish_reason": finish_reason,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    client = openai.OpenAI(
+        api_key="local-test-key",
+        base_url="https://local.test/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(StructuredOutputError) as caught:
+        OpenAIBackend(
+            "vision-model", client=client, output_mode="json"
+        ).inspect(_inspection_request())
+
+    assert caught.value.kind == kind
+    assert caught.value.diagnostic(include_raw=True)["raw_final_content"] == (
+        refusal if refusal else content
+    )
+
+
+def test_json_output_still_passes_local_schema_validation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-invalid-schema",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "vision-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"motion_summary": "incomplete"}),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    client = openai.OpenAI(
+        api_key="local-test-key",
+        base_url="https://local.test/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(StructuredOutputError) as caught:
+        OpenAIBackend(
+            "vision-model", client=client, output_mode="json"
+        ).inspect(_inspection_request())
+
+    assert caught.value.kind == "schema_validation"
+
+
+def test_json_output_requires_a_completion_choice() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-empty",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "vision-model",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 0,
+                    "total_tokens": 1,
+                },
+            },
+        )
+
+    client = openai.OpenAI(
+        api_key="local-test-key",
+        base_url="https://local.test/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(StructuredOutputError) as caught:
+        OpenAIBackend(
+            "vision-model", client=client, output_mode="json"
+        ).inspect(_inspection_request())
+
+    assert caught.value.kind == "missing_choice"
+
+
 def test_anthropic_sdk_serializes_multiview_evidence() -> None:
     bodies: list[dict] = []
 
@@ -292,6 +494,7 @@ def test_anthropic_sdk_serializes_multiview_evidence() -> None:
     body = bodies[0]
     assert body["tools"][0]["strict"] is True
     assert body["max_tokens"] == 1200
+    assert "record_transition_evidence tool call" in body["system"]
     content = body["messages"][0]["content"]
     image_positions = [
         index for index, item in enumerate(content) if item["type"] == "image"
