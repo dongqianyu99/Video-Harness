@@ -22,6 +22,7 @@ from video_harness.prompts import (
     INSPECTION_SYSTEM_PROMPT,
     PROMPT_VERSION,
     REPAIR_SYSTEM_PROMPT,
+    SEQUENCE_AUDIT_PROMPT_VERSION,
     SEQUENCE_AUDIT_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     TOOL_NAME,
@@ -134,7 +135,9 @@ def test_prompt_and_schema_define_progressive_calls() -> None:
     assert (
         "persistent entities and their relations to the end effectors" in audit_prompt
     )
+    assert "alternating boundary state and evidence unit entries" in audit_prompt
     assert "action_description is entailed by its motion_summary" in audit_prompt
+    assert SEQUENCE_AUDIT_PROMPT_VERSION == "video-harness.sequence-audit.v7"
     before = EVIDENCE_SCHEMA["properties"]["before_boundary_observation"]["anyOf"][0]
     assert set(before["required"]) == {
         "cam_high",

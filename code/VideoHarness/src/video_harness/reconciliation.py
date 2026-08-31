@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from .annotations import (
@@ -12,7 +12,13 @@ from .annotations import (
     SequenceAuditResult,
 )
 from .config import HarnessConfig
+from .debug_artifacts import (
+    SEQUENCE_AUDIT_REPORT_SCHEMA_VERSION,
+    sequence_audit_report_path,
+    write_sequence_audit_report,
+)
 from .pipeline import EvidenceUnitPipeline, ExistingRepairOutcome
+from .prompts import SEQUENCE_AUDIT_PROMPT_VERSION
 from .run_tracking import ApiCallBudgetExceeded
 from .sampling import unit_boundary_states
 
@@ -28,12 +34,17 @@ class DocumentReconciliationResult:
 
 
 def build_sequence_projection(document: dict[str, Any]) -> str:
-    boundaries = []
-    for boundary in document["boundary_states"]:
+    boundaries = document["boundary_states"]
+    units = document["evidence_units"]
+    if len(boundaries) != len(units) + 1:
+        raise ValueError("Sequence projection requires N Units and N+1 Boundaries")
+    sequence: list[dict[str, Any]] = []
+    for index, boundary in enumerate(boundaries):
         annotation = boundary["annotation"]
         record = annotation.get("record")
-        boundaries.append(
+        sequence.append(
             {
+                "type": "boundary",
                 "boundary_id": boundary["boundary_id"],
                 "frame": boundary["frame"],
                 "observation": (
@@ -41,13 +52,14 @@ def build_sequence_projection(document: dict[str, Any]) -> str:
                 ),
             }
         )
-
-    units = []
-    for unit in document["evidence_units"]:
+        if index >= len(units):
+            continue
+        unit = units[index]
         annotation = unit["annotation"]
         record = annotation.get("record")
-        units.append(
+        sequence.append(
             {
+                "type": "evidence_unit",
                 "unit_id": unit["unit_id"],
                 "before_boundary_id": unit["before_boundary_id"],
                 "after_boundary_id": unit["after_boundary_id"],
@@ -75,8 +87,7 @@ def build_sequence_projection(document: dict[str, Any]) -> str:
         {
             "document_id": document["document_id"],
             "task_instruction": document["task_instruction"],
-            "boundaries": boundaries,
-            "evidence_units": units,
+            "sequence": sequence,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -146,9 +157,10 @@ def _audit_document(
     document: dict[str, Any],
     backend: RepairBackend,
     config: HarnessConfig,
+    canonical_sequence: str,
 ) -> tuple[SequenceAuditResult | None, int]:
     request = SequenceAuditRequest(
-        canonical_sequence=build_sequence_projection(document),
+        canonical_sequence=canonical_sequence,
         task_instruction=document["task_instruction"],
     )
     valid_targets = {
@@ -210,6 +222,7 @@ def _apply_repair(
 @dataclass(frozen=True)
 class RepairTarget:
     owner_unit_id: str
+    issues: tuple[dict[str, str], ...]
     reasons: tuple[str, ...]
     boundary_roles: frozenset[str]
 
@@ -236,7 +249,10 @@ def _repair_targets(
             else:
                 owner = units[order - 1]["unit_id"]
                 roles.add("after")
-        item = grouped.setdefault(owner, {"reasons": [], "roles": set()})
+        item = grouped.setdefault(
+            owner, {"issues": [], "reasons": [], "roles": set()}
+        )
+        item["issues"].append(issue)
         item["reasons"].append(
             f"{issue['target_type']} {issue['target_id']}: {issue['reason']}"
         )
@@ -244,10 +260,30 @@ def _repair_targets(
     return tuple(
         RepairTarget(
             owner_unit_id=owner,
+            issues=tuple(item["issues"]),
             reasons=tuple(dict.fromkeys(item["reasons"])),
             boundary_roles=frozenset(item["roles"]),
         )
         for owner, item in sorted(grouped.items())
+    )
+
+
+def _issue_key(issue: dict[str, str]) -> tuple[str, str]:
+    return issue["target_type"], issue["target_id"]
+
+
+def _repair_committed(
+    outcome: ExistingRepairOutcome, boundary_roles: frozenset[str]
+) -> bool:
+    if (
+        outcome.error is not None
+        or outcome.canonical_evidence is None
+        or outcome.result is None
+    ):
+        return False
+    return not (
+        ("before" in boundary_roles and outcome.before_boundary_record is None)
+        or ("after" in boundary_roles and outcome.after_boundary_record is None)
     )
 
 
@@ -264,12 +300,36 @@ def reconcile_document(
     last_issues: list[dict[str, str]] = []
     repair_rounds = 0
     technical_failures: list[dict[str, str]] = []
+    sticky_issues: dict[tuple[str, str], dict[str, str]] = {}
+    report_path = sequence_audit_report_path(
+        enabled=config.debug,
+        root=config.debug_root,
+        document_id=working["document_id"],
+    )
+    debug_report: dict[str, Any] = {
+        "schema_version": SEQUENCE_AUDIT_REPORT_SCHEMA_VERSION,
+        "document_id": working["document_id"],
+        "rounds": [],
+        "final": None,
+    }
+
+    def save_debug(final: dict[str, Any] | None = None) -> None:
+        if final is not None:
+            debug_report["final"] = final
+        write_sequence_audit_report(report_path, debug_report)
 
     if working["status"] != "annotated":
         last_issues = _intrinsic_issues(working)
         working["quality_status"] = "quarantined"
         working["quality_provenance"] = _quality_provenance(
             backend, None, 0, 0, working, last_issues
+        )
+        save_debug(
+            {
+                "quality_status": "quarantined",
+                "active_issues": last_issues,
+                "technical_failures": [],
+            }
         )
         return DocumentReconciliationResult(
             working,
@@ -280,9 +340,48 @@ def reconcile_document(
         )
 
     for round_index in range(config.sequence_repair_rounds + 1):
-        audit, attempts = _audit_document(working, backend, config)
+        canonical_sequence = build_sequence_projection(working)
+        projection_sha256 = hashlib.sha256(
+            canonical_sequence.encode("utf-8")
+        ).hexdigest()
+        audit, attempts = _audit_document(
+            working, backend, config, canonical_sequence
+        )
         total_audit_attempts += attempts
         last_audit = audit
+        reported_issues = (
+            []
+            if audit is None
+            else _deduplicate_issues(list(audit.audit["issues"]))
+        )
+        round_report: dict[str, Any] = {
+            "round_index": round_index,
+            "sequence_sha256": projection_sha256,
+            "canonical_sequence": json.loads(canonical_sequence),
+            "audit": {
+                "attempts": attempts,
+                "provider": backend.provider if audit is None else audit.provider,
+                "model": (
+                    backend.model
+                    if audit is None
+                    else audit.trace.response_model or audit.requested_model
+                ),
+                "prompt_version": (
+                    SEQUENCE_AUDIT_PROMPT_VERSION
+                    if audit is None
+                    else audit.prompt_version
+                ),
+                "trace": None if audit is None else asdict(audit.trace),
+                "structured_output": None if audit is None else audit.audit,
+                "reported_issues": reported_issues,
+            },
+            "carried_issues": [
+                sticky_issues[key] for key in sorted(sticky_issues)
+            ],
+            "active_issues": [],
+            "repair_targets": [],
+        }
+        debug_report["rounds"].append(round_report)
         if audit is None:
             technical_failures.append(
                 {
@@ -292,6 +391,16 @@ def reconcile_document(
             )
             working["quality_status"] = "pending"
             working["quality_provenance"] = None
+            round_report["active_issues"] = [
+                sticky_issues[key] for key in sorted(sticky_issues)
+            ]
+            save_debug(
+                {
+                    "quality_status": "pending",
+                    "active_issues": round_report["active_issues"],
+                    "technical_failures": technical_failures,
+                }
+            )
             return DocumentReconciliationResult(
                 working,
                 (),
@@ -300,7 +409,11 @@ def reconcile_document(
                 None,
                 tuple(technical_failures),
             )
-        last_issues = _deduplicate_issues(list(audit.audit["issues"]))
+        active_issues = dict(sticky_issues)
+        active_issues.update({_issue_key(issue): issue for issue in reported_issues})
+        last_issues = [active_issues[key] for key in sorted(active_issues)]
+        round_report["active_issues"] = last_issues
+        save_debug()
         if not last_issues:
             working["quality_status"] = "accepted"
             working["quality_provenance"] = _quality_provenance(
@@ -310,6 +423,13 @@ def reconcile_document(
                 repair_rounds,
                 working,
                 [],
+            )
+            save_debug(
+                {
+                    "quality_status": "accepted",
+                    "active_issues": [],
+                    "technical_failures": technical_failures,
+                }
             )
             return DocumentReconciliationResult(
                 working,
@@ -322,9 +442,9 @@ def reconcile_document(
         if round_index >= config.sequence_repair_rounds:
             break
 
-        repaired_any = False
         units_by_id = {unit["unit_id"]: unit for unit in working["evidence_units"]}
         round_failures: list[dict[str, str]] = []
+        next_sticky_issues: dict[tuple[str, str], dict[str, str]] = {}
         for target in _repair_targets(working, last_issues):
             unit = units_by_id[target.owner_unit_id]
             reason = " ".join(target.reasons)
@@ -335,22 +455,51 @@ def reconcile_document(
                 allowed_boundary_replacements=target.boundary_roles,
                 required_boundary_replacements=target.boundary_roles,
             )
+            committed = _repair_committed(outcome, target.boundary_roles)
+            status = "committed" if committed else "unresolved"
             if outcome.error is not None:
+                status = "technical_failed"
                 round_failures.append(
                     {
                         "target_id": unit["unit_id"],
                         "error": f"Targeted repair provider failed: {outcome.error}",
                     }
                 )
-            if outcome.canonical_evidence is None:
-                continue
-            _apply_repair(working, unit, reason, outcome)
-            repaired_any = True
+            if committed:
+                _apply_repair(working, unit, reason, outcome)
+            else:
+                next_sticky_issues.update(
+                    {_issue_key(issue): issue for issue in target.issues}
+                )
+            round_report["repair_targets"].append(
+                {
+                    "owner_unit_id": target.owner_unit_id,
+                    "issues": list(target.issues),
+                    "required_boundary_replacements": sorted(
+                        target.boundary_roles
+                    ),
+                    "status": status,
+                    "attempts": outcome.attempts,
+                    "error": outcome.error,
+                    "result": (
+                        None if outcome.result is None else asdict(outcome.result)
+                    ),
+                }
+            )
         repair_rounds += 1
+        sticky_issues = next_sticky_issues
+        save_debug()
         if round_failures:
             technical_failures.extend(round_failures)
             working["quality_status"] = "pending"
             working["quality_provenance"] = None
+            save_debug(
+                {
+                    "quality_status": "pending",
+                    "active_issues": last_issues,
+                    "technical_failures": technical_failures,
+                }
+            )
             return DocumentReconciliationResult(
                 working,
                 tuple(last_issues),
@@ -359,8 +508,6 @@ def reconcile_document(
                 last_audit,
                 tuple(technical_failures),
             )
-        if not repaired_any:
-            break
 
     working["quality_status"] = "quarantined"
     working["quality_provenance"] = _quality_provenance(
@@ -370,6 +517,13 @@ def reconcile_document(
         repair_rounds,
         working,
         last_issues,
+    )
+    save_debug(
+        {
+            "quality_status": "quarantined",
+            "active_issues": last_issues,
+            "technical_failures": technical_failures,
+        }
     )
     return DocumentReconciliationResult(
         working,
@@ -399,7 +553,7 @@ def _quality_provenance(
         "prompt_version": (
             audit.prompt_version
             if audit is not None
-            else "video-harness.sequence-audit.v6"
+            else SEQUENCE_AUDIT_PROMPT_VERSION
         ),
         "audit_attempts": audit_attempts,
         "repair_rounds": repair_rounds,

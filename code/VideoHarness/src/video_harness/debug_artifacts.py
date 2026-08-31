@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
+
+SEQUENCE_AUDIT_REPORT_SCHEMA_VERSION = "video-harness.sequence-audit-report.v1"
 
 
 def _slug(value: str) -> str:
@@ -12,6 +15,43 @@ def _slug(value: str) -> str:
     if not slug:
         raise ValueError("debug artifact identifier cannot be empty")
     return slug
+
+
+def sequence_audit_report_path(
+    *, enabled: bool, root: Path | None, document_id: str
+) -> Path | None:
+    if not enabled:
+        return None
+    if root is None:
+        raise ValueError("enabled sequence audit report requires an explicit root")
+    report_root = Path(root) / _slug(document_id) / "sequence-audit"
+    report_root.mkdir(parents=True, exist_ok=True)
+    index = 0
+    while (candidate := report_root / f"run-{index:03d}.json").exists():
+        index += 1
+    return candidate
+
+
+def write_sequence_audit_report(path: Path | None, value: Any) -> None:
+    if path is None:
+        return
+    encoded = (
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            stream.write(encoded)
+            temporary = Path(stream.name)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class DebugArtifactStore:

@@ -153,10 +153,20 @@ def test_sequence_projection_is_stable_and_deduplicates_boundaries(changed_evide
     payload = json.loads(first)
 
     assert first == second
-    assert len(payload["boundaries"]) == 3
-    assert len(payload["evidence_units"]) == 2
-    assert "detail_observation" in payload["evidence_units"][0]
-    assert "causal_validation" not in payload["evidence_units"][0]
+    assert [item["type"] for item in payload["sequence"]] == [
+        "boundary",
+        "evidence_unit",
+        "boundary",
+        "evidence_unit",
+        "boundary",
+    ]
+    assert [
+        item["boundary_id"]
+        for item in payload["sequence"]
+        if item["type"] == "boundary"
+    ] == ["b0000", "b0001", "b0002"]
+    assert "detail_observation" in payload["sequence"][1]
+    assert "causal_validation" not in payload["sequence"][1]
     assert len(sequence_projection_sha256(document)) == 64
 
 
@@ -236,7 +246,8 @@ def test_unresolved_issue_quarantines_document_without_human_queue(changed_evide
                         "reason": "Unresolved continuity.",
                     }
                 ]
-            }
+            },
+            {"issues": []},
         ]
     )
     pipeline = FakeRepairPipeline([ExistingRepairOutcome(None, None, None, 2, None)])
@@ -253,7 +264,148 @@ def test_unresolved_issue_quarantines_document_without_human_queue(changed_evide
     validate_document(outcome.document)
 
 
-def test_repair_provider_failure_is_exposed_for_resume(changed_evidence):
+def test_successful_repair_must_pass_reaudit_before_issue_clears(changed_evidence):
+    document = _document(changed_evidence)
+    issue = {
+        "target_type": "unit",
+        "target_id": "u0000",
+        "reason": "The transition remains inconsistent.",
+    }
+    backend = FakeAuditBackend(
+        [
+            {"issues": [issue]},
+            {"issues": [issue]},
+            {"issues": []},
+        ]
+    )
+    pipeline = FakeRepairPipeline(
+        [
+            _successful_repair(changed_evidence),
+            _successful_repair(changed_evidence),
+        ]
+    )
+
+    outcome = reconcile_document(
+        document,
+        backend=backend,
+        pipeline=pipeline,
+        config=HarnessConfig(sequence_repair_rounds=2),
+    )
+
+    assert outcome.document["quality_status"] == "accepted"
+    assert len(pipeline.calls) == 2
+    assert outcome.audit_attempts == 3
+
+
+def test_reaudit_adds_new_target_to_active_issues(changed_evidence):
+    document = _document(changed_evidence)
+    first_issue = {
+        "target_type": "unit",
+        "target_id": "u0000",
+        "reason": "Repair the first transition.",
+    }
+    second_issue = {
+        "target_type": "unit",
+        "target_id": "u0001",
+        "reason": "Repair the adjacent transition.",
+    }
+    backend = FakeAuditBackend(
+        [
+            {"issues": [first_issue]},
+            {"issues": [second_issue]},
+            {"issues": []},
+        ]
+    )
+    pipeline = FakeRepairPipeline(
+        [
+            _successful_repair(changed_evidence),
+            _successful_repair(changed_evidence),
+        ]
+    )
+
+    outcome = reconcile_document(
+        document,
+        backend=backend,
+        pipeline=pipeline,
+        config=HarnessConfig(sequence_repair_rounds=2),
+    )
+
+    assert outcome.document["quality_status"] == "accepted"
+    assert [call[1] for call in pipeline.calls] == ["u0000", "u0001"]
+
+
+def test_missing_required_boundary_replacement_keeps_issue_active(
+    changed_evidence,
+):
+    document = _document(changed_evidence)
+    original = copy.deepcopy(document["boundary_states"][1])
+    issue = {
+        "target_type": "boundary",
+        "target_id": "b0001",
+        "reason": "The shared Boundary is incorrect.",
+    }
+    backend = FakeAuditBackend([{"issues": [issue]}, {"issues": []}])
+    pipeline = FakeRepairPipeline([_successful_repair(changed_evidence)])
+
+    outcome = reconcile_document(
+        document,
+        backend=backend,
+        pipeline=pipeline,
+        config=HarnessConfig(sequence_repair_rounds=1),
+    )
+
+    assert outcome.document["quality_status"] == "quarantined"
+    assert outcome.issues == (issue,)
+    assert outcome.document["boundary_states"][1] == original
+
+
+def test_debug_report_records_projection_issue_lifecycle_and_resume_run(
+    changed_evidence, tmp_path
+):
+    document = _document(changed_evidence)
+    issue = {
+        "target_type": "unit",
+        "target_id": "u0000",
+        "reason": "Repair this transition.",
+    }
+    config = HarnessConfig(
+        debug=True,
+        debug_root=tmp_path,
+        sequence_repair_rounds=1,
+    )
+    outcome = reconcile_document(
+        document,
+        backend=FakeAuditBackend([{"issues": [issue]}, {"issues": []}]),
+        pipeline=FakeRepairPipeline([_successful_repair(changed_evidence)]),
+        config=config,
+    )
+
+    assert outcome.document["quality_status"] == "accepted"
+    reports = sorted(tmp_path.glob("*/sequence-audit/run-*.json"))
+    assert [path.name for path in reports] == ["run-000.json"]
+    report = json.loads(reports[0].read_text())
+    assert report["schema_version"] == "video-harness.sequence-audit-report.v1"
+    assert report["rounds"][0]["canonical_sequence"]["sequence"][0][
+        "type"
+    ] == "boundary"
+    assert report["rounds"][0]["audit"]["structured_output"] == {
+        "issues": [issue]
+    }
+    assert report["rounds"][0]["repair_targets"][0]["status"] == "committed"
+    assert report["rounds"][1]["active_issues"] == []
+    assert report["final"]["quality_status"] == "accepted"
+
+    reconcile_document(
+        document,
+        backend=FakeAuditBackend([{"issues": []}]),
+        pipeline=FakeRepairPipeline([]),
+        config=config,
+    )
+    reports = sorted(tmp_path.glob("*/sequence-audit/run-*.json"))
+    assert [path.name for path in reports] == ["run-000.json", "run-001.json"]
+
+
+def test_repair_provider_failure_is_exposed_for_resume(changed_evidence, tmp_path):
     document = _document(changed_evidence)
     backend = FakeAuditBackend(
         [
@@ -271,7 +423,11 @@ def test_repair_provider_failure_is_exposed_for_resume(changed_evidence):
         document,
         backend=backend,
         pipeline=pipeline,
-        config=HarnessConfig(sequence_repair_rounds=1),
+        config=HarnessConfig(
+            debug=True,
+            debug_root=tmp_path,
+            sequence_repair_rounds=1,
+        ),
     )
 
     assert outcome.document["quality_status"] == "pending"
@@ -282,6 +438,12 @@ def test_repair_provider_failure_is_exposed_for_resume(changed_evidence):
             "error": "Targeted repair provider failed: TimeoutError: offline",
         },
     )
+    report_path = next(tmp_path.glob("*/sequence-audit/run-000.json"))
+    report = json.loads(report_path.read_text())
+    assert report["rounds"][0]["repair_targets"][0]["status"] == (
+        "technical_failed"
+    )
+    assert report["final"]["quality_status"] == "pending"
 
 
 def test_unit_only_repair_does_not_replace_boundary(changed_evidence):
