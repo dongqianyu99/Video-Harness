@@ -12,6 +12,9 @@ def test_normal_mode_has_no_debug_destination() -> None:
     assert config.manifest()["debug_root"] is None
     assert config.provider_timeout_s == 300.0
     assert config.provider_max_retries == 2
+    assert config.output_mode == "tool"
+    assert config.thinking is True
+    assert config.reasoning_effort == "high"
     assert config.media_retries == 2
     assert config.call2_retries == 2
     assert config.ffmpeg_timeout_s == 120.0
@@ -66,3 +69,12 @@ def test_timing_contract_is_explicit() -> None:
         HarnessConfig(fps=50)
     with pytest.raises(ValueError, match="26-frame"):
         HarnessConfig(unit_frame_count=25)
+
+
+def test_output_options_are_validated() -> None:
+    with pytest.raises(ValueError, match="output_mode"):
+        HarnessConfig(output_mode="xml")
+    with pytest.raises(ValueError, match="thinking"):
+        HarnessConfig(thinking=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        HarnessConfig(reasoning_effort="medium")

@@ -81,6 +81,18 @@ For an OpenAI-compatible endpoint, also set `OPENAI_BASE_URL`. For example:
 export OPENAI_BASE_URL=https://api.deepseek.com
 ```
 
+OpenAI-compatible providers can return structured data through the existing forced
+tool-call protocol or through JSON Output. JSON Output supports thinking and uses
+local schema validation:
+
+```bash
+--output-mode json --thinking --reasoning-effort high
+```
+
+Thinking is enabled by default in JSON mode. Use `--no-thinking` to disable it, or
+choose `low`, `high`, or `max` with `--reasoning-effort`. Tool mode remains the
+default compatibility path and ignores the thinking options.
+
 ### Anthropic
 
 ```bash

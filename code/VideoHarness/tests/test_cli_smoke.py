@@ -8,13 +8,39 @@ from types import SimpleNamespace
 import pyarrow as pa
 from pyarrow import parquet
 
-from video_harness.cli import _annotate
+from video_harness.cli import _annotate, build_parser
 from video_harness.evidence import (
     BOUNDARY_STATE_SCHEMA_VERSION,
     EVIDENCE_SCHEMA_VERSION,
 )
 from video_harness.robodojo import EpisodeRecord, VideoSlice
 from video_harness.sampling import plan_document
+
+
+def test_annotate_cli_accepts_json_thinking_options(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "annotate",
+            "--documents",
+            str(tmp_path / "documents.jsonl"),
+            "--output",
+            str(tmp_path / "output.jsonl"),
+            "--dataset-root",
+            str(tmp_path),
+            "--provider",
+            "openai",
+            "--model",
+            "vision-model",
+            "--output-mode",
+            "json",
+            "--no-thinking",
+            "--reasoning-effort",
+            "max",
+        ]
+    )
+    assert args.output_mode == "json"
+    assert args.thinking is False
+    assert args.reasoning_effort == "max"
 
 
 def test_mock_cli_runs_full_multiview_media_pipeline_without_debug(

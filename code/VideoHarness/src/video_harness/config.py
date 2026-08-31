@@ -17,6 +17,9 @@ class HarnessConfig:
     sequence_repair_rounds: int = 2
     provider_timeout_s: float = 300.0
     provider_max_retries: int = 2
+    output_mode: str = "tool"
+    thinking: bool = True
+    reasoning_effort: str = "high"
     ffmpeg_timeout_s: float = 120.0
     fps: int = 25
     unit_frame_count: int = 26
@@ -59,6 +62,12 @@ class HarnessConfig:
                 or value <= 0
             ):
                 raise ValueError(f"{field} must be a positive number")
+        if self.output_mode not in {"tool", "json"}:
+            raise ValueError("output_mode must be 'tool' or 'json'")
+        if not isinstance(self.thinking, bool):
+            raise ValueError("thinking must be a boolean")
+        if self.reasoning_effort not in {"low", "high", "max"}:
+            raise ValueError("reasoning_effort must be low, high, or max")
         if self.fps != 25 or self.unit_frame_count != 26:
             raise ValueError("Video Harness requires 25 Hz and 26-frame standard Units")
         if not self.preprocessing_version.strip():

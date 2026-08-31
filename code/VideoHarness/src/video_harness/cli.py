@@ -459,6 +459,9 @@ def _make_worker_context(
         args.model,
         timeout_s=config.provider_timeout_s,
         max_retries=config.provider_max_retries,
+        output_mode=config.output_mode,
+        thinking=config.thinking,
+        reasoning_effort=config.reasoning_effort,
     )
     inspection_backend = TrackingBackend(inspection_backend, tracker)
     evidence_backend = TrackingBackend(evidence_backend, tracker)
@@ -659,6 +662,9 @@ def _annotate(args: argparse.Namespace) -> int:
         sequence_repair_rounds=getattr(args, "sequence_repair_rounds", 2),
         provider_timeout_s=getattr(args, "provider_timeout_s", 300.0),
         provider_max_retries=getattr(args, "provider_max_retries", 2),
+        output_mode=getattr(args, "output_mode", "tool"),
+        thinking=getattr(args, "thinking", True),
+        reasoning_effort=getattr(args, "reasoning_effort", "high"),
         ffmpeg_timeout_s=getattr(args, "ffmpeg_timeout_s", 120.0),
     )
     checkpoint_root = getattr(args, "checkpoint_root", None)
@@ -1235,6 +1241,24 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--call2-retries", type=int, default=2)
     annotate.add_argument("--provider-timeout-s", type=float, default=300.0)
     annotate.add_argument("--provider-max-retries", type=int, default=2)
+    annotate.add_argument(
+        "--output-mode",
+        choices=("tool", "json"),
+        default="tool",
+        help="structured-output protocol for OpenAI-compatible providers",
+    )
+    annotate.add_argument(
+        "--thinking",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable thinking in JSON output mode (default: enabled)",
+    )
+    annotate.add_argument(
+        "--reasoning-effort",
+        choices=("low", "high", "max"),
+        default="high",
+        help="thinking effort in JSON output mode",
+    )
     annotate.add_argument("--ffmpeg-timeout-s", type=float, default=120.0)
     annotate.add_argument("--repair-max-attempts", type=int, default=2)
     annotate.add_argument("--sequence-audit-max-attempts", type=int, default=2)
