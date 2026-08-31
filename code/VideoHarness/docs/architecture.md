@@ -39,7 +39,8 @@ States. A Boundary State owns one sampled frame reference and one synchronized
 three-view static description. An Evidence Unit owns only the task-blind motion
 evidence and task-conditioned transition interpretation between two adjacent
 Boundary IDs. Static Boundary text is never duplicated inside transition records.
-Boundary visual quality status is independent from transition causal quality status.
+Unit and Boundary annotations record technical completion only; semantic quality belongs
+to the complete Document.
 
 The CLI contains no frame-selection, prompt, provider, or document-mutation logic. The pipeline owns the state transition for one Evidence Unit. Provider adapters serialize protocol requests but do not decode videos. The media layer does not know task instructions or evidence schemas. The debug sink observes execution but does not change it.
 
@@ -78,10 +79,7 @@ PLANNED
   → MOTION_ANALYZED
   → DETAIL_READY
   → TASK_INTERPRETED
-  → CAUSAL_PASS → COMMITTED
-  → CAUSAL_RETRY → TARGETED_REPROCESS
-                   → RESOLVED → COMMITTED
-                   → UNRESOLVED → COMMITTED_AS_QUARANTINED
+  → COMMITTED
 ```
 
 Any failure before COMMITTED leaves the previous canonical annotation unchanged.
@@ -89,10 +87,9 @@ Any failure before COMMITTED leaves the previous canonical annotation unchanged.
 ## Automatic document quality state machine
 
 ```text
-NORMAL_COMPILE
-  → TARGETED_REPROCESS when a Unit is inconsistent
-  → SEQUENCE_AUDIT when every Unit is complete
-  → ISSUE_DIRECTED_REPAIR → SEQUENCE_AUDIT, within a fixed budget
+UNIT_COMPILATION
+  → SEQUENCE_AUDIT when every Unit and Boundary is complete
+  → TARGETED_REPAIR → SEQUENCE_AUDIT, within a fixed budget
   → ACCEPTED | QUARANTINED
 ```
 
@@ -100,10 +97,10 @@ NORMAL_COMPILE
 Readers require an `ACCEPTED` document. Human review
 is reserved for sampled Harness evaluation and does not block corpus generation.
 
-Document acceptance uses a 90% Evidence-Unit coverage threshold rather than requiring
-every Unit to pass. Unit annotations keep their original quality labels; accepted
-Readers skip non-accepted Units. Boundary States remain strict, and Sequence Audit may
-still reject a Document when sparse missing Units make the overall sequence incoherent.
+Document acceptance is all-or-nothing: every Unit and Boundary must be technically
+complete and the final Sequence Audit must report no unresolved issue. Technical
+provider, schema, or media failures remain pending and resumable rather than becoming
+semantic quarantine.
 
 The pipeline writes canonical output only after the final evidence validates. Intermediate output belongs to the debug sink and may be absent by design.
 
@@ -173,31 +170,28 @@ and request payloads are released after the Evidence Unit finishes.
 - all three views also produce independent BEFORE/AFTER Boundary images;
 - detail crops use only `cam_high` and one fixed ROI over a contiguous interval;
 - Call 1 receives synchronized gripper aperture but does not receive task text;
-- Call 1 may receive only the immediately preceding accepted task-blind Motion
+- Call 1 may receive only the immediately preceding compiled task-blind Motion
   Summary as fallible continuity context; current images remain authoritative;
 - every Call 1 result locates one meaningful interaction window, whether or not
   a detail crop is requested;
 - Call 1 Motion Summary is passed to Call 2 as task-blind intermediate evidence;
   it is one concise sentence and does not repeat the static scene;
 - Call 2 revises that draft using task context, high-resolution Boundary images,
-  accepted Boundary descriptions, the same gripper aperture samples, and detail,
+  existing Boundary descriptions, the same gripper aperture samples, and detail,
   and only the revised
   Motion Summary is stored in canonical evidence;
 - Call 2 receives no overview or keyframe sheets;
 - Call 2 receives Boundary/detail images before the fallible Call 1 Motion
-  Summary and accepted Boundary text, with Task Instruction last;
+  Summary and existing Boundary text, with Task Instruction last;
 - Call 2 sees all six synchronized Boundary images but emits a description only
-  for a Boundary that has no accepted canonical description;
-- a material conflict with an accepted Boundary is recorded and enters Targeted
-  Reprocessing without creating a second canonical description;
+  for a Boundary that has no canonical description;
 - Call 2 always uses the `cam_high` detail sheet;
 - Call 2 emits one sentence per new Boundary view, one revised Motion Summary,
-  one Action Description, one Task Role, and one causal-reason sentence;
+  one Action Description, and one Task Role;
 - grasp, hold, release, and contact require direct supporting evidence from the
   corresponding wrist camera, and every key Atomic Action Claim must map to an
-  appropriate visual view before causal validation can pass;
-- normal Call 2 runs once by default; an inconsistency enters bounded Targeted
-  Reprocessing with full temporal evidence;
+  appropriate visual view before compilation completes;
+- Call 2 compiles evidence without making a semantic quality decision;
 - every complete document receives a Sequence Audit and bounded issue-directed
   repair before it becomes `accepted` or `quarantined`;
 - task text follows visual inputs and only supplies naming/role context;
@@ -205,10 +199,11 @@ and request payloads are released after the Evidence Unit finishes.
 - provider responses bind by document/unit/request role, never completion order.
 
 Pi0.5 materializes each unique Boundary as three synchronized camera images plus
-three view-specific state descriptions and resamples it to `K_B` tokens. Accepted
-Transition text is independently resampled to `K_T` tokens. The reader then packs
+three view-specific state descriptions and resamples it to `K_B` tokens. Transition
+text is independently resampled to `K_T` tokens. The reader then packs
 the two memories in canonical `Boundary, Transition, Boundary` order, so adjacent
-Transitions share one encoded Boundary and rejected-Unit gaps remain explicit.
+Transitions share one encoded Boundary. Only complete accepted Documents reach this
+reader, so partial Unit gaps are not exposed.
 
 ## Configuration
 

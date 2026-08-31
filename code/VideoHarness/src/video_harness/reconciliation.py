@@ -14,7 +14,7 @@ from .annotations import (
 from .config import HarnessConfig
 from .pipeline import EvidenceUnitPipeline, ExistingRepairOutcome
 from .run_tracking import ApiCallBudgetExceeded
-from .sampling import MIN_ACCEPTED_UNIT_RATIO, unit_boundary_states
+from .sampling import unit_boundary_states
 
 
 @dataclass(frozen=True)
@@ -39,9 +39,6 @@ def build_sequence_projection(document: dict[str, Any]) -> str:
                 "observation": (
                     record.get("observation") if isinstance(record, dict) else None
                 ),
-                "quality_status": (
-                    record.get("quality_status") if isinstance(record, dict) else None
-                ),
             }
         )
 
@@ -57,6 +54,11 @@ def build_sequence_projection(document: dict[str, Any]) -> str:
                 "motion_summary": (
                     record.get("motion_summary") if isinstance(record, dict) else None
                 ),
+                "detail_observation": (
+                    record.get("detail_observation")
+                    if isinstance(record, dict)
+                    else None
+                ),
                 "action_description": (
                     record.get("unit_interpretation", {}).get("action_description")
                     if isinstance(record, dict)
@@ -66,14 +68,6 @@ def build_sequence_projection(document: dict[str, Any]) -> str:
                     record.get("unit_interpretation", {}).get("task_role")
                     if isinstance(record, dict)
                     else None
-                ),
-                "causal_validation": (
-                    record.get("causal_validation")
-                    if isinstance(record, dict)
-                    else None
-                ),
-                "quality_status": (
-                    record.get("quality_status") if isinstance(record, dict) else None
                 ),
             }
         )
@@ -98,44 +92,36 @@ def sequence_projection_sha256(document: dict[str, Any]) -> str:
 
 def _intrinsic_issues(document: dict[str, Any]) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
-    unit_issues: list[dict[str, str]] = []
-    accepted_units = 0
+    if document["status"] != "annotated":
+        return [
+            {
+                "target_type": "document",
+                "target_id": "<document>",
+                "reason": "Only a fully compiled real document can be audited.",
+            }
+        ]
     for unit in document["evidence_units"]:
         annotation = unit["annotation"]
         record = annotation.get("record")
         if annotation["status"] != "complete" or not isinstance(record, dict):
-            unit_issues.append(
+            issues.append(
                 {
                     "target_type": "unit",
                     "target_id": unit["unit_id"],
                     "reason": "Evidence Unit annotation is incomplete or failed.",
                 }
             )
-            continue
-        if record["quality_status"] != "accepted":
-            unit_issues.append(
-                {
-                    "target_type": "unit",
-                    "target_id": unit["unit_id"],
-                    "reason": record["causal_validation"]["reason"],
-                }
-            )
-        else:
-            accepted_units += 1
-    if accepted_units / len(document["evidence_units"]) < MIN_ACCEPTED_UNIT_RATIO:
-        issues.extend(unit_issues)
     for boundary in document["boundary_states"]:
         boundary_record = boundary["annotation"].get("record")
         if (
             boundary["annotation"]["status"] != "complete"
             or not isinstance(boundary_record, dict)
-            or boundary_record["quality_status"] != "accepted"
         ):
             issues.append(
                 {
                     "target_type": "boundary",
                     "target_id": boundary["boundary_id"],
-                    "reason": "Boundary annotation is incomplete or not accepted.",
+                    "reason": "Boundary annotation is incomplete or failed.",
                 }
             )
     return issues
@@ -165,13 +151,24 @@ def _audit_document(
         canonical_sequence=build_sequence_projection(document),
         task_instruction=document["task_instruction"],
     )
+    valid_targets = {
+        "unit": {unit["unit_id"] for unit in document["evidence_units"]},
+        "boundary": {
+            boundary["boundary_id"] for boundary in document["boundary_states"]
+        },
+    }
     for attempt in range(1, config.sequence_audit_max_attempts + 1):
         try:
-            return backend.audit_sequence(request), attempt
+            result = backend.audit_sequence(request)
         except ApiCallBudgetExceeded:
             raise
-        except Exception:  # noqa: BLE001,S112 - audit failure quarantines this document
+        except Exception:  # noqa: BLE001,S112 - audit failure remains resumable
             continue
+        if all(
+            issue["target_id"] in valid_targets[issue["target_type"]]
+            for issue in result.audit["issues"]
+        ):
+            return result, attempt
     return None, config.sequence_audit_max_attempts
 
 
@@ -210,68 +207,48 @@ def _apply_repair(
             }
 
 
-def _repair_boundary_window(
+@dataclass(frozen=True)
+class RepairTarget:
+    owner_unit_id: str
+    reasons: tuple[str, ...]
+    boundary_roles: frozenset[str]
+
+
+def _repair_targets(
     document: dict[str, Any],
-    boundary_id: str,
-    issue_reason: str,
-    pipeline: EvidenceUnitPipeline,
-    technical_failures: list[dict[str, str]],
-) -> dict[str, Any] | None:
-    candidate = copy.deepcopy(document)
-    adjacent = [
-        unit
-        for unit in candidate["evidence_units"]
-        if boundary_id in {unit["before_boundary_id"], unit["after_boundary_id"]}
-    ]
-    adjacent.sort(key=lambda unit: unit["order"])
-    if not adjacent:
-        return None
-
-    first = adjacent[0]
-    role = "after" if first["after_boundary_id"] == boundary_id else "before"
-    outcome = pipeline.repair_existing(
-        candidate,
-        first,
-        issue_reason=issue_reason,
-        allowed_boundary_replacements=frozenset({role}),
-        required_boundary_replacements=frozenset({role}),
-    )
-    if outcome.error is not None:
-        technical_failures.append(
-            {
-                "target_id": boundary_id,
-                "error": f"Boundary repair provider failed: {outcome.error}",
-            }
+    issues: list[dict[str, str]],
+) -> tuple[RepairTarget, ...]:
+    grouped: dict[str, dict[str, Any]] = {}
+    units = document["evidence_units"]
+    boundary_orders = {
+        boundary["boundary_id"]: boundary["order"]
+        for boundary in document["boundary_states"]
+    }
+    for issue in issues:
+        roles: set[str] = set()
+        if issue["target_type"] == "unit":
+            owner = issue["target_id"]
+        else:
+            order = boundary_orders[issue["target_id"]]
+            if order == 0:
+                owner = units[0]["unit_id"]
+                roles.add("before")
+            else:
+                owner = units[order - 1]["unit_id"]
+                roles.add("after")
+        item = grouped.setdefault(owner, {"reasons": [], "roles": set()})
+        item["reasons"].append(
+            f"{issue['target_type']} {issue['target_id']}: {issue['reason']}"
         )
-    replacement = (
-        outcome.after_boundary_record
-        if role == "after"
-        else outcome.before_boundary_record
-    )
-    if outcome.canonical_evidence is None or replacement is None:
-        return None
-    _apply_repair(candidate, first, issue_reason, outcome)
-
-    for unit in adjacent[1:]:
-        outcome = pipeline.repair_existing(
-            candidate,
-            unit,
-            issue_reason=(
-                f"Shared Boundary {boundary_id} was regenerated. {issue_reason}"
-            ),
-            allowed_boundary_replacements=frozenset(),
+        item["roles"].update(roles)
+    return tuple(
+        RepairTarget(
+            owner_unit_id=owner,
+            reasons=tuple(dict.fromkeys(item["reasons"])),
+            boundary_roles=frozenset(item["roles"]),
         )
-        if outcome.error is not None:
-            technical_failures.append(
-                {
-                    "target_id": unit["unit_id"],
-                    "error": f"Adjacent Unit repair provider failed: {outcome.error}",
-                }
-            )
-        if outcome.canonical_evidence is None:
-            return None
-        _apply_repair(candidate, unit, issue_reason, outcome)
-    return candidate
+        for owner, item in sorted(grouped.items())
+    )
 
 
 def reconcile_document(
@@ -288,46 +265,42 @@ def reconcile_document(
     repair_rounds = 0
     technical_failures: list[dict[str, str]] = []
 
+    if working["status"] != "annotated":
+        last_issues = _intrinsic_issues(working)
+        working["quality_status"] = "quarantined"
+        working["quality_provenance"] = _quality_provenance(
+            backend, None, 0, 0, working, last_issues
+        )
+        return DocumentReconciliationResult(
+            working,
+            tuple(last_issues),
+            0,
+            0,
+            None,
+        )
+
     for round_index in range(config.sequence_repair_rounds + 1):
         audit, attempts = _audit_document(working, backend, config)
         total_audit_attempts += attempts
         last_audit = audit
-        audit_issues = (
-            [
+        if audit is None:
+            technical_failures.append(
                 {
-                    "target_type": "document",
                     "target_id": "<document>",
-                    "reason": "Sequence audit provider failed.",
+                    "error": "Sequence audit provider failed after retries.",
                 }
-            ]
-            if audit is None
-            else list(audit.audit["issues"])
-        )
-        valid_unit_ids = {unit["unit_id"] for unit in working["evidence_units"]}
-        valid_boundary_ids = {
-            boundary["boundary_id"] for boundary in working["boundary_states"]
-        }
-        unknown = [
-            issue
-            for issue in audit_issues
-            if (
-                issue["target_type"] == "unit"
-                and issue["target_id"] not in valid_unit_ids
             )
-            or (
-                issue["target_type"] == "boundary"
-                and issue["target_id"] not in valid_boundary_ids
+            working["quality_status"] = "pending"
+            working["quality_provenance"] = None
+            return DocumentReconciliationResult(
+                working,
+                (),
+                total_audit_attempts,
+                repair_rounds,
+                None,
+                tuple(technical_failures),
             )
-        ]
-        if unknown:
-            audit_issues = [
-                {
-                    "target_type": "document",
-                    "target_id": "<document>",
-                    "reason": "Sequence audit returned an unknown target.",
-                }
-            ]
-        last_issues = _deduplicate_issues(_intrinsic_issues(working) + audit_issues)
+        last_issues = _deduplicate_issues(list(audit.audit["issues"]))
         if not last_issues:
             working["quality_status"] = "accepted"
             working["quality_provenance"] = _quality_provenance(
@@ -350,52 +323,42 @@ def reconcile_document(
             break
 
         repaired_any = False
-        covered_units: set[str] = set()
-        for issue in (
-            item for item in last_issues if item["target_type"] == "boundary"
-        ):
-            candidate = _repair_boundary_window(
-                working,
-                issue["target_id"],
-                issue["reason"],
-                pipeline,
-                technical_failures,
-            )
-            if candidate is None:
-                continue
-            working = candidate
-            covered_units.update(
-                unit["unit_id"]
-                for unit in working["evidence_units"]
-                if issue["target_id"]
-                in {unit["before_boundary_id"], unit["after_boundary_id"]}
-            )
-            repaired_any = True
-
         units_by_id = {unit["unit_id"]: unit for unit in working["evidence_units"]}
-        for issue in (item for item in last_issues if item["target_type"] == "unit"):
-            unit = units_by_id.get(issue["target_id"])
-            if unit is None or unit["unit_id"] in covered_units:
-                continue
-            if not isinstance(unit["annotation"].get("record"), dict):
-                continue
-            outcome = pipeline.repair_existing(
+        round_failures: list[dict[str, str]] = []
+        for target in _repair_targets(working, last_issues):
+            unit = units_by_id[target.owner_unit_id]
+            reason = " ".join(target.reasons)
+            outcome = pipeline.repair_target(
                 working,
                 unit,
-                issue_reason=issue["reason"],
+                issue_reason=reason,
+                allowed_boundary_replacements=target.boundary_roles,
+                required_boundary_replacements=target.boundary_roles,
             )
             if outcome.error is not None:
-                technical_failures.append(
+                round_failures.append(
                     {
                         "target_id": unit["unit_id"],
-                        "error": f"Unit repair provider failed: {outcome.error}",
+                        "error": f"Targeted repair provider failed: {outcome.error}",
                     }
                 )
             if outcome.canonical_evidence is None:
                 continue
-            _apply_repair(working, unit, issue["reason"], outcome)
+            _apply_repair(working, unit, reason, outcome)
             repaired_any = True
         repair_rounds += 1
+        if round_failures:
+            technical_failures.extend(round_failures)
+            working["quality_status"] = "pending"
+            working["quality_provenance"] = None
+            return DocumentReconciliationResult(
+                working,
+                tuple(last_issues),
+                total_audit_attempts,
+                repair_rounds,
+                last_audit,
+                tuple(technical_failures),
+            )
         if not repaired_any:
             break
 
@@ -436,7 +399,7 @@ def _quality_provenance(
         "prompt_version": (
             audit.prompt_version
             if audit is not None
-            else "video-harness.sequence-audit.v5"
+            else "video-harness.sequence-audit.v6"
         ),
         "audit_attempts": audit_attempts,
         "repair_rounds": repair_rounds,

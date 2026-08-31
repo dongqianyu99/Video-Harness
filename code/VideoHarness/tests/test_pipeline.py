@@ -16,7 +16,7 @@ from video_harness.annotations import (
 )
 from video_harness.camera_contract import image_label
 from video_harness.config import HarnessConfig
-from video_harness.evidence import mock_call2_record
+from video_harness.evidence import compose_evidence_record, mock_call2_record
 from video_harness.gripper_state import GripperState
 from video_harness.pipeline import EvidenceUnitPipeline
 from video_harness.protocol import ImagePayload
@@ -70,12 +70,10 @@ def _base() -> BaseMedia:
 
 
 def _call2(
-    status: str,
     *,
     action: str = "The robot approaches the object.",
     include_before_boundary: bool = True,
     include_after_boundary: bool = True,
-    boundary_conflicts: dict[str, str | None] | None = None,
 ) -> dict:
     record = mock_call2_record(
         include_before_boundary=include_before_boundary,
@@ -88,18 +86,6 @@ def _call2(
     record["unit_interpretation"] = {
         "action_description": action,
         "task_role": "This Evidence Unit prepares the next task interaction.",
-    }
-    record["causal_validation"] = {
-        "status": status,
-        "reason": (
-            "The interpretation is physically plausible."
-            if status == "pass"
-            else "The claimed object motion lacks a compatible interaction."
-        ),
-    }
-    record["boundary_conflicts"] = boundary_conflicts or {
-        "before": None,
-        "after": None,
     }
     return record
 
@@ -200,7 +186,7 @@ class FakeEvidenceBackend:
     model = "evidence"
 
     def __init__(self, outcomes: list[dict | Exception] | None = None) -> None:
-        self.outcomes = list(outcomes or [_call2("pass")])
+        self.outcomes = list(outcomes or [_call2()])
         self.requests = []
 
     def annotate(self, request) -> EvidenceResult:
@@ -219,26 +205,28 @@ class FakeRepairBackend:
     provider = "test-repair"
     model = "repair"
 
-    def __init__(self, repairs: list[dict]) -> None:
-        self.repairs = list(repairs)
-        self.requests = []
+    def __init__(self, resolved_call2: dict) -> None:
+        self.resolved_call2 = resolved_call2
 
     def repair(self, request) -> RepairResult:
-        self.requests.append(request)
         return RepairResult(
-            repair=copy.deepcopy(self.repairs.pop(0)),
+            repair={
+                "evidence_sufficient": True,
+                "reason": request.issue_reason,
+                "resolved_call2": copy.deepcopy(self.resolved_call2),
+            },
             provider=self.provider,
             requested_model=self.model,
         )
 
-    def audit_sequence(self, request):  # pragma: no cover - pipeline does not audit
+    def audit_sequence(self, request):  # pragma: no cover
         raise AssertionError(request)
 
 
 def test_pipeline_passes_call1_motion_boundaries_and_detail_to_call2() -> None:
     document, unit = _document_and_unit()
     media = FakeMediaBuilder()
-    revised_call2 = _call2("pass")
+    revised_call2 = _call2()
     evidence = FakeEvidenceBackend([revised_call2])
     result = EvidenceUnitPipeline(
         inspection_backend=FakeInspectionBackend(),
@@ -255,22 +243,20 @@ def test_pipeline_passes_call1_motion_boundaries_and_detail_to_call2() -> None:
     assert request.motion_summary == result.inspection.inspection["motion_summary"]
     assert not hasattr(request, "overviews")
     assert not hasattr(request, "keyframe_sheets")
-    assert result.quality_status == "accepted"
     assert result.evidence.evidence["motion_summary"] == revised_call2["motion_summary"]
     assert result.before_boundary_record is not None
     assert result.after_boundary_record is not None
 
 
-def test_pipeline_reuses_accepted_shared_boundary_without_describing_it_again() -> None:
+def test_pipeline_reuses_shared_boundary_without_describing_it_again() -> None:
     document, unit = _document_and_unit()
     document["boundary_states"][0]["annotation"] = {
         "status": "complete",
         "record": {
             "observation": boundary_observation("Shared before"),
-            "quality_status": "accepted",
         },
     }
-    evidence = FakeEvidenceBackend([_call2("pass", include_before_boundary=False)])
+    evidence = FakeEvidenceBackend([_call2(include_before_boundary=False)])
     result = EvidenceUnitPipeline(
         inspection_backend=FakeInspectionBackend(),
         evidence_backend=evidence,
@@ -285,20 +271,18 @@ def test_pipeline_reuses_accepted_shared_boundary_without_describing_it_again() 
     assert result.after_boundary_record is not None
 
 
-def test_pipeline_resume_reuses_both_accepted_boundaries() -> None:
+def test_pipeline_resume_reuses_both_boundaries() -> None:
     document, unit = _document_and_unit()
     for order, boundary in enumerate(document["boundary_states"]):
         boundary["annotation"] = {
             "status": "complete",
             "record": {
                 "observation": boundary_observation(f"Boundary {order}"),
-                "quality_status": "accepted",
             },
         }
     evidence = FakeEvidenceBackend(
         [
             _call2(
-                "pass",
                 include_before_boundary=False,
                 include_after_boundary=False,
             )
@@ -318,41 +302,7 @@ def test_pipeline_resume_reuses_both_accepted_boundaries() -> None:
     assert result.after_boundary_record is None
 
 
-def test_pipeline_flags_conflicting_shared_boundary_without_duplicating_it() -> None:
-    document, unit = _document_and_unit()
-    document["boundary_states"][0]["annotation"] = {
-        "status": "complete",
-        "record": {
-            "observation": boundary_observation("Shared before"),
-            "quality_status": "accepted",
-        },
-    }
-    conflict = {
-        "before": "The accepted description materially disagrees with the image.",
-        "after": None,
-    }
-    evidence = FakeEvidenceBackend(
-        [
-            _call2(
-                "retry",
-                include_before_boundary=False,
-                boundary_conflicts=conflict,
-            )
-        ]
-    )
-    result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(),
-        evidence_backend=evidence,
-        media_builder=FakeMediaBuilder(),
-        config=HarnessConfig(),
-    ).run(document, unit)
-
-    assert result.quality_status == "quarantined"
-    assert result.before_boundary_record is None
-    assert result.conflicted_boundary_roles == ("before",)
-
-
-def test_pipeline_passes_only_accepted_previous_task_blind_motion_context() -> None:
+def test_pipeline_passes_previous_compiled_task_blind_motion_context() -> None:
     previous_summary = (
         "The right gripper remains closed around a visible entity at the final frame."
     )
@@ -363,11 +313,8 @@ def test_pipeline_passes_only_accepted_previous_task_blind_motion_context() -> N
             "status": "complete",
             "record": {
                 "motion_summary": previous_summary,
-                "quality_status": "accepted",
             },
-            "provenance": {
-                "call1": {"provider": "test"},
-            },
+            "provenance": {"call1": {"provider": "test"}},
         },
     }
     current = {
@@ -403,93 +350,11 @@ def test_pipeline_passes_only_accepted_previous_task_blind_motion_context() -> N
     assert inspection.requests[0].previous_motion_summary == previous_summary
 
 
-def test_retry_enters_targeted_repair_and_commits_resolved_transition() -> None:
+def test_debug_mode_saves_compilation_outputs(tmp_path: Path) -> None:
     document, unit = _document_and_unit()
-    unresolved = _call2(
-        "retry",
-        action="The initial transition is inconsistent.",
-    )
-    resolved = _call2(
-        "pass",
-        action="The repaired transition is supported by the temporal evidence.",
-    )
-    resolved["motion_summary"] = "The corrected qualitative motion."
-    repair = FakeRepairBackend(
-        [
-            {
-                "evidence_sufficient": True,
-                "reason": "The full temporal sheets resolve the inconsistency.",
-                "resolved_call2": resolved,
-            }
-        ]
-    )
     result = EvidenceUnitPipeline(
         inspection_backend=FakeInspectionBackend(),
-        evidence_backend=FakeEvidenceBackend([unresolved]),
-        repair_backend=repair,
-        media_builder=FakeMediaBuilder(),
-        config=HarnessConfig(repair_max_attempts=2),
-    ).run(document, unit)
-
-    assert result.quality_status == "accepted"
-    assert result.repair_attempts == 1
-    assert result.repair is not None
-    assert (
-        result.evidence.evidence["motion_summary"]
-        == "The corrected qualitative motion."
-    )
-    assert result.evidence.evidence["unit_interpretation"][
-        "action_description"
-    ].startswith("The repaired transition")
-    assert len(repair.requests[0].overviews) == 3
-    assert len(repair.requests[0].keyframe_sheets) == 3
-    assert len(repair.requests[0].boundary_images) == 6
-
-
-def test_unresolved_targeted_repairs_quarantine_transition() -> None:
-    document, unit = _document_and_unit()
-    unresolved = _call2("retry", action="The transition remains inconsistent.")
-    repair = FakeRepairBackend(
-        [
-            {
-                "evidence_sufficient": False,
-                "reason": "Evidence remains insufficient.",
-                "resolved_call2": None,
-            }
-            for _ in range(2)
-        ]
-    )
-    result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(),
-        evidence_backend=FakeEvidenceBackend([unresolved]),
-        repair_backend=repair,
-        media_builder=FakeMediaBuilder(),
-        config=HarnessConfig(repair_max_attempts=2),
-    ).run(document, unit)
-
-    assert result.quality_status == "quarantined"
-    assert result.repair_attempts == 2
-    assert result.evidence.evidence["quality_status"] == "quarantined"
-    assert result.before_boundary_record["quality_status"] == "accepted"
-    assert result.after_boundary_record["quality_status"] == "accepted"
-
-
-def test_debug_mode_saves_call2_repair_and_final_selection(tmp_path: Path) -> None:
-    document, unit = _document_and_unit()
-    resolved = _call2("pass")
-    repair = FakeRepairBackend(
-        [
-            {
-                "evidence_sufficient": True,
-                "reason": "The temporal evidence resolves the issue.",
-                "resolved_call2": resolved,
-            }
-        ]
-    )
-    result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(),
-        evidence_backend=FakeEvidenceBackend([_call2("retry")]),
-        repair_backend=repair,
+        evidence_backend=FakeEvidenceBackend([_call2()]),
         media_builder=FakeMediaBuilder(),
         config=HarnessConfig(debug=True, debug_root=tmp_path),
     ).run(document, unit)
@@ -497,12 +362,11 @@ def test_debug_mode_saves_call2_repair_and_final_selection(tmp_path: Path) -> No
     root = Path(result.debug_root or "")
     assert (root / "call1.json").is_file()
     assert (root / "call2.json").is_file()
-    assert (root / "repair-attempt-01.json").is_file()
     assert (root / "final.json").is_file()
     final = json.loads((root / "final.json").read_text())
-    assert final["quality_status"] == "accepted"
+    assert "quality_status" not in final
     manifest = json.loads((root / "manifest.json").read_text())
-    assert manifest["repair_attempts"] == 1
+    assert manifest["status"] == "complete"
 
 
 def test_call2_provider_error_fails_with_scoped_debug(tmp_path: Path) -> None:
@@ -532,7 +396,7 @@ def test_call2_retries_malformed_output_without_rebuilding_media(
     document, unit = _document_and_unit()
     media = FakeMediaBuilder()
     evidence = FakeEvidenceBackend(
-        [AnnotationError("malformed evidence arguments"), _call2("pass")]
+        [AnnotationError("malformed evidence arguments"), _call2()]
     )
 
     result = EvidenceUnitPipeline(
@@ -543,14 +407,13 @@ def test_call2_retries_malformed_output_without_rebuilding_media(
     ).run(document, unit)
 
     root = Path(result.debug_root or "")
-    assert result.quality_status == "accepted"
     assert len(evidence.requests) == 2
     assert media.base_calls == 1
     assert (root / "call2-attempt-01-error.json").is_file()
     assert (root / "call2.json").is_file()
 
 
-def test_media_failure_retries_before_quarantining_unit() -> None:
+def test_media_failure_retries_before_compiling_unit() -> None:
     class FlakyMedia(FakeMediaBuilder):
         def __init__(self) -> None:
             super().__init__()
@@ -573,63 +436,88 @@ def test_media_failure_retries_before_quarantining_unit() -> None:
     ).run(document, unit)
 
     assert media.base_calls == 3
-    assert result.quality_status == "accepted"
+    assert result.evidence.evidence["motion_summary"]
 
 
-def test_inspection_retry_and_fallback_do_not_repeat_media_decode(
+def test_inspection_failure_after_retries_is_technical(
     tmp_path: Path,
 ) -> None:
     document, unit = _document_and_unit()
     media = FakeMediaBuilder()
-    result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(failures=2),
-        evidence_backend=FakeEvidenceBackend(),
-        media_builder=media,
-        config=HarnessConfig(
-            debug=True,
-            debug_root=tmp_path,
-            inspection_retries=1,
-        ),
-    ).run(document, unit)
+    with pytest.raises(AnnotationError, match="Call 1 failed after retries"):
+        EvidenceUnitPipeline(
+            inspection_backend=FakeInspectionBackend(failures=2),
+            evidence_backend=FakeEvidenceBackend(),
+            media_builder=media,
+            config=HarnessConfig(
+                debug=True,
+                debug_root=tmp_path,
+                inspection_retries=1,
+            ),
+        ).run(document, unit)
 
     assert media.base_calls == 1
-    assert result.detail_status == "inspection-failed-fallback"
-    assert result.inspection.provider == "harness-fallback"
-    assert result.quality_status == "quarantined"
-    assert result.retryable_failure is not None
-    assert result.evidence.evidence["causal_validation"]["status"] == "retry"
-    root = Path(result.debug_root or "")
-    assert (root / "call1-error.json").is_file()
-    assert (root / "sheets/cam_high-detail.png").is_file()
 
 
-def test_inspection_failure_can_be_recovered_from_full_temporal_evidence() -> None:
+def _compiled_repair_target() -> tuple[dict, dict]:
     document, unit = _document_and_unit()
-    resolved = _call2(
-        "pass",
-        action="The full temporal evidence resolves the demonstrated action.",
-    )
-    resolved["motion_summary"] = "Recovered task-conditioned motion evidence."
-    repair = FakeRepairBackend(
-        [
-            {
-                "evidence_sufficient": True,
-                "reason": "The temporal sheets recover the missing motion evidence.",
-                "resolved_call2": resolved,
-            }
-        ]
-    )
-    result = EvidenceUnitPipeline(
-        inspection_backend=FakeInspectionBackend(failures=2),
-        evidence_backend=FakeEvidenceBackend([_call2("pass")]),
-        repair_backend=repair,
-        media_builder=FakeMediaBuilder(),
-        config=HarnessConfig(inspection_retries=1),
-    ).run(document, unit)
+    unit["annotation"] = {
+        "status": "complete",
+        "record": compose_evidence_record(_call2()),
+    }
+    for order, boundary in enumerate(document["boundary_states"]):
+        boundary["annotation"] = {
+            "status": "complete",
+            "record": {
+                "observation": boundary_observation(f"Boundary {order}"),
+            },
+        }
+    return document, unit
 
-    assert result.quality_status == "accepted"
-    assert result.retryable_failure is None
-    assert result.repair_attempts == 1
-    assert result.evidence.evidence["motion_summary"] == (
-        "Recovered task-conditioned motion evidence."
+
+def test_targeted_repair_requires_declared_boundary_replacement() -> None:
+    document, unit = _compiled_repair_target()
+    pipeline = EvidenceUnitPipeline(
+        inspection_backend=FakeInspectionBackend(),
+        evidence_backend=FakeEvidenceBackend(),
+        repair_backend=FakeRepairBackend(
+            _call2(include_before_boundary=False, include_after_boundary=False)
+        ),
+        media_builder=FakeMediaBuilder(),
+        config=HarnessConfig(repair_max_attempts=1),
     )
+
+    outcome = pipeline.repair_target(
+        document,
+        unit,
+        issue_reason="Replace the final Boundary.",
+        allowed_boundary_replacements=frozenset({"after"}),
+        required_boundary_replacements=frozenset({"after"}),
+    )
+
+    assert outcome.canonical_evidence is None
+
+
+def test_targeted_repair_returns_only_authorized_boundary() -> None:
+    document, unit = _compiled_repair_target()
+    pipeline = EvidenceUnitPipeline(
+        inspection_backend=FakeInspectionBackend(),
+        evidence_backend=FakeEvidenceBackend(),
+        repair_backend=FakeRepairBackend(
+            _call2(include_before_boundary=False, include_after_boundary=True)
+        ),
+        media_builder=FakeMediaBuilder(),
+        config=HarnessConfig(repair_max_attempts=1),
+    )
+
+    outcome = pipeline.repair_target(
+        document,
+        unit,
+        issue_reason="Replace the final Boundary.",
+        allowed_boundary_replacements=frozenset({"after"}),
+        required_boundary_replacements=frozenset({"after"}),
+    )
+
+    assert outcome.canonical_evidence is not None
+    assert outcome.before_boundary_record is None
+    assert outcome.after_boundary_record is not None

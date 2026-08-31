@@ -261,10 +261,8 @@ repeatedly scan the directory.
 - Normal mode stores no generated images or videos.
 - Sheet composition uses Pillow; FFmpeg is used only for source decode and debug-video
   encoding.
-- Every Boundary must be accepted. A Document may pass its deterministic Unit gate when
-  at least 90% of its Units are accepted; non-accepted Unit labels remain in the file and
-  are skipped by the default Reader.
-- Sequence Audit remains an independent semantic gate.
+- Every Unit and Boundary must be technically complete. Sequence Audit is the sole
+  semantic gate, and only an accepted complete Document reaches the default Reader.
 - Shared multi-machine checkpoint storage must support atomic rename and POSIX advisory
   locks.
 - `VideoHarness.zip`, datasets, checkpoints, runs, `.venv`, and caches are release

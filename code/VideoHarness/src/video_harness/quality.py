@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from typing import Any
 
-from .evidence import boundary_state_is_usable, evidence_is_trainable
+from .evidence import validate_boundary_state_record, validate_evidence_record
 from .sampling import unit_boundary_states
 
 
@@ -36,23 +36,21 @@ def accepted_transition_chain(
     for unit in document["evidence_units"]:
         annotation = unit["annotation"]
         record = _plain_json(annotation["record"])
-        if annotation["status"] != "complete" or not evidence_is_trainable(record):
-            continue
+        if annotation["status"] != "complete":
+            raise ValueError(f"Evidence Unit {unit['unit_id']} is not complete")
+        record = validate_evidence_record(record)
         before, after = unit_boundary_states(document, unit)
-        boundary_records = tuple(
-            _plain_json(boundary["annotation"]["record"])
-            for boundary in (before, after)
-        )
         if any(
             boundary["annotation"]["status"] != "complete"
-            or not boundary_state_is_usable(boundary_record)
-            for boundary, boundary_record in zip(
-                (before, after),
-                boundary_records,
-                strict=True,
-            )
+            for boundary in (before, after)
         ):
             raise ValueError(
-                f"Evidence Unit {unit['unit_id']} references an unaccepted Boundary"
+                f"Evidence Unit {unit['unit_id']} references an incomplete Boundary"
             )
+        boundary_records = tuple(
+            validate_boundary_state_record(
+                _plain_json(boundary["annotation"]["record"])
+            )
+            for boundary in (before, after)
+        )
         yield unit, before, after, record, boundary_records[0], boundary_records[1]

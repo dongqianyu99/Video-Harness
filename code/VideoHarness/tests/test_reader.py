@@ -293,31 +293,6 @@ def test_plan_projects_shared_boundaries_and_current_semantics(
     assert "provenance" not in unit_fields
 
 
-def test_plan_preserves_gap_when_one_of_ten_units_is_rejected(
-    tmp_path: Path, changed_evidence
-) -> None:
-    document = _document(10, changed_evidence, length=251)
-    rejected = document["evidence_units"][1]["annotation"]["record"]
-    rejected["quality_status"] = "quarantined"
-    rejected["causal_validation"] = {
-        "status": "retry",
-        "reason": "The transition remains unresolved.",
-    }
-    set_document_quality(document, "accepted")
-    root = tmp_path / "documents"
-    _write_documents(root, [document])
-
-    catalog = load_guide_document_catalog(root)
-    plan = build_guide_plan(catalog, document_id=document["document_id"])
-
-    assert [unit.order for unit in plan.units] == [0, 2, 3, 4, 5, 6, 7, 8, 9]
-    assert [(unit.before_slot, unit.after_slot) for unit in plan.units[:2]] == [
-        (0, 1),
-        (2, 3),
-    ]
-    assert [boundary.order for boundary in plan.boundaries[:4]] == [0, 1, 2, 3]
-
-
 def test_plan_rejects_unknown_or_excluded_document(
     tmp_path: Path, changed_evidence
 ) -> None:

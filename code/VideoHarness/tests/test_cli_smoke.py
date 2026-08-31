@@ -105,8 +105,8 @@ def test_mock_cli_runs_full_multiview_media_pipeline_without_debug(
     annotation = annotated["evidence_units"][0]["annotation"]
     assert annotation["schema_version"] == EVIDENCE_SCHEMA_VERSION
     assert annotation["status"] == "mock"
-    assert annotation["record"]["quality_status"] == "quarantined"
-    assert annotation["record"]["causal_validation"]["status"] == "retry"
+    assert "quality_status" not in annotation["record"]
+    assert "causal_validation" not in annotation["record"]
     assert "gripper_state" not in annotation["record"]
     assert set(annotation["provenance"]) == {"call1", "call2", "repair"}
     assert set(annotation["provenance"]["call2"]) == {
@@ -119,7 +119,7 @@ def test_mock_cli_runs_full_multiview_media_pipeline_without_debug(
         boundary_annotation = boundary["annotation"]
         assert boundary_annotation["schema_version"] == BOUNDARY_STATE_SCHEMA_VERSION
         assert boundary_annotation["status"] == "mock"
-        assert boundary_annotation["record"]["quality_status"] == "quarantined"
+        assert "quality_status" not in boundary_annotation["record"]
     assert (
         annotated["evidence_units"][0]["after_boundary_id"]
         == annotated["boundary_states"][1]["boundary_id"]

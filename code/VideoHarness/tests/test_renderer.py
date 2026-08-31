@@ -76,7 +76,6 @@ def test_transition_renderer_is_complete_and_does_not_mutate_evidence(
     assert "Action:" in output
     assert "Task role:" in output
     assert "Causal validation" not in output
-    assert changed_evidence["causal_validation"]["reason"] not in output
     assert changed_evidence == original
 
 

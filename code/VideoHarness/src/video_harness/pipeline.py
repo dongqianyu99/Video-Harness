@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import copy
 import json
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from .annotations import (
@@ -21,10 +20,8 @@ from .annotations import (
 from .config import HarnessConfig
 from .debug_artifacts import DebugArtifactStore
 from .evidence import (
-    boundary_state_is_usable,
     compose_boundary_state_record,
     compose_evidence_record,
-    mock_inspection_record,
 )
 from .media import FrameDecodeError
 from .run_tracking import ApiCallBudgetExceeded
@@ -41,16 +38,10 @@ from .temporal_media import (
 @dataclass(frozen=True)
 class EvidenceUnitPipelineResult:
     evidence: EvidenceResult
-    initial_evidence: EvidenceResult
     before_boundary_record: dict[str, Any] | None
     after_boundary_record: dict[str, Any] | None
-    conflicted_boundary_roles: tuple[str, ...]
     inspection: InspectionResult
     detail_status: str
-    repair_attempts: int
-    repair: RepairResult | None
-    quality_status: str
-    retryable_failure: str | None
     debug_root: str | None
 
 
@@ -117,7 +108,7 @@ class EvidenceUnitPipeline:
         document: dict[str, Any],
         unit: dict[str, Any],
         base: BaseMedia,
-    ) -> tuple[InspectionResult, DetailRequest, str, str | None]:
+    ) -> tuple[InspectionResult, DetailRequest, str]:
         previous_motion_summary = self._previous_motion_summary(document, unit)
         request = InspectionRequest(
             document_id=document["document_id"],
@@ -129,13 +120,7 @@ class EvidenceUnitPipeline:
             gripper_state=base.gripper_state,
             previous_motion_summary=previous_motion_summary,
         )
-        last_result: InspectionResult | None = None
         last_error: Exception | None = None
-        fallback_detail = DetailRequest(
-            (0.0, 0.0, 1.0, 1.0),
-            0,
-            base.unit_frames.frame_count - 1,
-        )
         for attempt in range(self.config.inspection_retries + 1):
             try:
                 result = self.inspection_backend.inspect(request)
@@ -146,7 +131,6 @@ class EvidenceUnitPipeline:
                 if attempt < self.config.inspection_retries:
                     continue
                 break
-            last_result = result
             try:
                 detail = validate_detail_request(
                     result.inspection,
@@ -156,21 +140,9 @@ class EvidenceUnitPipeline:
                 last_error = exc
                 if attempt < self.config.inspection_retries:
                     continue
-                return result, fallback_detail, "invalid-request-fallback", str(exc)
-            return result, detail, "requested", None
-        if last_result is not None:
-            return (
-                last_result,
-                fallback_detail,
-                "inspection-failed-fallback",
-                str(last_error),
-            )
-        fallback = InspectionResult(
-            inspection=mock_inspection_record(),
-            provider="harness-fallback",
-            requested_model=self.inspection_backend.model,
-        )
-        return fallback, fallback_detail, "inspection-failed-fallback", str(last_error)
+                break
+            return result, detail, "requested"
+        raise AnnotationError(f"Call 1 failed after retries: {last_error}")
 
     @staticmethod
     def _previous_motion_summary(
@@ -193,12 +165,8 @@ class EvidenceUnitPipeline:
         annotation = previous.get("annotation")
         if not isinstance(annotation, dict) or annotation.get("status") != "complete":
             return None
-        provenance = annotation.get("provenance")
-        call1 = provenance.get("call1") if isinstance(provenance, dict) else None
-        if not isinstance(call1, dict) or call1.get("provider") == "harness-fallback":
-            return None
         record = annotation.get("record")
-        if not isinstance(record, dict) or record.get("quality_status") != "accepted":
+        if not isinstance(record, dict):
             return None
         summary = record.get("motion_summary")
         return summary.strip() if isinstance(summary, str) and summary.strip() else None
@@ -227,16 +195,12 @@ class EvidenceUnitPipeline:
     @staticmethod
     def _boundary_observation(
         boundary: Any,
-        *,
-        accepted_only: bool = True,
     ) -> dict[str, str] | None:
         annotation = boundary.get("annotation")
         if not isinstance(annotation, dict) or annotation.get("status") != "complete":
             return None
         record = annotation.get("record")
         if not isinstance(record, dict):
-            return None
-        if accepted_only and not boundary_state_is_usable(record):
             return None
         observation = record["observation"]
         return dict(observation)
@@ -317,12 +281,6 @@ class EvidenceUnitPipeline:
         }
         if not required_boundary_replacements <= replacements:
             raise AnnotationError("repair omitted a required Boundary replacement")
-        if any(value is not None for value in call2["boundary_conflicts"].values()):
-            raise AnnotationError(
-                "successful repair must resolve all Boundary conflicts"
-            )
-        if call2["causal_validation"]["status"] != "pass":
-            raise AnnotationError("successful repair must return causal status=pass")
 
     @staticmethod
     def _validate_normal_call2(
@@ -340,22 +298,12 @@ class EvidenceUnitPipeline:
             before_context is None
         ):
             raise AnnotationError(
-                "Call 2 must describe BEFORE exactly when no accepted Boundary exists"
+                "Call 2 must describe BEFORE exactly when no Boundary exists"
             )
         if (call2["after_boundary_observation"] is not None) != (after_context is None):
             raise AnnotationError(
-                "Call 2 must describe AFTER exactly when no accepted Boundary exists"
+                "Call 2 must describe AFTER exactly when no Boundary exists"
             )
-        conflicts = call2["boundary_conflicts"]
-        if (before_context is None and conflicts["before"] is not None) or (
-            after_context is None and conflicts["after"] is not None
-        ):
-            raise AnnotationError("Call 2 cannot conflict with a missing Boundary")
-        if (
-            any(value is not None for value in conflicts.values())
-            and call2["causal_validation"]["status"] != "retry"
-        ):
-            raise AnnotationError("Boundary conflicts must request automatic repair")
 
     def _run_repair(
         self,
@@ -375,14 +323,8 @@ class EvidenceUnitPipeline:
         if self.repair_backend is None:
             return RepairOutcome(None, None, None, 0, None)
         before_boundary, after_boundary = unit_boundary_states(document, unit)
-        before_context = self._boundary_observation(
-            before_boundary,
-            accepted_only=False,
-        )
-        after_context = self._boundary_observation(
-            after_boundary,
-            accepted_only=False,
-        )
+        before_context = self._boundary_observation(before_boundary)
+        after_context = self._boundary_observation(after_boundary)
         max_attempts = attempts or self.config.repair_max_attempts
         last_result: RepairResult | None = None
         last_error: str | None = None
@@ -450,16 +392,14 @@ class EvidenceUnitPipeline:
                 None
                 if resolved_call2["before_boundary_observation"] is None
                 else compose_boundary_state_record(
-                    resolved_call2["before_boundary_observation"],
-                    quality_status="accepted",
+                    resolved_call2["before_boundary_observation"]
                 )
             )
             after_record = (
                 None
                 if resolved_call2["after_boundary_observation"] is None
                 else compose_boundary_state_record(
-                    resolved_call2["after_boundary_observation"],
-                    quality_status="accepted",
+                    resolved_call2["after_boundary_observation"]
                 )
             )
             return RepairOutcome(
@@ -485,11 +425,7 @@ class EvidenceUnitPipeline:
     ) -> EvidenceUnitPipelineResult:
         store = self._store(document, unit)
         base = self._retry_media(lambda: self.media_builder.build_base(document, unit))
-        inspection, detail_request, detail_status, inspection_error = self._inspect(
-            document,
-            unit,
-            base,
-        )
+        inspection, detail_request, detail_status = self._inspect(document, unit, base)
         detail = self._retry_media(
             lambda: self.media_builder.build_detail(base, detail_request)
         )
@@ -498,11 +434,6 @@ class EvidenceUnitPipeline:
                 self._retry_media(lambda: self.media_builder.debug_media(base, detail))
             )
             store.write_json("call1.json", asdict(inspection))
-            if inspection_error is not None:
-                store.write_json(
-                    "call1-error.json",
-                    {"message": inspection_error, "detail_status": detail_status},
-                )
 
         before_boundary, after_boundary = unit_boundary_states(document, unit)
         before_boundary_observation = self._boundary_observation(before_boundary)
@@ -551,122 +482,36 @@ class EvidenceUnitPipeline:
         if store.enabled:
             store.write_json("call2.json", asdict(last_result))
 
-        initial_evidence = last_result
-        repair_outcome = RepairOutcome(None, None, None, 0, None)
-        inspection_failed = inspection.provider == "harness-fallback"
-        if (
-            last_result.evidence["causal_validation"]["status"] == "retry"
-            or inspection_failed
-        ):
-            conflict_reasons = [
-                reason
-                for reason in last_result.evidence["boundary_conflicts"].values()
-                if reason is not None
-            ]
-            issue_reason = " ".join(
-                [
-                    (
-                        "Call 1 failed after its retry budget; recover the motion "
-                        f"from full temporal evidence. Last error: {inspection_error}"
-                        if inspection_failed
-                        else ""
-                    ),
-                    last_result.evidence["causal_validation"]["reason"],
-                    *conflict_reasons,
-                ]
-            ).strip()
-            conflicted_roles = frozenset(
-                role
-                for role, reason in last_result.evidence["boundary_conflicts"].items()
-                if reason is not None
+        canonical = compose_evidence_record(last_result.evidence)
+        before_boundary_record = (
+            None
+            if last_result.evidence["before_boundary_observation"] is None
+            else compose_boundary_state_record(
+                last_result.evidence["before_boundary_observation"]
             )
-            repair_outcome = self._run_repair(
-                document=document,
-                unit=unit,
-                base=base,
-                detail=detail,
-                motion_summary=inspection.inspection["motion_summary"],
-                call2=last_result.evidence,
-                issue_reason=issue_reason,
-                store=store,
-                allowed_boundary_replacements=conflicted_roles,
-                required_boundary_replacements=conflicted_roles,
-            )
-            if repair_outcome.evidence is not None:
-                last_result = repair_outcome.evidence
-
-        if (
-            inspection_failed
-            and repair_outcome.evidence is None
-            and last_result.evidence["causal_validation"]["status"] == "pass"
-        ):
-            quarantined_call2 = copy.deepcopy(last_result.evidence)
-            quarantined_call2["causal_validation"] = {
-                "status": "retry",
-                "reason": (
-                    "Call 1 did not produce usable task-blind motion evidence and "
-                    "automatic temporal repair did not resolve it."
-                ),
-            }
-            last_result = replace(last_result, evidence=quarantined_call2)
-
-        causal_status = last_result.evidence["causal_validation"]["status"]
-        quality_status = "accepted" if causal_status == "pass" else "quarantined"
-        retryable_reasons = []
-        if inspection_failed and repair_outcome.evidence is None:
-            retryable_reasons.append(f"Call 1 failed after retries: {inspection_error}")
-        if repair_outcome.evidence is None and repair_outcome.error is not None:
-            retryable_reasons.append(f"Repair provider failed: {repair_outcome.error}")
-        retryable_failure = " ".join(retryable_reasons) or None
-        boundary_quality_status = (
-            "quarantined" if last_result.provider == "mock" else "accepted"
         )
-        canonical = compose_evidence_record(
-            last_result.evidence,
-            quality_status=quality_status,
-        )
-        before_boundary_record = repair_outcome.before_boundary_record
-        if repair_outcome.evidence is None:
-            before_boundary_record = (
-                None
-                if last_result.evidence["before_boundary_observation"] is None
-                else compose_boundary_state_record(
-                    last_result.evidence["before_boundary_observation"],
-                    quality_status=boundary_quality_status,
-                )
+        after_boundary_record = (
+            None
+            if last_result.evidence["after_boundary_observation"] is None
+            else compose_boundary_state_record(
+                last_result.evidence["after_boundary_observation"]
             )
-        after_boundary_record = repair_outcome.after_boundary_record
-        if repair_outcome.evidence is None:
-            after_boundary_record = (
-                None
-                if last_result.evidence["after_boundary_observation"] is None
-                else compose_boundary_state_record(
-                    last_result.evidence["after_boundary_observation"],
-                    quality_status=boundary_quality_status,
-                )
-            )
-        conflicted_boundary_roles = tuple(
-            role
-            for role, reason in last_result.evidence["boundary_conflicts"].items()
-            if reason is not None
         )
-        evidence = replace(last_result, evidence=canonical)
+        evidence = EvidenceResult(
+            evidence=canonical,
+            provider=last_result.provider,
+            requested_model=last_result.requested_model,
+            prompt_version=last_result.prompt_version,
+            trace=last_result.trace,
+        )
 
         if store.enabled:
             store.write_json(
                 "final.json",
                 {
-                    "quality_status": quality_status,
                     "evidence": canonical,
                     "before_boundary_record": before_boundary_record,
                     "after_boundary_record": after_boundary_record,
-                    "conflicted_boundary_roles": conflicted_boundary_roles,
-                    "repair_attempts": repair_outcome.attempts,
-                    "repair": (
-                        None
-                        if repair_outcome.result is None
-                        else asdict(repair_outcome.result)
-                    ),
                 },
             )
             debug_root = store.finalize(
@@ -677,8 +522,6 @@ class EvidenceUnitPipeline:
                     "episode_end_frame": base.unit_frames.episode_end_frame,
                     "preprocessing_version": self.config.preprocessing_version,
                     "detail_status": detail_status,
-                    "quality_status": quality_status,
-                    "repair_attempts": repair_outcome.attempts,
                     "status": "complete",
                     "config": self.config.manifest(),
                 }
@@ -688,20 +531,14 @@ class EvidenceUnitPipeline:
 
         return EvidenceUnitPipelineResult(
             evidence=evidence,
-            initial_evidence=initial_evidence,
             before_boundary_record=before_boundary_record,
             after_boundary_record=after_boundary_record,
-            conflicted_boundary_roles=conflicted_boundary_roles,
             inspection=inspection,
             detail_status=detail_status,
-            repair_attempts=repair_outcome.attempts,
-            repair=repair_outcome.result,
-            quality_status=quality_status,
-            retryable_failure=retryable_failure,
             debug_root=None if debug_root is None else str(debug_root),
         )
 
-    def repair_existing(
+    def repair_target(
         self,
         document: dict[str, Any],
         unit: dict[str, Any],
@@ -715,7 +552,7 @@ class EvidenceUnitPipeline:
         record = annotation.get("record") if isinstance(annotation, dict) else None
         if not isinstance(record, dict):
             return ExistingRepairOutcome(None, None, None, 0, None)
-        base = self.media_builder.build_base(document, unit)
+        base = self._retry_media(lambda: self.media_builder.build_base(document, unit))
         motion_summary = record.get("motion_summary")
         if not isinstance(motion_summary, str) or not motion_summary.strip():
             return ExistingRepairOutcome(None, None, None, 0, None)
@@ -723,14 +560,18 @@ class EvidenceUnitPipeline:
             "motion_summary": record["motion_summary"],
             "before_boundary_observation": None,
             "after_boundary_observation": None,
-            "boundary_conflicts": {"before": None, "after": None},
             "detail_observation": record["detail_observation"],
             "unit_interpretation": record["unit_interpretation"],
-            "causal_validation": record["causal_validation"],
         }
-        detail = self.media_builder.build_detail(
-            base,
-            DetailRequest((0.0, 0.0, 1.0, 1.0), 0, base.unit_frames.frame_count - 1),
+        detail = self._retry_media(
+            lambda: self.media_builder.build_detail(
+                base,
+                DetailRequest(
+                    (0.0, 0.0, 1.0, 1.0),
+                    0,
+                    base.unit_frames.frame_count - 1,
+                ),
+            )
         )
         repair = self._run_repair(
             document=document,
@@ -753,10 +594,7 @@ class EvidenceUnitPipeline:
                 repair.result,
                 repair.error,
             )
-        canonical = compose_evidence_record(
-            repair.evidence.evidence,
-            quality_status="accepted",
-        )
+        canonical = compose_evidence_record(repair.evidence.evidence)
         return ExistingRepairOutcome(
             canonical,
             repair.before_boundary_record,

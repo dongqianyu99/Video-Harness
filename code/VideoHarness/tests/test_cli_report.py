@@ -66,8 +66,9 @@ def test_report_counts_trainable_structured_evidence(
     assert _report(SimpleNamespace(documents=path)) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["trainable_units_default"] == 1
-    assert report["quality_status"] == {"accepted": 1}
-    assert report["causal_validation"] == {"pass": 1}
+    assert report["document_quality_status"] == {"accepted": 1}
+    assert "quality_status" not in report
+    assert "causal_validation" not in report
     assert report["detail_observation"] == {"present": 1}
 
 

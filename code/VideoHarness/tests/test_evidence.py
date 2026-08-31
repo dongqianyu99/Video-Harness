@@ -6,7 +6,6 @@ from video_harness.evidence import (
     EVIDENCE_SCHEMA_VERSION,
     EvidenceValidationError,
     compose_evidence_record,
-    evidence_is_trainable,
     mock_call2_record,
     mock_evidence_record,
     mock_inspection_record,
@@ -29,15 +28,10 @@ def test_call2_record_requires_three_descriptions_per_boundary(call2_record) -> 
 
 
 def test_canonical_evidence_uses_call2_motion_summary(call2_record) -> None:
-    evidence = compose_evidence_record(
-        call2_record,
-        quality_status="accepted",
-    )
-    assert EVIDENCE_SCHEMA_VERSION == "video-harness.evidence.v5"
+    evidence = compose_evidence_record(call2_record)
+    assert EVIDENCE_SCHEMA_VERSION == "video-harness.evidence.v6"
     assert evidence["motion_summary"] == call2_record["motion_summary"]
-    assert evidence["quality_status"] == "accepted"
     assert validate_evidence_record(copy.deepcopy(evidence)) == evidence
-    assert evidence_is_trainable(evidence)
 
 
 def test_shared_boundary_is_represented_once_in_adjacent_units() -> None:
@@ -71,18 +65,13 @@ def test_shared_boundary_is_represented_once_in_adjacent_units() -> None:
         assert left["after_boundary_id"] == right["before_boundary_id"]
 
 
-def test_quality_status_must_match_causal_validation(call2_record) -> None:
-    with pytest.raises(EvidenceValidationError, match="accepted exactly"):
-        compose_evidence_record(
-            call2_record,
-            quality_status="quarantined",
-        )
-    call2_record["causal_validation"]["status"] = "retry"
-    evidence = compose_evidence_record(
-        call2_record,
-        quality_status="quarantined",
-    )
-    assert not evidence_is_trainable(evidence)
+@pytest.mark.parametrize("removed_field", ["causal_validation", "boundary_conflicts"])
+def test_call2_rejects_removed_local_quality_fields(
+    call2_record, removed_field: str
+) -> None:
+    call2_record[removed_field] = {}
+    with pytest.raises(EvidenceValidationError, match="must have exactly"):
+        validate_call2_record(call2_record)
 
 
 def test_inspection_sentence_contract_is_prompt_guidance_not_parser_logic() -> None:
@@ -132,9 +121,7 @@ def test_inspection_rejects_reversed_window() -> None:
         validate_inspection_record(record)
 
 
-def test_mock_records_are_valid_but_not_trainable() -> None:
+def test_mock_records_remain_structurally_valid() -> None:
     assert validate_call2_record(mock_call2_record()) == mock_call2_record()
     evidence = mock_evidence_record()
     assert validate_evidence_record(copy.deepcopy(evidence)) == evidence
-    assert evidence["quality_status"] == "quarantined"
-    assert not evidence_is_trainable(evidence)

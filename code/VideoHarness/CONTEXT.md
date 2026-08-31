@@ -37,11 +37,11 @@ A single concise, task-blind draft sentence describing the visible motion, inter
 _Avoid_: canonical conclusion, action plan, task progress
 
 **Canonical Motion Summary**:
-A single concise sentence returned by Call 2 after revising the Call 1 draft with the task context, high-resolution Boundary States, accepted Boundary descriptions, and optional detail evidence. This is the Motion Summary stored in Canonical Evidence.
+A single concise sentence returned by Call 2 after revising the Call 1 draft with the task context, high-resolution Boundary States, existing Boundary descriptions, and detail evidence. This is the Motion Summary stored in Canonical Evidence.
 _Avoid_: raw Call 1 output, Task Role
 
 **Action Description**:
-A single task-conditioned sentence stating what the robot physically does during one Evidence Unit, grounded in the Canonical Motion Summary, Boundary States, and optional detail evidence.
+A single task-conditioned sentence stating what the robot physically does during one Evidence Unit, grounded in the Canonical Motion Summary, Boundary States, and detail evidence.
 _Avoid_: plan, intent, Task Role
 
 **Task Role**:
@@ -53,16 +53,24 @@ A key physical predicate in a Motion Summary or Action Description that must map
 _Avoid_: plausible but unsupported substep, task-prior completion
 
 **Canonical Evidence**:
-The validated evidence record committed to an Evidence Unit, distinct from provider attempts and debug artifacts.
+The structurally validated evidence record committed to an Evidence Unit, distinct from provider attempts, semantic judgments, and debug artifacts.
 _Avoid_: raw response, debug output
 
-**Targeted Reprocessing**:
-An automatic evidence-directed recompilation invoked when the normal interpretation is inconsistent or insufficient. It is bounded and does not wait for human intervention.
-_Avoid_: manual review, blind retry
+**Evidence Compilation**:
+The task of producing canonical Boundary and Evidence Unit records without deciding whether the complete Behavior Document is semantically acceptable.
+_Avoid_: quality audit, repair
+
+**Targeted Repair**:
+The sole automatic mutation path for canonical evidence after Sequence Audit identifies an issue. Issues sharing one owner Evidence Unit are repaired together within a bounded budget.
+_Avoid_: Targeted Reprocessing, local causal retry, manual review
 
 **Sequence Audit**:
-An automatic document-level check that every Boundary State change is explained by its neighboring Evidence Unit and that persistent interactions remain temporally coherent.
+The sole semantic document-level check that Boundary changes, persistent entities, transition descriptions, and Task Roles remain coherent.
 _Avoid_: human review, task planning
+
+**Document Gate**:
+The all-or-nothing training eligibility decision applied after successful Sequence Audit and bounded Targeted Repair.
+_Avoid_: Unit quality threshold, partial Guide
 
 **Quarantined Document**:
 A complete compiler output whose remaining evidence conflict could not be resolved within the automatic processing budget. It is retained for measurement but excluded from every default Reader and training path.

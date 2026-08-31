@@ -19,6 +19,8 @@ Start here:
   execution, failure recovery, and output contracts.
 - [Evidence Protocol](evidence-prompt.md): the two-call VLM evidence contract, camera
   authority, and automatic repair behavior.
+- [Architecture Decision](adr/0001-unify-document-audit-and-repair.md): why semantic
+  review and mutation are centralized at the Document level.
 
 The canonical Pi0.5 interface is the task-grouped per-episode Document directory. The
 aggregate JSONL produced by annotation is retained only for merge and reporting

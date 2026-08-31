@@ -8,6 +8,7 @@ from video_harness.evidence import (
 )
 from video_harness.robodojo import EpisodeRecord, VideoSlice
 from video_harness.sampling import (
+    BEHAVIOR_DOCUMENT_SCHEMA_VERSION,
     boundary_frames,
     media_timestamp,
     plan_document,
@@ -52,6 +53,7 @@ def test_boundary_frames_include_first_and_last_without_duplicates() -> None:
 
 def test_document_interleaves_shared_boundaries() -> None:
     document = plan_document(_record(), build_id="test-build")
+    assert BEHAVIOR_DOCUMENT_SCHEMA_VERSION == "video-harness.behavior-document.v2"
     units = document["evidence_units"]
     boundaries = document["boundary_states"]
     assert units[0]["after_boundary_id"] == units[1]["before_boundary_id"]
@@ -69,6 +71,20 @@ def test_document_interleaves_shared_boundaries() -> None:
     assert document["source"]["episode_length"] == 579
     assert "before" not in units[0] and "after" not in units[0]
     assert media_timestamp(document, 25) == 24.16
+
+
+def test_legacy_document_and_boundary_schemas_are_rejected() -> None:
+    document = plan_document(_record(length=51), build_id="test-build")
+    document["schema_version"] = "video-harness.behavior-document"
+    with pytest.raises(ValueError, match="unexpected behavior document schema"):
+        validate_document(document)
+
+    document = plan_document(_record(length=51), build_id="test-build")
+    document["boundary_states"][0]["annotation"]["schema_version"] = (
+        "video-harness.boundary-state"
+    )
+    with pytest.raises(ValueError, match="unexpected schema"):
+        validate_document(document)
 
 
 def test_document_rejects_missing_or_dangling_boundary_state() -> None:

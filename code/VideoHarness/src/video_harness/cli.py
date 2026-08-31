@@ -20,8 +20,6 @@ from .config import HarnessConfig
 from .evidence import (
     BOUNDARY_STATE_SCHEMA_VERSION,
     EVIDENCE_SCHEMA_VERSION,
-    boundary_state_is_usable,
-    evidence_is_trainable,
     validate_boundary_state_record,
     validate_evidence_record,
 )
@@ -33,7 +31,7 @@ from .hdf5_source import (
 )
 from .media import FFmpegFrameLoader
 from .pipeline import EvidenceUnitPipeline
-from .reconciliation import reconcile_document, sequence_projection_sha256
+from .reconciliation import reconcile_document
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
 from .run_tracking import (
     ApiCallBudgetExceeded,
@@ -95,30 +93,6 @@ def _write_json(path: Path, value: Any) -> None:
         path,
         json.dumps(value, indent=2, ensure_ascii=False) + "\n",
     )
-
-
-def _migrate_legacy_gripper_evidence(document: dict[str, Any]) -> dict[str, Any]:
-    """Read the short-lived evidence.v4 format without preserving sensor values."""
-    migrated = copy.deepcopy(document)
-    changed = False
-    for unit in migrated.get("evidence_units", []):
-        annotation = unit.get("annotation")
-        if (
-            not isinstance(annotation, dict)
-            or annotation.get("schema_version") != "video-harness.evidence.v4"
-        ):
-            continue
-        record = annotation.get("record")
-        if isinstance(record, dict):
-            record = dict(record)
-            record.pop("gripper_state", None)
-            annotation["record"] = record
-        annotation["schema_version"] = EVIDENCE_SCHEMA_VERSION
-        changed = True
-    if changed:
-        migrated["quality_status"] = "pending"
-        migrated["quality_provenance"] = None
-    return migrated
 
 
 def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
@@ -563,13 +537,12 @@ def _annotate_document(
         annotation["status"] = output_status
         annotation["record"] = result.evidence.evidence
         call2_model = (
-            result.initial_evidence.trace.response_model
-            or result.initial_evidence.requested_model
+            result.evidence.trace.response_model or result.evidence.requested_model
         )
         call2_provenance = {
-            "provider": result.initial_evidence.provider,
+            "provider": result.evidence.provider,
             "model": call2_model,
-            "prompt_version": result.initial_evidence.prompt_version,
+            "prompt_version": result.evidence.prompt_version,
         }
         annotation["provenance"] = {
             "call1": {
@@ -581,31 +554,9 @@ def _annotate_document(
                 "prompt_version": result.inspection.prompt_version,
             },
             "call2": call2_provenance,
-            "repair": (
-                None
-                if result.repair is None
-                else {
-                    "provider": result.repair.provider,
-                    "model": (
-                        result.repair.trace.response_model
-                        or result.repair.requested_model
-                    ),
-                    "prompt_version": result.repair.prompt_version,
-                    "attempts": result.repair_attempts,
-                    "reason": result.repair.repair["reason"],
-                }
-            ),
+            "repair": None,
         }
         before_boundary, after_boundary = unit_boundary_states(document, unit)
-        boundary_provenance_base = call2_provenance
-        if result.repair is not None and result.repair.repair["evidence_sufficient"]:
-            boundary_provenance_base = {
-                "provider": result.repair.provider,
-                "model": (
-                    result.repair.trace.response_model or result.repair.requested_model
-                ),
-                "prompt_version": result.repair.prompt_version,
-            }
         for boundary, role, record in (
             (before_boundary, "before", result.before_boundary_record),
             (after_boundary, "after", result.after_boundary_record),
@@ -617,24 +568,11 @@ def _annotate_document(
                 "status": output_status,
                 "record": record,
                 "provenance": {
-                    **boundary_provenance_base,
+                    **call2_provenance,
                     "source_unit_id": unit["unit_id"],
                     "boundary_role": role,
                 },
             }
-        boundary_by_role = {"before": before_boundary, "after": after_boundary}
-        for role in result.conflicted_boundary_roles:
-            boundary_record = boundary_by_role[role]["annotation"].get("record")
-            if isinstance(boundary_record, dict):
-                boundary_record["quality_status"] = "quarantined"
-        if result.retryable_failure is not None:
-            failures.append(
-                {
-                    "document_id": document["document_id"],
-                    "unit_id": unit["unit_id"],
-                    "error": result.retryable_failure,
-                }
-            )
         document_annotations += 1
         annotated_units += 1
 
@@ -661,14 +599,6 @@ def _annotate_document(
             config=config,
         )
         document = reconciliation.document
-        if reconciliation.audit is None:
-            failures.append(
-                {
-                    "document_id": document["document_id"],
-                    "unit_id": "<document>",
-                    "error": "Sequence audit provider failed after retries.",
-                }
-            )
         failures.extend(
             {
                 "document_id": document["document_id"],
@@ -677,28 +607,6 @@ def _annotate_document(
             }
             for failure in reconciliation.technical_failures
         )
-    elif any(
-        unit["annotation"]["status"] == "failed" for unit in document["evidence_units"]
-    ):
-        failed_issue_list = [
-            {
-                "target_type": "unit",
-                "target_id": unit["unit_id"],
-                "reason": "Evidence Unit provider or schema processing failed.",
-            }
-            for unit in document["evidence_units"]
-            if unit["annotation"]["status"] == "failed"
-        ]
-        document["quality_status"] = "quarantined"
-        document["quality_provenance"] = {
-            "provider": context.repair_backend.provider,
-            "model": context.repair_backend.model,
-            "prompt_version": "video-harness.sequence-audit.v5",
-            "audit_attempts": 0,
-            "repair_rounds": 0,
-            "sequence_sha256": sequence_projection_sha256(document),
-            "issues": failed_issue_list,
-        }
     validate_document(document)
     return DocumentAnnotationResult(
         document=document,
@@ -726,10 +634,7 @@ def _annotate(args: argparse.Namespace) -> int:
     if unit_ids and args.limit_units_per_document is not None:
         raise ValueError("--unit-id cannot be combined with --limit-units-per-document")
 
-    documents = [
-        _migrate_legacy_gripper_evidence(document)
-        for document in _read_jsonl(args.documents)
-    ]
+    documents = _read_jsonl(args.documents)
     for document in documents:
         validate_document(document)
         available = {unit["unit_id"] for unit in document["evidence_units"]}
@@ -1064,11 +969,11 @@ def _report(args: argparse.Namespace) -> int:
     documents = _read_jsonl(args.documents)
     document_quality_status: Counter[str] = Counter()
     boundary_annotation_status: Counter[str] = Counter()
-    boundary_quality_status: Counter[str] = Counter()
     annotation_status: Counter[str] = Counter()
-    quality_status: Counter[str] = Counter()
-    causal_validation: Counter[str] = Counter()
     detail_observation: Counter[str] = Counter()
+    repaired_units = 0
+    audit_attempts = 0
+    repair_rounds = 0
     trainable_units = 0
     trainable_documents = 0
     invalid: list[dict[str, str]] = []
@@ -1090,6 +995,10 @@ def _report(args: argparse.Namespace) -> int:
             )
             continue
         document_quality_status[document["quality_status"]] += 1
+        provenance = document.get("quality_provenance")
+        if isinstance(provenance, dict):
+            audit_attempts += int(provenance["audit_attempts"])
+            repair_rounds += int(provenance["repair_rounds"])
         if document["quality_status"] == "accepted":
             trainable_documents += 1
         for boundary in document["boundary_states"]:
@@ -1098,8 +1007,7 @@ def _report(args: argparse.Namespace) -> int:
             status = str(annotation["status"])
             boundary_annotation_status[status] += 1
             if status in {"complete", "mock"}:
-                boundary = validate_boundary_state_record(annotation["record"])
-                boundary_quality_status[boundary["quality_status"]] += 1
+                validate_boundary_state_record(annotation["record"])
         for unit in document.get("evidence_units", []):
             total_units += 1
             annotation = unit.get("annotation")
@@ -1140,6 +1048,8 @@ def _report(args: argparse.Namespace) -> int:
                     provenance = annotation.get("provenance")
                     if not isinstance(provenance, dict):
                         raise ValueError("complete/mock evidence requires provenance")
+                    if provenance.get("repair") is not None:
+                        repaired_units += 1
                 elif status not in {"pending", "failed"}:
                     raise ValueError(f"unsupported annotation status {status!r}")
             except (TypeError, ValueError) as exc:
@@ -1152,20 +1062,16 @@ def _report(args: argparse.Namespace) -> int:
                 )
                 continue
 
-            quality_status[evidence["quality_status"]] += 1
-            causal_validation[evidence["causal_validation"]["status"]] += 1
             detail_observation[
-                "present" if evidence["detail_observation"] is not None else "absent"
+                "present" if evidence["detail_observation"] else "absent"
             ] += 1
             boundaries = unit_boundary_states(document, unit)
             usable_boundaries = all(
                 boundary["annotation"]["status"] == "complete"
-                and boundary_state_is_usable(boundary["annotation"]["record"])
                 for boundary in boundaries
             )
             if (
                 status == "complete"
-                and evidence_is_trainable(evidence)
                 and usable_boundaries
                 and document["quality_status"] == "accepted"
             ):
@@ -1177,12 +1083,12 @@ def _report(args: argparse.Namespace) -> int:
         "trainable_documents_default": trainable_documents,
         "boundary_states": total_boundaries,
         "boundary_annotation_status": dict(sorted(boundary_annotation_status.items())),
-        "boundary_quality_status": dict(sorted(boundary_quality_status.items())),
         "units": total_units,
         "annotation_status": dict(sorted(annotation_status.items())),
-        "quality_status": dict(sorted(quality_status.items())),
-        "causal_validation": dict(sorted(causal_validation.items())),
         "detail_observation": dict(sorted(detail_observation.items())),
+        "audit_attempts": audit_attempts,
+        "repair_rounds": repair_rounds,
+        "repaired_units": repaired_units,
         "trainable_units_default": trainable_units,
         "invalid_units": len(invalid),
         "invalid_examples": invalid[:20],

@@ -87,7 +87,8 @@ def test_mock_backends_are_explicit_and_schema_valid() -> None:
     evidence = MockEvidenceBackend().annotate(_evidence_request())
     assert inspection.inspection["detail_request"] is not None
     assert "active_end_effector" not in inspection.inspection
-    assert evidence.evidence["causal_validation"]["status"] == "retry"
+    assert "causal_validation" not in evidence.evidence
+    assert "boundary_conflicts" not in evidence.evidence
     assert evidence.prompt_version == PROMPT_VERSION
 
 
@@ -95,7 +96,6 @@ def test_prompt_and_schema_define_progressive_calls() -> None:
     normalized = " ".join(SYSTEM_PROMPT.split()).lower()
     assert "task-blind motion_summary from call 1" in normalized
     assert "describe each boundary state once" in normalized
-    assert "status=retry only for a clear unresolved violation" in normalized
     assert "exactly one concise sentence per camera view" in normalized
     assert "return motion_summary as exactly one concise sentence" in normalized
     assert "action_description as exactly one concise, task-grounded restatement" in (
@@ -103,14 +103,14 @@ def test_prompt_and_schema_define_progressive_calls() -> None:
     )
     assert "without adding physical claims beyond it" in normalized
     assert "task_role as exactly one concise sentence" in normalized
-    assert "reason as exactly one concise sentence" in normalized
     assert "grasp, hold, release, or contact require direct supporting" in normalized
     assert "decompose motion_summary and action_description" in normalized
-    assert "action-to-view evidence mapping" in normalized
     assert "measured gripper aperture" in normalized
     assert "do not speculate about, quote, or reproduce" in normalized
     assert "does not alone prove object attachment" not in normalized
     assert "one physically coherent account of persistent entities" in normalized
+    assert "causal_validation" not in EVIDENCE_SCHEMA["properties"]
+    assert "boundary_conflicts" not in EVIDENCE_SCHEMA["properties"]
     assert "active_end_effector" not in INSPECTION_SCHEMA["properties"]
     inspection_prompt = " ".join(INSPECTION_SYSTEM_PROMPT.split()).lower()
     assert "motion_summary as exactly one concise sentence" in inspection_prompt

@@ -17,10 +17,7 @@ def annotate_boundaries(
     document: dict[str, Any],
     *,
     status: str = "complete",
-    quality_status: str | None = None,
 ) -> None:
-    if quality_status is None:
-        quality_status = "accepted" if status == "complete" else "quarantined"
     for order, boundary in enumerate(document["boundary_states"]):
         if status in {"pending", "failed"}:
             boundary["annotation"] = {
@@ -37,7 +34,6 @@ def annotate_boundaries(
             "status": status,
             "record": {
                 "observation": boundary_observation(f"Boundary {order}"),
-                "quality_status": quality_status,
             },
             "provenance": {
                 "provider": "test",

@@ -70,22 +70,14 @@ def _accepted_document(original: dict, evidence: dict) -> dict:
     return validate_document(document)
 
 
-def test_legacy_gripper_evidence_is_migrated(changed_evidence: dict) -> None:
+def test_legacy_evidence_schema_is_rejected(changed_evidence: dict) -> None:
     document = _accepted_document(_planned_document(0), changed_evidence)
-    annotation = document["evidence_units"][0]["annotation"]
-    annotation["schema_version"] = "video-harness.evidence.v4"
-    annotation["record"]["gripper_state"] = {"samples": []}
-
-    migrated = cli._migrate_legacy_gripper_evidence(document)
-
-    assert annotation["schema_version"] == "video-harness.evidence.v4"
-    assert migrated["evidence_units"][0]["annotation"]["schema_version"] == (
-        EVIDENCE_SCHEMA_VERSION
+    document["evidence_units"][0]["annotation"]["schema_version"] = (
+        "video-harness.evidence.v5"
     )
-    assert "gripper_state" not in migrated["evidence_units"][0]["annotation"]["record"]
-    assert migrated["quality_status"] == "pending"
-    assert migrated["quality_provenance"] is None
-    validate_document(migrated)
+
+    with pytest.raises(ValueError, match="unexpected evidence schema"):
+        validate_document(document)
 
 
 def _args(

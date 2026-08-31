@@ -102,15 +102,9 @@ class EvidenceRequest:
         if not self.motion_summary.strip():
             raise ValueError("EvidenceRequest requires a non-empty motion_summary")
         if self.before_boundary_observation is not None:
-            compose_boundary_state_record(
-                self.before_boundary_observation,
-                quality_status="accepted",
-            )
+            compose_boundary_state_record(self.before_boundary_observation)
         if self.after_boundary_observation is not None:
-            compose_boundary_state_record(
-                self.after_boundary_observation,
-                quality_status="accepted",
-            )
+            compose_boundary_state_record(self.after_boundary_observation)
         if len(self.boundary_images) != 6:
             raise ValueError("EvidenceRequest requires six Boundary images")
         expected = tuple(
@@ -414,8 +408,6 @@ def _validate_repair_result(value: Any) -> dict[str, Any]:
             raise AnnotationError(
                 f"repair returned invalid Call 2 output: {exc}"
             ) from exc
-        if normalized_call2["causal_validation"]["status"] != "pass":
-            raise AnnotationError("sufficient repair must return causal status=pass")
         return {
             "evidence_sufficient": True,
             "reason": reason.strip(),

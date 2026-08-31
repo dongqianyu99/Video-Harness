@@ -82,7 +82,7 @@ def test_openai_targeted_repair_uses_full_temporal_evidence(call2_record) -> Non
     content = responses.kwargs["input"][0]["content"]
     assert sum(item["type"] == "input_image" for item in content) == 13
     assert result.repair["evidence_sufficient"] is True
-    assert result.repair["resolved_call2"]["causal_validation"]["status"] == "pass"
+    assert result.repair["resolved_call2"] == call2_record
 
 
 def test_repair_rejects_sufficient_claim_without_resolved_output(call2_record) -> None:
