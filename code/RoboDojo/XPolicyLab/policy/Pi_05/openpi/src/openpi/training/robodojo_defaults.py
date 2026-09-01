@@ -30,13 +30,13 @@ ROBODOJO_DATASET_ROOT = Path(
 GUIDE_DOCUMENTS_ROOT = Path(
     os.getenv(
         "GUIDE_DOCUMENTS_ROOT",
-        DATA_ROOT / "video-harness" / "default" / "documents-openai",
+        DATA_ROOT / "video-harness" / "documents-openai",
     )
 ).expanduser().resolve()
 GUIDE_MATERIALIZATION_CACHE_ROOT = Path(
     os.getenv(
         "GUIDE_MATERIALIZATION_CACHE_ROOT",
-        DATA_ROOT / "guide-cache" / "default",
+        DATA_ROOT / "guide-cache",
     )
 ).expanduser().resolve()
 

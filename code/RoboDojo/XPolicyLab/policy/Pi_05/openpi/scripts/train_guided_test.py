@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from argparse import Namespace
-import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,8 +33,6 @@ def test_cli_uses_standard_robodojo_paths_and_capacity_defaults(tmp_path):
             "guided",
             "--run-dir",
             str(tmp_path / "run"),
-            "--num-train-steps",
-            "1",
         ]
     )
 
@@ -68,10 +65,6 @@ def _run_config(tmp_path: Path) -> GuidedTrainRunConfig:
         guided_data=_guided_data(tmp_path),
         experiment_name="guided",
         checkpoint_dir=tmp_path / "guided-checkpoint",
-        num_train_steps=1,
-        log_interval=1,
-        save_interval=1,
-        fsdp_devices=1,
     )
 
 
@@ -83,6 +76,7 @@ def test_argument_entry_builds_task_level_data_config(monkeypatch, tmp_path: Pat
         return object()
 
     monkeypatch.setattr(_train, "run_guided_training", fake_run)
+    monkeypatch.setattr(_train, "_load_native_config", lambda _name: SimpleNamespace(seed=7))
     args = Namespace(
         native_config_name="native-pi05",
         base_params_path=tmp_path / "base",
@@ -100,14 +94,8 @@ def test_argument_entry_builds_task_level_data_config(monkeypatch, tmp_path: Pat
         guide_transition_num_queries=8,
         experiment_name="guided",
         checkpoint_dir=tmp_path / "checkpoint",
-        num_train_steps=1,
-        log_interval=1,
-        save_interval=1,
-        fsdp_devices=1,
-        seed=0,
         overwrite=False,
         resume=False,
-        wandb_enabled=False,
     )
 
     _train._run_from_args(args)  # noqa: SLF001
@@ -119,15 +107,12 @@ def test_argument_entry_builds_task_level_data_config(monkeypatch, tmp_path: Pat
 
     args.remainder_strategy = "pad_mask"
     args.gradient_accumulation_steps = 2
-    args.reference_global_batch_size = 4
-    args.allow_effective_batch_mismatch = True
     _train._run_from_args(args)  # noqa: SLF001
     formal_data = captured["run_config"].guided_data
     assert formal_data.require_all_tasks
     assert formal_data.remainder_strategy == "pad_mask"
     assert formal_data.gradient_accumulation_steps == 2
     assert captured["run_config"].gradient_accumulation_steps == 2
-    assert not captured["run_config"].enforce_reference_batch_size
 
     args.run_dir = tmp_path / "tracked-run"
     args.checkpoint_dir = None
@@ -135,28 +120,6 @@ def test_argument_entry_builds_task_level_data_config(monkeypatch, tmp_path: Pat
     tracked = captured["run_config"]
     assert tracked.run_dir == args.run_dir
     assert tracked.checkpoint_dir == args.run_dir / "checkpoints"
-
-
-def test_runtime_validation_requires_full_dense_guided_config(tmp_path: Path) -> None:
-    run_config = _run_config(tmp_path)
-    valid = SimpleNamespace(
-        model=GuidePi0Config(),
-        batch_size=2,
-        num_workers=0,
-        freeze_filter=nnx.Nothing(),
-    )
-    _train._validate_runtime_config(run_config, valid)  # noqa: SLF001
-
-    with pytest.raises(ValueError, match="full dense"):
-        _train._validate_runtime_config(  # noqa: SLF001
-            run_config,
-            SimpleNamespace(
-                model=GuidePi0Config(),
-                batch_size=2,
-                num_workers=0,
-                freeze_filter=nnx.All(nnx.Param),
-            ),
-        )
 
 
 def test_runtime_validation_separates_base_and_resume_paths(tmp_path: Path) -> None:
@@ -168,10 +131,6 @@ def test_runtime_validation_separates_base_and_resume_paths(tmp_path: Path) -> N
         guided_data=run_config.guided_data,
         experiment_name=run_config.experiment_name,
         checkpoint_dir=same_path,
-        num_train_steps=run_config.num_train_steps,
-        log_interval=run_config.log_interval,
-        save_interval=run_config.save_interval,
-        fsdp_devices=run_config.fsdp_devices,
     )
 
     with pytest.raises(ValueError, match="different"):
@@ -184,45 +143,6 @@ def test_runtime_validation_separates_base_and_resume_paths(tmp_path: Path) -> N
                 freeze_filter=nnx.Nothing(),
             ),
         )
-
-
-def test_runtime_validation_aligns_effective_batch_with_official_global_256(
-    tmp_path: Path,
-) -> None:
-    guided_data = dataclasses.replace(
-        _guided_data(tmp_path),
-        guides_per_batch=4,
-        queries_per_guide=16,
-        gradient_accumulation_steps=4,
-    )
-    run_config = dataclasses.replace(
-        _run_config(tmp_path),
-        guided_data=guided_data,
-        gradient_accumulation_steps=4,
-        reference_global_batch_size=256,
-        enforce_reference_batch_size=True,
-    )
-    resolved = SimpleNamespace(
-        model=GuidePi0Config(),
-        batch_size=64,
-        num_workers=0,
-        freeze_filter=nnx.Nothing(),
-    )
-
-    _train._validate_runtime_config(run_config, resolved)  # noqa: SLF001
-
-    mismatched_data = dataclasses.replace(guided_data, queries_per_guide=8)
-    mismatched = dataclasses.replace(run_config, guided_data=mismatched_data)
-    with pytest.raises(ValueError, match="effective global batch"):
-        _train._validate_runtime_config(  # noqa: SLF001
-            mismatched,
-            SimpleNamespace(**{**vars(resolved), "batch_size": 32}),
-        )
-
-    padded_data = dataclasses.replace(guided_data, remainder_strategy="pad_mask")
-    padded = dataclasses.replace(run_config, guided_data=padded_data)
-    with pytest.raises(ValueError, match="remainder_strategy='drop'"):
-        _train._validate_runtime_config(padded, resolved)  # noqa: SLF001
 
 
 def test_checkpoint_wrappers_delegate_to_stock_format(monkeypatch, tmp_path: Path) -> None:

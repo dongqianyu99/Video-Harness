@@ -13,10 +13,6 @@ from openpi.training.guide_materialization_cache import ensure_guide_materializa
 from openpi.training.guide_materialization_cache import open_guide_materialization_cache
 
 
-class _Tokenizer:
-    cache_digest = "test-tokenizer"
-
-
 class _Catalog:
     def __init__(self):
         self.source = SimpleNamespace(
@@ -134,16 +130,12 @@ def _ensure(cache_root: Path, *, config=None, resolver=None):
     config = _config() if config is None else config
     record = GuideRecord(0, "doc", 10, 3, "stack blocks")
     plan = _plan()
-    tokenizer = _Tokenizer()
     return ensure_guide_materialization_cache(
         cache_root=cache_root,
-        catalog_digest="catalog-digest",
         guide_records=(record,),
         document_catalog=_Catalog(),
         plans_by_document={"doc": plan},
         materializer_config=config,
-        boundary_tokenizer=tokenizer,
-        transition_tokenizer=tokenizer,
         source_resolver=(lambda _record: _guide(config)) if resolver is None else resolver,
     )
 
@@ -189,7 +181,7 @@ def test_corrupt_artifact_is_rebuilt_before_cache_returns(tmp_path):
     )
 
     assert calls == ["doc"]
-    assert repaired.stats["rebuilt_corrupt"] == 1
+    assert repaired.stats["built"] == 1
 
 
 def test_compact_artifact_reuses_under_larger_shared_shape_and_read_only_open(tmp_path):
@@ -200,16 +192,12 @@ def test_compact_artifact_reuses_under_larger_shared_shape_and_read_only_open(tm
         config=larger,
         resolver=lambda _record: (_ for _ in ()).throw(AssertionError("must reuse")),
     )
-    tokenizer = _Tokenizer()
     opened = open_guide_materialization_cache(
         cache_root=tmp_path,
-        catalog_digest="catalog-digest",
         guide_records=(GuideRecord(0, "doc", 10, 3, "stack blocks"),),
         document_catalog=_Catalog(),
         plans_by_document={"doc": _plan()},
         materializer_config=larger,
-        boundary_tokenizer=tokenizer,
-        transition_tokenizer=tokenizer,
     )
     resolver = CachedGuideResolverFactory(
         guide_records=(GuideRecord(0, "doc", 10, 3, "stack blocks"),),
@@ -217,6 +205,5 @@ def test_compact_artifact_reuses_under_larger_shared_shape_and_read_only_open(tm
         materializer_config=larger,
     )()
 
-    assert first.records[0].artifact_key == reused.records[0].artifact_key
-    assert opened.cache_digest == reused.cache_digest
+    assert first.records[0].artifact_path == reused.records[0].artifact_path
     assert resolver(GuideRecord(0, "doc", 10, 3, "stack blocks")).boundary_mask.shape == (1, 3)

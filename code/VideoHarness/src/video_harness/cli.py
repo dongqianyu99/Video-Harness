@@ -671,7 +671,7 @@ def _annotate(args: argparse.Namespace) -> int:
         sequence_repair_rounds=getattr(args, "sequence_repair_rounds", 2),
         provider_timeout_s=getattr(args, "provider_timeout_s", 300.0),
         provider_max_retries=getattr(args, "provider_max_retries", 2),
-        output_mode=getattr(args, "output_mode", "tool"),
+        output_mode=getattr(args, "output_mode", "json"),
         thinking=getattr(args, "thinking", True),
         reasoning_effort=getattr(args, "reasoning_effort", "high"),
         ffmpeg_timeout_s=getattr(args, "ffmpeg_timeout_s", 120.0),
@@ -1257,7 +1257,7 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument(
         "--output-mode",
         choices=("tool", "json"),
-        default="tool",
+        default="json",
         help="forced tool call or strict JSON Schema output",
     )
     annotate.add_argument(

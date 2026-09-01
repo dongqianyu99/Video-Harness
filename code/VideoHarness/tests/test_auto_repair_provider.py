@@ -77,6 +77,7 @@ def test_openai_targeted_repair_uses_full_temporal_evidence(call2_record) -> Non
     result = OpenAIBackend(
         "repair-model",
         client=SimpleNamespace(responses=responses),
+        output_mode="tool",
     ).repair(_repair_request(call2_record))
 
     content = responses.kwargs["input"][0]["content"]
@@ -105,7 +106,7 @@ def test_repair_rejects_sufficient_claim_without_resolved_output(call2_record) -
         )
     )
     with pytest.raises(AnnotationError, match="requires resolved"):
-        OpenAIBackend("repair-model", client=client).repair(
+        OpenAIBackend("repair-model", client=client, output_mode="tool").repair(
             _repair_request(call2_record)
         )
 
@@ -137,6 +138,7 @@ def test_sequence_audit_deduplicates_unit_issues() -> None:
     result = OpenAIBackend(
         "audit-model",
         client=SimpleNamespace(responses=Responses()),
+        output_mode="tool",
     ).audit_sequence(
         SequenceAuditRequest(
             canonical_sequence='{"evidence_units": []}',

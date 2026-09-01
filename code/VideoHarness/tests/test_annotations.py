@@ -267,7 +267,7 @@ def test_openai_inspection_uses_six_images_without_task_text() -> None:
 
     responses = Responses()
     result = OpenAIBackend(
-        "requested-model", client=SimpleNamespace(responses=responses)
+        "requested-model", client=SimpleNamespace(responses=responses), output_mode="tool"
     ).inspect(_inspection_request())
     body = responses.kwargs
     assert body["tools"][0]["strict"] is True
@@ -302,7 +302,7 @@ def test_openai_inspection_passes_only_one_step_task_blind_context() -> None:
 
     responses = Responses()
     OpenAIBackend(
-        "requested-model", client=SimpleNamespace(responses=responses)
+        "requested-model", client=SimpleNamespace(responses=responses), output_mode="tool"
     ).inspect(
         _inspection_request(
             previous_motion_summary=(
@@ -337,7 +337,7 @@ def test_openai_call2_uses_boundaries_detail_motion_and_task_last(call2_record) 
 
     responses = Responses()
     result = OpenAIBackend(
-        "requested-model", client=SimpleNamespace(responses=responses)
+        "requested-model", client=SimpleNamespace(responses=responses), output_mode="tool"
     ).annotate(_evidence_request())
     content = responses.kwargs["input"][0]["content"]
     assert content[0]["text"].startswith("EVIDENCE=BOUNDARY_BEFORE")
@@ -371,7 +371,7 @@ def test_openai_rejects_malformed_tool_arguments() -> None:
         )
     )
     with pytest.raises(AnnotationError, match="malformed"):
-        OpenAIBackend("test-model", client=client).annotate(_evidence_request())
+        OpenAIBackend("test-model", client=client, output_mode="tool").annotate(_evidence_request())
 
 
 def test_provider_clients_receive_explicit_timeout_and_retry_config(

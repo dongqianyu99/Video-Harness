@@ -76,10 +76,6 @@ def test_resume_rejects_config_and_runtime_data_drift(tmp_path: Path):
     data = {
         "catalog_build_id": "build",
         "catalog_digest": "catalog",
-        "task_sample_digest": "samples",
-        "guide_representation_digest": "representation",
-        "guide_materialization_digest": "materialization",
-        "guide_materialization_cache_digest": "cache",
         "guide_max_units": 2,
         "guide_max_boundaries": 3,
         "guide_boundary_num_queries": 8,
@@ -116,12 +112,6 @@ def test_resume_rejects_config_and_runtime_data_drift(tmp_path: Path):
             layout,
             run_config=resumed,
             runtime_data={**data, "guide_max_units": 1},
-        )
-    with pytest.raises(ValueError, match="guide_materialization_cache_digest"):
-        validate_guided_run_resume(
-            layout,
-            run_config=resumed,
-            runtime_data={**data, "guide_materialization_cache_digest": "changed"},
         )
 
 

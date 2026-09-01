@@ -12,7 +12,7 @@ def test_normal_mode_has_no_debug_destination() -> None:
     assert config.manifest()["debug_root"] is None
     assert config.provider_timeout_s == 300.0
     assert config.provider_max_retries == 2
-    assert config.output_mode == "tool"
+    assert config.output_mode == "json"
     assert config.thinking is True
     assert config.reasoning_effort == "high"
     assert config.media_retries == 2

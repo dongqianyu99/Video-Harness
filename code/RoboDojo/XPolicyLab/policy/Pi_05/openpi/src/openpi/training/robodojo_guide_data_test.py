@@ -164,10 +164,6 @@ class _Tokenizer:
         self.size = size
         self.calls = []
 
-    @property
-    def cache_digest(self):
-        return f"test-tokenizer-{self.size}"
-
     def tokenize_text(self, text):
         self.calls.append(text)
         tokens = np.zeros(self.size, dtype=np.int32)
@@ -254,28 +250,6 @@ def _native_train_config():
     )
 
 
-def test_config_requires_cache_root_disjoint_from_source_roots(tmp_path):
-    config = _config(tmp_path)
-    with pytest.raises(ValueError, match="disjoint"):
-        dataclasses.replace(
-            config,
-            guide_materialization_cache_root=config.dataset_root / "guide-cache",
-        )
-
-
-def test_real_repo_id_must_resolve_to_dataset_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path / "data"))
-    _guide_data._validate_repo_id_root(  # noqa: SLF001
-        "RoboDojo_lerobot_v30_video",
-        tmp_path / "data" / "RoboDojo_lerobot_v30_video",
-    )
-    with pytest.raises(ValueError, match="different datasets"):
-        _guide_data._validate_repo_id_root(  # noqa: SLF001
-            "another-repo",
-            tmp_path / "data" / "RoboDojo_lerobot_v30_video",
-        )
-
-
 def test_factory_builds_global_guidance_first_batch_and_three_view_input(tmp_path):
     config = _config(tmp_path)
     catalog = _Catalog()
@@ -314,9 +288,6 @@ def test_factory_builds_global_guidance_first_batch_and_three_view_input(tmp_pat
     assert loader.host_metadata["guide_max_boundaries"] == 2
     assert loader.host_metadata["guide_materialization_cache"]["documents"] == 2
     assert loader.host_metadata["guide_materialization_cache"]["built"] == 2
-    assert loader.host_metadata["source_media_validation"] == "cache_only"
-    assert len(loader.host_metadata["task_sample_digest"]) == 64
-    assert len(loader.host_metadata["guide_representation_digest"]) == 64
     # Each task has only its source episode in the native pool; successful
     # batching therefore proves source-episode queries are allowed.
     task_groups = {

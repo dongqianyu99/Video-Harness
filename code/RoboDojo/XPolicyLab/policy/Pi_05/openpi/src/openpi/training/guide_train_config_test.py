@@ -32,17 +32,13 @@ def _guided_data(tmp_path: Path, *, batch_size: int = 4) -> RoboDojoGuidedDataCo
     )
 
 
-def _run_config(tmp_path: Path, *, batch_size: int = 4) -> GuidedTrainRunConfig:
+def _run_config(tmp_path: Path, *, batch_size: int = 64) -> GuidedTrainRunConfig:
     return GuidedTrainRunConfig(
         native_config_name="native-pi05",
         base_params_path=tmp_path / "pi05_base" / "params",
         guided_data=_guided_data(tmp_path, batch_size=batch_size),
         experiment_name="guided-test",
         checkpoint_dir=tmp_path / "checkpoints" / "guided-test",
-        num_train_steps=3,
-        log_interval=1,
-        save_interval=2,
-        fsdp_devices=1,
     )
 
 
@@ -76,7 +72,7 @@ def test_make_guide_pi0_config_copies_all_native_model_fields() -> None:
 def test_resolve_guided_train_config_preserves_native_optimizer_and_uses_strict_loader(tmp_path: Path) -> None:
     native = stock_config.get_config("pi05_wuji_marvin_54d")
     run_config = dataclasses.replace(
-        _run_config(tmp_path, batch_size=5),
+        _run_config(tmp_path, batch_size=64),
         native_config_name=native.name,
     )
 
@@ -133,18 +129,9 @@ def test_lora_variants_are_rejected_before_guided_model_construction(
         make_guide_pi0_config(native_model)
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"num_train_steps": 0},
-        {"log_interval": 0},
-        {"save_interval": 0},
-        {"fsdp_devices": 0},
-    ],
-)
-def test_guided_run_config_rejects_invalid_schedule_values(tmp_path: Path, kwargs: dict[str, int]) -> None:
+def test_guided_run_config_rejects_invalid_accumulation(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="positive integer"):
-        dataclasses.replace(_run_config(tmp_path), **kwargs)
+        dataclasses.replace(_run_config(tmp_path), gradient_accumulation_steps=0)
 
 
 def test_guided_run_config_separates_overwrite_and_resume(tmp_path: Path) -> None:

@@ -49,8 +49,6 @@ class _FrameLoader:
 
 
 class _Tokenizer:
-    cache_digest = "eval-test-tokenizer"
-
     def tokenize_text(self, _text):
         return (
             np.asarray([1, 2, 0, 0], dtype=np.int32),
@@ -137,13 +135,10 @@ def _session(tmp_path, *, catalog=None):
 
     ensure_guide_materialization_cache(
         cache_root=cache_root,
-        catalog_digest=guide_catalog.catalog_digest,
         guide_records=guide_catalog.records,
         document_catalog=catalog,
         plans_by_document=plans,
         materializer_config=config,
-        boundary_tokenizer=tokenizer,
-        transition_tokenizer=tokenizer,
         source_resolver=source_resolver,
     )
     build_calls = len(loader.calls)
@@ -175,9 +170,6 @@ def test_session_materializes_once_and_reuses_first_task_guide(tmp_path):
     assert session.materialization_count == 1
     assert session.identity == {
         "catalog_digest": "catalog-digest",
-        "guide_materialization_cache_digest": session.identity[
-            "guide_materialization_cache_digest"
-        ],
         "document_id": "doc-3",
         "source_episode_index": 3,
         "task_index": 4,

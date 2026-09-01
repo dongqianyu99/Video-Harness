@@ -67,15 +67,11 @@ class TaskGuideSession:
         }
         cache = open_guide_materialization_cache(
             cache_root=guide_materialization_cache_root,
-            catalog_digest=self._guide_catalog.catalog_digest,
             guide_records=self._guide_catalog.records,
             document_catalog=self._catalog,
             plans_by_document=plans,
             materializer_config=self._materializer_config,
-            boundary_tokenizer=self._boundary_tokenizer,
-            transition_tokenizer=self._transition_tokenizer,
         )
-        self._cache_digest = cache.cache_digest
         self._resolver = CachedGuideResolver(
             guide_records=self._guide_catalog.records,
             artifact_records=cache.records,
@@ -102,14 +98,12 @@ class TaskGuideSession:
         if self._guidance is None:
             return {
                 "catalog_digest": self.catalog_digest,
-                "guide_materialization_cache_digest": self._cache_digest,
                 "document_id": None,
                 "source_episode_index": None,
                 "task_index": None,
             }
         return {
             "catalog_digest": self.catalog_digest,
-            "guide_materialization_cache_digest": self._cache_digest,
             "document_id": self._guidance.document_id,
             "source_episode_index": self._guidance.source_episode_index,
             "task_index": self._guidance.task_index,

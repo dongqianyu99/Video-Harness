@@ -17,7 +17,7 @@ class HarnessConfig:
     sequence_repair_rounds: int = 2
     provider_timeout_s: float = 300.0
     provider_max_retries: int = 2
-    output_mode: str = "tool"
+    output_mode: str = "json"
     thinking: bool = True
     reasoning_effort: str = "high"
     ffmpeg_timeout_s: float = 120.0

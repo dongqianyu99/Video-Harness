@@ -783,7 +783,7 @@ class OpenAIBackend:
         *,
         timeout_s: float = 300.0,
         max_retries: int = 2,
-        output_mode: str = "tool",
+        output_mode: str = "json",
         thinking: bool = True,
         reasoning_effort: str = "high",
         client: Any | None = None,
@@ -1193,7 +1193,7 @@ def make_backends(
     *,
     timeout_s: float = 300.0,
     max_retries: int = 2,
-    output_mode: str = "tool",
+    output_mode: str = "json",
     thinking: bool = True,
     reasoning_effort: str = "high",
 ) -> tuple[InspectionBackend, EvidenceBackend, RepairBackend]:

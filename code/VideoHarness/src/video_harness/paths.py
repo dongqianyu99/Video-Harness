@@ -29,6 +29,6 @@ ROBODOJO_DATASET_ROOT = Path(
 VIDEO_HARNESS_RUN_ROOT = Path(
     os.getenv(
         "VIDEO_HARNESS_RUN_ROOT",
-        DATA_ROOT / "video-harness" / "default",
+        DATA_ROOT / "video-harness",
     )
 ).expanduser().resolve()

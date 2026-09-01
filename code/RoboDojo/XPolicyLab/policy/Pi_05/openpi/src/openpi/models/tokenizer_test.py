@@ -18,7 +18,6 @@ def _make_uninitialized_tokenizer(fake_sentencepiece: _FakeSentencePiece, max_le
     tokenizer = object.__new__(_tokenizer.PaligemmaTokenizer)
     tokenizer._max_len = max_len  # noqa: SLF001
     tokenizer._tokenizer = fake_sentencepiece  # noqa: SLF001
-    tokenizer._cache_digest = "test-digest"  # noqa: SLF001
     return tokenizer
 
 
@@ -42,7 +41,6 @@ def test_tokenize_text_is_raw_bos_padded_and_typed():
     assert mask.tolist() == [True, True, True, False, False, False]
     assert tokens.dtype == np.int32
     assert mask.dtype == np.bool_
-    assert tokenizer.cache_digest == "test-digest"
 
 
 def test_tokenize_text_rejects_overflow_instead_of_truncating():

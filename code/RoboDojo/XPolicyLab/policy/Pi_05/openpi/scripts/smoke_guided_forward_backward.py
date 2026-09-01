@@ -94,6 +94,7 @@ def _gradient_sharding(train_state_sharding: Any, trainable_filter: Any) -> Any:
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     config_module = importlib.import_module("openpi.training.config")
     native_config = config_module.get_config(args.native_config_name)
+    accumulation_steps = _defaults.GRADIENT_ACCUMULATION_STEPS
     guided_data = RoboDojoGuidedDataConfig(
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
@@ -108,6 +109,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         max_transition_text_tokens=args.max_transition_text_tokens,
         guide_boundary_num_queries=args.guide_boundary_num_queries,
         guide_transition_num_queries=args.guide_transition_num_queries,
+        gradient_accumulation_steps=accumulation_steps,
     )
     run_config = GuidedTrainRunConfig(
         native_config_name=args.native_config_name,
@@ -115,10 +117,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         guided_data=guided_data,
         experiment_name="forward-backward-smoke",
         checkpoint_dir=args.base_params_path.parent / "guided-forward-backward-smoke",
-        num_train_steps=1,
-        log_interval=1,
-        save_interval=1,
-        fsdp_devices=args.fsdp_devices,
+        gradient_accumulation_steps=accumulation_steps,
     )
     resolved_config = resolve_guided_train_config(run_config)
     if not isinstance(resolved_config.model, GuidePi0Config):

@@ -5,8 +5,6 @@ import importlib
 from pathlib import Path
 from typing import Any
 
-import flax.nnx as nnx
-
 from openpi.models.guide_pi0_config import GuidePi0Config
 from openpi.models.pi0_config import Pi0Config
 from openpi.training.guide_weight_loaders import GuidePi0BaseWeightLoader
@@ -24,17 +22,9 @@ class GuidedTrainRunConfig:
     experiment_name: str
     checkpoint_dir: Path
 
-    num_train_steps: int
-    log_interval: int
-    save_interval: int
-    fsdp_devices: int
-
     overwrite: bool = False
     resume: bool = False
-    wandb_enabled: bool = False
     gradient_accumulation_steps: int = 1
-    reference_global_batch_size: int = 256
-    enforce_reference_batch_size: bool = False
     run_dir: Path | None = None
 
     def __post_init__(self) -> None:
@@ -49,22 +39,15 @@ class GuidedTrainRunConfig:
         if not isinstance(self.experiment_name, str) or not self.experiment_name.strip():
             raise ValueError("experiment_name must be a non-empty string")
 
-        for name in (
-            "num_train_steps",
-            "log_interval",
-            "save_interval",
-            "fsdp_devices",
-            "gradient_accumulation_steps",
-            "reference_global_batch_size",
+        if (
+            isinstance(self.gradient_accumulation_steps, bool)
+            or not isinstance(self.gradient_accumulation_steps, int)
+            or self.gradient_accumulation_steps <= 0
         ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+            raise ValueError("gradient_accumulation_steps must be a positive integer")
 
         if self.overwrite and self.resume:
             raise ValueError("overwrite and resume cannot both be true")
-        if not isinstance(self.enforce_reference_batch_size, bool):
-            raise ValueError("enforce_reference_batch_size must be bool")
         if (
             self.guided_data.gradient_accumulation_steps
             != self.gradient_accumulation_steps
@@ -146,7 +129,6 @@ def resolve_guided_train_config(run_config: GuidedTrainRunConfig) -> Any:
             "native config model must be Pi0Config for guided training, "
             f"got {type(native_config.model).__name__}"
         )
-
     train_config_type = type(native_config)
     if train_config_type.__name__ != "TrainConfig":
         raise ValueError(
@@ -170,16 +152,10 @@ def resolve_guided_train_config(run_config: GuidedTrainRunConfig) -> Any:
         exp_name=run_config.experiment_name,
         model=guide_model,
         weight_loader=GuidePi0BaseWeightLoader(str(run_config.base_params_path)),
-        freeze_filter=nnx.Nothing(),
         checkpoint_dir_override=str(run_config.checkpoint_dir),
         batch_size=run_config.guided_data.batch_size,
         num_workers=run_config.guided_data.num_workers,
-        num_train_steps=run_config.num_train_steps,
-        log_interval=run_config.log_interval,
-        save_interval=run_config.save_interval,
-        fsdp_devices=run_config.fsdp_devices,
         overwrite=run_config.overwrite,
         resume=run_config.resume,
-        wandb_enabled=run_config.wandb_enabled,
     )
     return train_config_type(**kwargs)

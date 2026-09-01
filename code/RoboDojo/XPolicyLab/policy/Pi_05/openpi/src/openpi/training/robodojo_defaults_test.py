@@ -7,10 +7,10 @@ def test_standard_robodojo_defaults_share_one_workspace_data_root():
         defaults.DATA_ROOT / defaults.ROBODOJO_REPO_ID
     )
     assert defaults.GUIDE_DOCUMENTS_ROOT == (
-        defaults.DATA_ROOT / "video-harness" / "default" / "documents-openai"
+        defaults.DATA_ROOT / "video-harness" / "documents-openai"
     )
     assert defaults.GUIDE_MATERIALIZATION_CACHE_ROOT == (
-        defaults.DATA_ROOT / "guide-cache" / "default"
+        defaults.DATA_ROOT / "guide-cache"
     )
     assert (defaults.MAX_BOUNDARIES, defaults.MAX_UNITS) == (63, 62)
     assert (

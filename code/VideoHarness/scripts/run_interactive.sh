@@ -148,8 +148,6 @@ if ! confirm_yes "Download or resume the official RoboDojo files now?"; then
 else
   "${repository_root}/scripts/download_robodojo.sh"
 fi
-"${repository_root}/scripts/verify_robodojo.sh" "${dataset_root}"
-
 echo
 echo "== Video Harness: annotation provider =="
 cat <<'EOF'

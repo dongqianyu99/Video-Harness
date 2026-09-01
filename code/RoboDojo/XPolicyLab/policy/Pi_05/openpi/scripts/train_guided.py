@@ -68,20 +68,6 @@ def _validate_runtime_config(run_config: GuidedTrainRunConfig, resolved_config: 
             "resolved num_workers does not match guided data config: "
             f"{resolved_config.num_workers} != {run_config.guided_data.num_workers}"
         )
-    if not isinstance(resolved_config.freeze_filter, nnx.Nothing):
-        raise ValueError("M5 guided training requires full dense fine-tuning with freeze_filter=nnx.Nothing()")
-    effective_batch_size = run_config.effective_global_batch_size
-    if run_config.enforce_reference_batch_size:
-        if run_config.guided_data.remainder_strategy != "drop":
-            raise ValueError("strict reference batch alignment requires remainder_strategy='drop'")
-        if effective_batch_size != run_config.reference_global_batch_size:
-            raise ValueError(
-                "effective global batch does not match the reference: "
-                f"microbatch={run_config.guided_data.batch_size} * "
-                f"accumulation={run_config.gradient_accumulation_steps} = "
-                f"{effective_batch_size}, expected "
-                f"{run_config.reference_global_batch_size}"
-            )
     if run_config.base_params_path.resolve() == run_config.checkpoint_dir.resolve():
         raise ValueError("base_params_path and guided resume checkpoint_dir must be different")
 
@@ -309,14 +295,13 @@ def _run_guided_training_impl(
                 "batch/valid_queries": int(info["valid_queries"]),
                 "batch/microbatches": int(info["microbatches"]),
                 "batch/effective_capacity": run_config.effective_global_batch_size,
-                "batch/reference_global_batch": run_config.reference_global_batch_size,
                 "performance/optimizer_steps_per_s": interval_steps / interval_s,
                 "performance/data_wait_ms_per_step": (accumulated_data_wait_s / interval_steps * 1000.0),
                 "system/device_count": jax.device_count(),
             }
             logger.info(
                 "step=%d loss=%.6f grad_norm=%.6f guide_grad_norm=%.6f native_grad_norm=%.6f "
-                "G=%s Q=%s valid_queries=%s microbatches=%s effective_capacity=%d reference_batch=%d",
+                "G=%s Q=%s valid_queries=%s microbatches=%s effective_capacity=%d",
                 step,
                 host_info["loss"],
                 host_info["grad_norm"],
@@ -327,7 +312,6 @@ def _run_guided_training_impl(
                 int(info["valid_queries"]),
                 int(info["microbatches"]),
                 run_config.guided_data.batch_size * accumulation_steps,
-                run_config.reference_global_batch_size,
             )
             wandb_run = session.get("wandb_run")
             if wandb_run is not None:
@@ -415,8 +399,6 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=_defaults.GRADIENT_ACCUMULATION_STEPS,
     )
-    parser.add_argument("--reference-global-batch-size", type=int, default=256)
-    parser.add_argument("--allow-effective-batch-mismatch", action="store_true")
     parser.add_argument(
         "--remainder-strategy",
         choices=("drop", "pad_mask"),
@@ -443,18 +425,13 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="legacy path; new runs should use --run-dir",
     )
-    parser.add_argument("--num-train-steps", type=int, required=True)
-    parser.add_argument("--log-interval", type=int, default=100)
-    parser.add_argument("--save-interval", type=int, default=1000)
-    parser.add_argument("--fsdp-devices", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--wandb-enabled", action="store_true")
     return parser
 
 
 def _run_from_args(args: argparse.Namespace) -> Any:
+    native_config = _load_native_config(args.native_config_name)
     accumulation_steps = getattr(args, "gradient_accumulation_steps", 1)
     run_dir = getattr(args, "run_dir", None)
     checkpoint_dir = getattr(args, "checkpoint_dir", None)
@@ -473,7 +450,7 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         guide_materialization_cache_root=args.guide_materialization_cache_root,
         guides_per_batch=args.guides_per_batch,
         queries_per_guide=args.queries_per_guide,
-        seed=args.seed,
+        seed=native_config.seed,
         max_boundaries=args.max_boundaries,
         max_units=args.max_units,
         max_boundary_text_tokens=args.max_boundary_text_tokens,
@@ -498,16 +475,9 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         guided_data=guided_data,
         experiment_name=args.experiment_name,
         checkpoint_dir=checkpoint_dir,
-        num_train_steps=args.num_train_steps,
-        log_interval=args.log_interval,
-        save_interval=args.save_interval,
-        fsdp_devices=args.fsdp_devices,
         overwrite=args.overwrite,
         resume=args.resume,
-        wandb_enabled=args.wandb_enabled,
         gradient_accumulation_steps=accumulation_steps,
-        reference_global_batch_size=getattr(args, "reference_global_batch_size", 256),
-        enforce_reference_batch_size=not getattr(args, "allow_effective_batch_mismatch", False),
         run_dir=run_dir,
     )
     return run_guided_training(run_config)

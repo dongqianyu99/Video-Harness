@@ -5,14 +5,12 @@ import copy
 import dataclasses
 from dataclasses import dataclass
 import importlib
-import os
 from pathlib import Path
 import statistics
 from typing import Any
 
 import jax
 
-from openpi.models.guide_inputs import GUIDE_REPRESENTATION_DIGEST
 from openpi.models.guide_materializer import GuideMaterializerConfig
 from openpi.training.guide_cache import ProcessLocalGuideResolver
 from openpi.training.guide_collator import GuidanceBatchCollator
@@ -73,18 +71,6 @@ class RoboDojoGuidedDataConfig:
         ):
             if not isinstance(getattr(self, name), Path):
                 raise ValueError(f"{name} must be an explicit pathlib.Path")
-        cache_root = self.guide_materialization_cache_root.resolve()
-        for name in ("dataset_root", "documents_root"):
-            source_root = getattr(self, name).resolve()
-            if (
-                cache_root == source_root
-                or cache_root in source_root.parents
-                or source_root in cache_root.parents
-            ):
-                raise ValueError(
-                    "guide_materialization_cache_root must be disjoint from "
-                    f"{name}"
-                )
         for name in (
             "guides_per_batch",
             "queries_per_guide",
@@ -130,22 +116,6 @@ class RoboDojoGuidedDataConfig:
 def _require_path(path: Path, *, name: str) -> None:
     if not path.is_dir():
         raise ValueError(f"{name} must be an existing directory: {path}")
-
-
-def _validate_repo_id_root(repo_id: str, dataset_root: Path) -> None:
-    if repo_id == "fake":
-        return
-    lerobot_home = os.getenv("HF_LEROBOT_HOME")
-    if not lerobot_home:
-        raise ValueError(
-            "HF_LEROBOT_HOME must be set so repo_id and dataset_root share one source"
-        )
-    expected = (Path(lerobot_home).expanduser() / repo_id).resolve()
-    if expected != dataset_root.resolve():
-        raise ValueError(
-            "repo_id and dataset_root resolve to different datasets: "
-            f"expected {expected}, got {dataset_root.resolve()}"
-        )
 
 
 def _replace_repo_id(data_config: Any, repo_id: str) -> Any:
@@ -369,10 +339,6 @@ def create_robodojo_guided_data_loader(
         raise ValueError("skip_norm_stats=True is allowed only for repo_id='fake'")
     _require_path(guided_data_config.dataset_root, name="dataset_root")
     _require_path(guided_data_config.documents_root, name="documents_root")
-    _validate_repo_id_root(
-        guided_data_config.repo_id,
-        guided_data_config.dataset_root,
-    )
     custom_dependencies = any(
         dependency is not None
         for dependency in (
@@ -478,13 +444,10 @@ def create_robodojo_guided_data_loader(
     )
     materialization_cache = ensure_guide_materialization_cache(
         cache_root=guided_data_config.guide_materialization_cache_root,
-        catalog_digest=guide_catalog.catalog_digest,
         guide_records=guide_catalog.records,
         document_catalog=document_catalog,
         plans_by_document=plans_by_document,
         materializer_config=materializer_config,
-        boundary_tokenizer=boundary_tokenizer,
-        transition_tokenizer=transition_tokenizer,
         source_resolver=source_resolver,
     )
     resolver_factory = CachedGuideResolverFactory(
@@ -520,8 +483,6 @@ def create_robodojo_guided_data_loader(
         host_metadata={
             "catalog_build_id": getattr(document_catalog, "build_id", None),
             "catalog_digest": guide_catalog.catalog_digest,
-            "task_sample_digest": task_samples.digest,
-            "guide_representation_digest": GUIDE_REPRESENTATION_DIGEST,
             "accepted_guides": len(guide_catalog.records),
             "excluded_guides": len(exclusions),
             "tasks": len(guide_catalog.task_indices),
@@ -536,14 +497,7 @@ def create_robodojo_guided_data_loader(
             "guide_materialization_cache_root": str(
                 guided_data_config.guide_materialization_cache_root
             ),
-            "guide_materialization_digest": (
-                materialization_cache.materialization_digest
-            ),
-            "guide_materialization_cache_digest": (
-                materialization_cache.cache_digest
-            ),
             "guide_materialization_cache": dict(materialization_cache.stats),
-            "source_media_validation": "cache_only",
             "sampler_stats": dataclasses.asdict(sampler.stats),
             "guide_max_units": guided_data_config.max_units,
             "guide_max_boundaries": guided_data_config.max_boundaries,

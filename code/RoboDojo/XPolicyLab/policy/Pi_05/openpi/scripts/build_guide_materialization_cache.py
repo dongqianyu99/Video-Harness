@@ -44,17 +44,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def build_cache(args: argparse.Namespace):
-    cache_root = args.guide_materialization_cache_root.resolve()
-    for name in ("dataset_root", "documents_root"):
-        source_root = getattr(args, name).resolve()
-        if (
-            cache_root == source_root
-            or cache_root in source_root.parents
-            or source_root in cache_root.parents
-        ):
-            raise ValueError(
-                f"guide-materialization-cache-root must be disjoint from {name}"
-            )
     reader = importlib.import_module("video_harness.reader")
     robodojo = importlib.import_module("video_harness.robodojo")
     document_catalog = reader.load_guide_document_catalog(args.documents_root)
@@ -66,7 +55,7 @@ def build_cache(args: argparse.Namespace):
         episodes,
         require_all_tasks=True,
     )
-    plans, lengths = _build_guide_plans(
+    plans, _ = _build_guide_plans(
         document_catalog,
         guide_catalog,
         max_units=args.max_units,
@@ -94,24 +83,14 @@ def build_cache(args: argparse.Namespace):
     )
     cache = ensure_guide_materialization_cache(
         cache_root=args.guide_materialization_cache_root,
-        catalog_digest=guide_catalog.catalog_digest,
         guide_records=guide_catalog.records,
         document_catalog=document_catalog,
         plans_by_document=plans,
         materializer_config=config,
-        boundary_tokenizer=boundary_tokenizer,
-        transition_tokenizer=transition_tokenizer,
         source_resolver=resolver,
     )
     return {
-        "catalog_digest": cache.catalog_digest,
-        "materialization_digest": cache.materialization_digest,
-        "cache_digest": cache.cache_digest,
         "cache_root": str(args.guide_materialization_cache_root),
-        "guide_lengths": {
-            document_id: {"units": value[0], "boundaries": value[1]}
-            for document_id, value in sorted(lengths.items())
-        },
         **dict(cache.stats),
     }
 

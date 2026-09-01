@@ -101,7 +101,7 @@ def test_openai_sdk_serializes_inspection_images_without_task() -> None:
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(openai.BadRequestError):
-        OpenAIBackend("test-model", client=client).inspect(_inspection_request())
+        OpenAIBackend("test-model", client=client, output_mode="tool").inspect(_inspection_request())
     body = bodies[0]
     assert body["tools"][0]["strict"] is True
     assert body["max_output_tokens"] == 768
@@ -136,7 +136,7 @@ def test_openai_sdk_serializes_evidence_images_and_task_last() -> None:
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(openai.BadRequestError):
-        OpenAIBackend("test-model", client=client).annotate(_evidence_request())
+        OpenAIBackend("test-model", client=client, output_mode="tool").annotate(_evidence_request())
     assert bodies[0]["max_output_tokens"] == 1200
     content = bodies[0]["input"][0]["content"]
     image_positions = [
@@ -177,7 +177,7 @@ def test_deepseek_responses_disable_thinking_for_forced_tool_choice() -> None:
         http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(openai.BadRequestError):
-        OpenAIBackend("deepseek-v4-flash-vision-exp", client=client).inspect(
+        OpenAIBackend("deepseek-v4-flash-vision-exp", client=client, output_mode="tool").inspect(
             _inspection_request()
         )
 

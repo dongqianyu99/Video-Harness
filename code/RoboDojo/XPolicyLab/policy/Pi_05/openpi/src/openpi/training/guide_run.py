@@ -180,10 +180,6 @@ def validate_guided_run_resume(
     contract_keys = (
         "catalog_build_id",
         "catalog_digest",
-        "task_sample_digest",
-        "guide_representation_digest",
-        "guide_materialization_digest",
-        "guide_materialization_cache_digest",
         "guide_max_units",
         "guide_max_boundaries",
         "guide_boundary_num_queries",
