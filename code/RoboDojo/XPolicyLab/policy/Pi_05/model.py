@@ -158,7 +158,9 @@ class Model(ModelTemplate):
 
         return session_module.TaskGuideSession(
             documents_root=absolute_path("guidance_documents_root"),
-            dataset_root=absolute_path("guidance_dataset_root"),
+            guide_materialization_cache_root=absolute_path(
+                "guidance_materialization_cache_root"
+            ),
             max_boundaries=self._positive_config_int(
                 model_cfg, "guidance_max_boundaries"
             ),

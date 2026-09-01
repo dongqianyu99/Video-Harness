@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 
@@ -17,7 +18,13 @@ class PaligemmaTokenizer:
 
         path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
         with path.open("rb") as f:
-            self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+            model_proto = f.read()
+        self._cache_digest = hashlib.sha256(model_proto).hexdigest()
+        self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=model_proto)
+
+    @property
+    def cache_digest(self) -> str:
+        return self._cache_digest
 
     def tokenize(self, prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         cleaned_text = prompt.strip().replace("_", " ").replace("\n", " ")

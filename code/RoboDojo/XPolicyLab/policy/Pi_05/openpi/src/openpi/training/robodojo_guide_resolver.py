@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 import importlib
 from pathlib import Path
 from typing import Any
@@ -12,101 +11,6 @@ from openpi.models.guide_inputs import GuideInput
 from openpi.models.guide_materializer import GuideMaterializerConfig
 from openpi.models.guide_materializer import materialize_guide
 from openpi.training.guide_dataset import GuideRecord
-
-
-def _pickle_safe_json(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _pickle_safe_json(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_pickle_safe_json(item) for item in value]
-    return value
-
-
-@dataclass(frozen=True, slots=True)
-class GuideDocumentSnapshot:
-    """Pickle-safe Guide identity plus media route validated by the parent."""
-
-    document_id: str
-    source_episode_index: int
-    task_index: int
-    task_instruction: str
-    document: dict[str, Any]
-
-    @classmethod
-    def from_guide_document(cls, source: Any) -> GuideDocumentSnapshot:
-        document = getattr(source, "document", None)
-        if not isinstance(document, Mapping):
-            raise ValueError("GuideDocument snapshot source has no document mapping")
-        media_source = document.get("source")
-        if not isinstance(media_source, Mapping):
-            raise ValueError("GuideDocument snapshot source has no media route")
-        return cls(
-            document_id=source.document_id,
-            source_episode_index=source.source_episode_index,
-            task_index=source.task_index,
-            task_instruction=source.task_instruction,
-            document={
-                "document_id": source.document_id,
-                "source": _pickle_safe_json(media_source),
-            },
-        )
-
-
-class _SnapshotCatalog:
-    def __init__(self, documents: tuple[GuideDocumentSnapshot, ...]) -> None:
-        self.documents = documents
-        self._by_document = {
-            document.document_id: document for document in documents
-        }
-        if len(self._by_document) != len(documents):
-            raise ValueError("worker Guide snapshot contains duplicate document IDs")
-
-    def by_document_id(self, document_id: str) -> GuideDocumentSnapshot:
-        try:
-            return self._by_document[document_id]
-        except KeyError as exc:
-            raise ValueError(
-                f"worker Guide snapshot has no document_id={document_id!r}"
-            ) from exc
-
-
-@dataclass(frozen=True)
-class RoboDojoGuideResolverFactory:
-    """Pickle-safe factory for one worker-local document-centric resolver."""
-
-    dataset_root: Path
-    guide_records: tuple[GuideRecord, ...]
-    document_snapshots: tuple[GuideDocumentSnapshot, ...]
-    guide_plans: tuple[Any, ...]
-    materializer_config: GuideMaterializerConfig
-
-    def __post_init__(self) -> None:
-        record_ids = tuple(record.document_id for record in self.guide_records)
-        snapshot_ids = tuple(
-            document.document_id for document in self.document_snapshots
-        )
-        plan_ids = tuple(getattr(plan, "document_id", None) for plan in self.guide_plans)
-        if record_ids != snapshot_ids or record_ids != plan_ids:
-            raise ValueError(
-                "worker Guide records, Document snapshots, and GuidePlans must align"
-            )
-
-    def __call__(self) -> VideoHarnessGuideResolver:
-        catalog = _SnapshotCatalog(self.document_snapshots)
-        tokenizer_module = importlib.import_module("openpi.models.tokenizer")
-        boundary_tokenizer = tokenizer_module.PaligemmaTokenizer(self.materializer_config.max_boundary_text_tokens)
-        transition_tokenizer = tokenizer_module.PaligemmaTokenizer(self.materializer_config.max_transition_text_tokens)
-        return VideoHarnessGuideResolver(
-            document_catalog=catalog,
-            guide_records=self.guide_records,
-            dataset_root=self.dataset_root,
-            boundary_tokenizer=boundary_tokenizer,
-            transition_tokenizer=transition_tokenizer,
-            materializer_config=self.materializer_config,
-            plans_by_document={
-                plan.document_id: plan for plan in self.guide_plans
-            },
-        )
 
 
 def _default_plan_builder(catalog: Any, *, document_id: str) -> Any:
@@ -220,45 +124,6 @@ def _load_validated_boundaries(
     return tuple(
         _validate_rgb_views(payload, context=f"{context}, Boundary {index}") for index, payload in enumerate(payloads)
     )
-
-
-def preflight_guide_media(
-    *,
-    document_catalog: Any,
-    guide_records: Sequence[GuideRecord],
-    plans_by_document: Mapping[str, Any],
-    dataset_root: Path,
-    frame_loader: Any | None = None,
-) -> dict[str, int]:
-    """Decode every accepted Guide Boundary before training starts."""
-
-    records = tuple(guide_records)
-    loader = _default_frame_loader(Path(dataset_root)) if frame_loader is None else frame_loader
-    boundary_count = 0
-    for record in sorted(records, key=lambda value: value.guide_index):
-        if not isinstance(record, GuideRecord):
-            raise ValueError("guide_records must contain GuideRecord values")
-        context = _guide_context(record)
-        try:
-            source = document_catalog.by_document_id(record.document_id)
-            _validate_source_identity(source, record)
-            plan = plans_by_document[record.document_id]
-            _validate_plan_identity(plan, record)
-            payloads = _load_validated_boundaries(
-                frame_loader=loader,
-                document=source.document,
-                boundaries=plan.boundaries,
-                context=context,
-            )
-            boundary_count += len(payloads)
-            del payloads
-        except Exception as exc:
-            raise ValueError(f"VideoHarness Guide media preflight failed for {context}: {exc}") from exc
-    return {
-        "documents": len(records),
-        "boundaries": boundary_count,
-        "camera_frames": 3 * boundary_count,
-    }
 
 
 class VideoHarnessGuideResolver:

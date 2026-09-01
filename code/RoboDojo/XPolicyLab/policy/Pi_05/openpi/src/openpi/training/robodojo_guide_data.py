@@ -13,19 +13,17 @@ import jax
 
 from openpi.models.guide_inputs import GUIDE_REPRESENTATION_DIGEST
 from openpi.models.guide_materializer import GuideMaterializerConfig
-from openpi.training.guide_cache import ConstantResolverFactory
 from openpi.training.guide_cache import ProcessLocalGuideResolver
 from openpi.training.guide_collator import GuidanceBatchCollator
 from openpi.training.guide_data_loader import GuidedDataLoader
 from openpi.training.guide_dataset import GuideCatalog
 from openpi.training.guide_dataset import GuidedDataset
 from openpi.training.guide_dataset import TaskSampleIndex
+from openpi.training.guide_materialization_cache import CachedGuideResolverFactory
+from openpi.training.guide_materialization_cache import ensure_guide_materialization_cache
 from openpi.training.guide_native_dataset import transform_dataset_preserving_identity
 from openpi.training.guide_sampler import GuidanceFirstBatchSampler
-from openpi.training.robodojo_guide_resolver import GuideDocumentSnapshot
-from openpi.training.robodojo_guide_resolver import RoboDojoGuideResolverFactory
 from openpi.training.robodojo_guide_resolver import VideoHarnessGuideResolver
-from openpi.training.robodojo_guide_resolver import preflight_guide_media
 
 _ROBOTDOJO_FPS = 25
 _VIEW_KEYS = {
@@ -42,6 +40,7 @@ class RoboDojoGuidedDataConfig:
     repo_id: str
     dataset_root: Path
     documents_root: Path
+    guide_materialization_cache_root: Path
     guides_per_batch: int
     queries_per_guide: int
     seed: int
@@ -66,9 +65,25 @@ class RoboDojoGuidedDataConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.repo_id, str) or not self.repo_id.strip():
             raise ValueError("repo_id must be a non-empty string")
-        for name in ("dataset_root", "documents_root"):
+        for name in (
+            "dataset_root",
+            "documents_root",
+            "guide_materialization_cache_root",
+        ):
             if not isinstance(getattr(self, name), Path):
                 raise ValueError(f"{name} must be an explicit pathlib.Path")
+        cache_root = self.guide_materialization_cache_root.resolve()
+        for name in ("dataset_root", "documents_root"):
+            source_root = getattr(self, name).resolve()
+            if (
+                cache_root == source_root
+                or cache_root in source_root.parents
+                or source_root in cache_root.parents
+            ):
+                raise ValueError(
+                    "guide_materialization_cache_root must be disjoint from "
+                    f"{name}"
+                )
         for name in (
             "guides_per_batch",
             "queries_per_guide",
@@ -404,13 +419,6 @@ def create_robodojo_guided_data_loader(
         max_boundaries=guided_data_config.max_boundaries,
         plan_builder=plan_builder,
     )
-    media_preflight = preflight_guide_media(
-        document_catalog=document_catalog,
-        guide_records=guide_catalog.records,
-        plans_by_document=plans_by_document,
-        dataset_root=guided_data_config.dataset_root,
-        frame_loader=frame_loader,
-    )
     sampler = GuidanceFirstBatchSampler(
         guide_catalog=guide_catalog,
         task_sample_index=task_samples,
@@ -429,43 +437,40 @@ def create_robodojo_guided_data_loader(
         boundary_num_queries=guided_data_config.guide_boundary_num_queries,
         transition_num_queries=guided_data_config.guide_transition_num_queries,
     )
-
-    if guided_data_config.num_workers > 0:
-        document_snapshots = tuple(
-            GuideDocumentSnapshot.from_guide_document(
-                document_catalog.by_document_id(record.document_id)
-            )
-            for record in guide_catalog.records
-        )
-        guide_plans = tuple(
-            plans_by_document[record.document_id]
-            for record in guide_catalog.records
-        )
-        resolver_factory = RoboDojoGuideResolverFactory(
-            dataset_root=guided_data_config.dataset_root,
-            guide_records=guide_catalog.records,
-            document_snapshots=document_snapshots,
-            guide_plans=guide_plans,
-            materializer_config=materializer_config,
-        )
-    else:
-        resolver = VideoHarnessGuideResolver(
-            document_catalog=document_catalog,
-            guide_records=guide_catalog.records,
-            dataset_root=guided_data_config.dataset_root,
-            boundary_tokenizer=_make_tokenizer(
-                boundary_tokenizer,
-                guided_data_config.max_boundary_text_tokens,
-            ),
-            transition_tokenizer=_make_tokenizer(
-                transition_tokenizer,
-                guided_data_config.max_transition_text_tokens,
-            ),
-            materializer_config=materializer_config,
-            plans_by_document=plans_by_document,
-            frame_loader=frame_loader,
-        )
-        resolver_factory = ConstantResolverFactory(resolver)
+    boundary_tokenizer = _make_tokenizer(
+        boundary_tokenizer,
+        guided_data_config.max_boundary_text_tokens,
+    )
+    transition_tokenizer = _make_tokenizer(
+        transition_tokenizer,
+        guided_data_config.max_transition_text_tokens,
+    )
+    source_resolver = VideoHarnessGuideResolver(
+        document_catalog=document_catalog,
+        guide_records=guide_catalog.records,
+        dataset_root=guided_data_config.dataset_root,
+        boundary_tokenizer=boundary_tokenizer,
+        transition_tokenizer=transition_tokenizer,
+        materializer_config=materializer_config,
+        plans_by_document=plans_by_document,
+        frame_loader=frame_loader,
+    )
+    materialization_cache = ensure_guide_materialization_cache(
+        cache_root=guided_data_config.guide_materialization_cache_root,
+        catalog_digest=guide_catalog.catalog_digest,
+        guide_records=guide_catalog.records,
+        document_catalog=document_catalog,
+        plans_by_document=plans_by_document,
+        materializer_config=materializer_config,
+        boundary_tokenizer=boundary_tokenizer,
+        transition_tokenizer=transition_tokenizer,
+        source_resolver=source_resolver,
+    )
+    resolver_factory = CachedGuideResolverFactory(
+        guide_records=guide_catalog.records,
+        artifact_records=materialization_cache.records,
+        materializer_config=materializer_config,
+    )
 
     cached_resolver = ProcessLocalGuideResolver(
         resolver_factory=resolver_factory,
@@ -507,7 +512,17 @@ def create_robodojo_guided_data_loader(
             "prefetch_factor": guided_data_config.prefetch_factor,
             "guide_cache_entries": guided_data_config.guide_cache_entries,
             "guide_cache_max_bytes": guided_data_config.guide_cache_max_bytes,
-            "guide_media_preflight": media_preflight,
+            "guide_materialization_cache_root": str(
+                guided_data_config.guide_materialization_cache_root
+            ),
+            "guide_materialization_digest": (
+                materialization_cache.materialization_digest
+            ),
+            "guide_materialization_cache_digest": (
+                materialization_cache.cache_digest
+            ),
+            "guide_materialization_cache": dict(materialization_cache.stats),
+            "source_media_validation": "cache_only",
             "sampler_stats": dataclasses.asdict(sampler.stats),
             "guide_max_units": guided_data_config.max_units,
             "guide_max_boundaries": guided_data_config.max_boundaries,

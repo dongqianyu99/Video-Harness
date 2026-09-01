@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-import pickle
 from types import MappingProxyType
-from types import SimpleNamespace
 
 import jax
 import numpy as np
@@ -10,12 +8,8 @@ import pytest
 
 from openpi.models.guide_inputs import GuideInput
 from openpi.models.guide_materializer import GuideMaterializerConfig
-from openpi.training import robodojo_guide_resolver as _resolver_module
 from openpi.training.guide_dataset import GuideRecord
-from openpi.training.robodojo_guide_resolver import GuideDocumentSnapshot
-from openpi.training.robodojo_guide_resolver import RoboDojoGuideResolverFactory
 from openpi.training.robodojo_guide_resolver import VideoHarnessGuideResolver
-from openpi.training.robodojo_guide_resolver import preflight_guide_media
 
 
 @dataclass(frozen=True)
@@ -64,14 +58,6 @@ class _Catalog:
         if document_id != self.source.document_id:
             raise ValueError(document_id)
         return self.source
-
-
-class _CatalogMany:
-    def __init__(self, sources: tuple[_Source, ...]):
-        self.sources = {source.document_id: source for source in sources}
-
-    def by_document_id(self, document_id: str) -> _Source:
-        return self.sources[document_id]
 
 
 class _Tokenizer:
@@ -175,49 +161,6 @@ def test_resolver_builds_three_view_guide_from_document_record() -> None:
     assert all(not isinstance(leaf, str) for leaf in jax.tree_util.tree_leaves(guide))
 
 
-def test_worker_factory_uses_pickled_parent_snapshot_without_catalog_reload(
-    monkeypatch,
-) -> None:
-    record, catalog, plan = _setup()
-    frame_loader = _FrameLoader()
-    imports = []
-
-    def import_module(name):
-        imports.append(name)
-        if name == "video_harness.reader":
-            raise AssertionError("worker must not reload the Document catalog")
-        if name == "openpi.models.tokenizer":
-            return SimpleNamespace(PaligemmaTokenizer=_Tokenizer)
-        raise AssertionError(f"unexpected import {name!r}")
-
-    monkeypatch.setattr(_resolver_module.importlib, "import_module", import_module)
-    monkeypatch.setattr(
-        _resolver_module,
-        "_default_frame_loader",
-        lambda _root: frame_loader,
-    )
-    factory = RoboDojoGuideResolverFactory(
-        dataset_root=Path("/dataset"),
-        guide_records=(record,),
-        document_snapshots=(
-            GuideDocumentSnapshot.from_guide_document(catalog.source),
-        ),
-        guide_plans=(plan,),
-        materializer_config=_config(),
-    )
-    assert factory.document_snapshots[0].document == {
-        "document_id": "doc",
-        "source": {},
-    }
-
-    resolver = pickle.loads(pickle.dumps(factory))()
-    guide = resolver(record)
-
-    assert isinstance(guide, GuideInput)
-    assert imports == ["openpi.models.tokenizer"]
-    assert frame_loader.calls[0][0]["document_id"] == "doc"
-
-
 def test_resolver_uses_shared_maximum_shape() -> None:
     record, catalog, plan = _setup()
     resolver = VideoHarnessGuideResolver(
@@ -295,103 +238,3 @@ def test_resolver_rejects_non_rgb_or_missing_view_payload() -> None:
 
     with pytest.raises(ValueError, match="RGB"):
         resolver(record)
-
-
-def _preflight_setup():
-    record_a, _, plan_a = _setup()
-    record_b = GuideRecord(1, "doc-b", 11, 4, "close drawer")
-    source_a = _Source(
-        "doc",
-        10,
-        3,
-        "stack blocks",
-        MappingProxyType({"document_id": "doc", "source": MappingProxyType({})}),
-    )
-    source_b = _Source(
-        "doc-b",
-        11,
-        4,
-        "close drawer",
-        MappingProxyType({"document_id": "doc-b", "source": MappingProxyType({})}),
-    )
-    plan_b = _Plan(
-        "doc-b",
-        11,
-        4,
-        "close drawer",
-        (_Boundary("b0000", 0, 0, 5, 0.2, ("h", "l", "r")),),
-        (_Unit("u0000", 0, 0, 0, "close"),),
-    )
-    return (
-        (record_b, record_a),
-        _CatalogMany((source_a, source_b)),
-        {"doc": plan_a, "doc-b": plan_b},
-    )
-
-
-def test_preflight_decodes_all_guides_in_stable_order_and_returns_counts() -> None:
-    records, catalog, plans = _preflight_setup()
-    frame_loader = _FrameLoader()
-
-    counts = preflight_guide_media(
-        document_catalog=catalog,
-        guide_records=records,
-        plans_by_document=plans,
-        dataset_root=Path("/dataset"),
-        frame_loader=frame_loader,
-    )
-
-    assert counts == {"documents": 2, "boundaries": 3, "camera_frames": 9}
-    assert [call[0]["document_id"] for call in frame_loader.calls] == ["doc", "doc-b"]
-    assert frame_loader.calls[0][1] == (
-        {"episode_frame_index": 0, "timestamp_s": 0.0},
-        {"episode_frame_index": 10, "timestamp_s": 0.4},
-    )
-    assert frame_loader.calls[1][1] == ({"episode_frame_index": 5, "timestamp_s": 0.2},)
-
-
-def test_preflight_late_decode_failure_has_guide_context() -> None:
-    records, catalog, plans = _preflight_setup()
-
-    class _FailingLoader(_FrameLoader):
-        def load_views_rgb_many(self, document, frame_refs):
-            if document["document_id"] == "doc-b":
-                self.calls.append((document, tuple(frame_refs)))
-                raise RuntimeError("corrupt media")
-            return super().load_views_rgb_many(document, frame_refs)
-
-    frame_loader = _FailingLoader()
-    with pytest.raises(
-        ValueError,
-        match=("media preflight failed for guide_index=1, document_id='doc-b', source_episode_index=11: corrupt media"),
-    ):
-        preflight_guide_media(
-            document_catalog=catalog,
-            guide_records=records,
-            plans_by_document=plans,
-            dataset_root=Path("/dataset"),
-            frame_loader=frame_loader,
-        )
-
-    assert [call[0]["document_id"] for call in frame_loader.calls] == ["doc", "doc-b"]
-
-
-@pytest.mark.parametrize("failure", ["short", "malformed"])
-def test_preflight_rejects_short_or_malformed_boundary_payloads(failure: str) -> None:
-    record, catalog, plan = _setup()
-
-    class _BadLoader:
-        def load_views_rgb_many(self, _document, refs):
-            if failure == "short":
-                return tuple((np.zeros((4, 6, 3), dtype=np.uint8),) * 3 for _ in tuple(refs)[:-1])
-            return tuple((np.zeros((4, 6), dtype=np.uint8),) * 3 for _ in refs)
-
-    expected = "unexpected number of Boundaries" if failure == "short" else "RGB shape"
-    with pytest.raises(ValueError, match=expected):
-        preflight_guide_media(
-            document_catalog=catalog,
-            guide_records=(record,),
-            plans_by_document={"doc": plan},
-            dataset_root=Path("/dataset"),
-            frame_loader=_BadLoader(),
-        )

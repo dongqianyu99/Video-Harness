@@ -22,7 +22,7 @@ repo_id: arx_x5_sim
 # Optional task-level Behavior Document evaluation. All paths must be absolute.
 guidance_enabled: false
 guidance_documents_root: null
-guidance_dataset_root: null
+guidance_materialization_cache_root: null
 guidance_max_boundaries: 64
 guidance_max_units: 32
 guidance_max_boundary_text_tokens: 128

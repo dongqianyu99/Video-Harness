@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from openpi.models.guide_inputs import GuideInput
-from openpi.models.guide_materializer import GuideMaterializerConfig, materialize_guide
+from openpi.models.guide_materializer import GuideMaterializerConfig
 from openpi.models.tokenizer import PaligemmaTokenizer
-from video_harness.media import FFmpegFrameLoader
+from openpi.training.guide_dataset import GuideCatalog
+from openpi.training.guide_materialization_cache import CachedGuideResolver, open_guide_materialization_cache
 from video_harness.reader import GuideDocument, GuideDocumentCatalog, build_guide_plan, load_guide_document_catalog
 
 
@@ -21,7 +21,7 @@ class TaskGuideSession:
         self,
         *,
         documents_root: Path,
-        dataset_root: Path,
+        guide_materialization_cache_root: Path,
         max_boundaries: int,
         max_units: int,
         max_boundary_text_tokens: int,
@@ -29,14 +29,13 @@ class TaskGuideSession:
         boundary_num_queries: int = 8,
         transition_num_queries: int = 4,
         catalog: GuideDocumentCatalog | None = None,
-        frame_loader: Any | None = None,
         boundary_tokenizer: Any | None = None,
         transition_tokenizer: Any | None = None,
         plan_builder: Callable[..., Any] | None = None,
     ) -> None:
         for name, path in (
             ("documents_root", documents_root),
-            ("dataset_root", dataset_root),
+            ("guide_materialization_cache_root", guide_materialization_cache_root),
         ):
             if not isinstance(path, Path) or not path.is_absolute():
                 raise ValueError(f"{name} must be an absolute pathlib.Path")
@@ -44,7 +43,6 @@ class TaskGuideSession:
                 raise FileNotFoundError(f"{name} directory does not exist: {path}")
 
         self._catalog = catalog or load_guide_document_catalog(documents_root)
-        self._frame_loader = frame_loader or FFmpegFrameLoader(dataset_root)
         self._boundary_tokenizer = boundary_tokenizer or PaligemmaTokenizer(
             max_boundary_text_tokens
         )
@@ -60,6 +58,29 @@ class TaskGuideSession:
             transition_num_queries=transition_num_queries,
         )
         self._plan_builder = build_guide_plan if plan_builder is None else plan_builder
+        self._guide_catalog = GuideCatalog.from_document_catalog(self._catalog)
+        plans = {
+            record.document_id: self._plan_builder(
+                self._catalog, document_id=record.document_id
+            )
+            for record in self._guide_catalog.records
+        }
+        cache = open_guide_materialization_cache(
+            cache_root=guide_materialization_cache_root,
+            catalog_digest=self._guide_catalog.catalog_digest,
+            guide_records=self._guide_catalog.records,
+            document_catalog=self._catalog,
+            plans_by_document=plans,
+            materializer_config=self._materializer_config,
+            boundary_tokenizer=self._boundary_tokenizer,
+            transition_tokenizer=self._transition_tokenizer,
+        )
+        self._cache_digest = cache.cache_digest
+        self._resolver = CachedGuideResolver(
+            guide_records=self._guide_catalog.records,
+            artifact_records=cache.records,
+            materializer_config=self._materializer_config,
+        )
         self._guidance: GuideDocument | None = None
         self._guide: GuideInput | None = None
         self.materialization_count = 0
@@ -81,12 +102,14 @@ class TaskGuideSession:
         if self._guidance is None:
             return {
                 "catalog_digest": self.catalog_digest,
+                "guide_materialization_cache_digest": self._cache_digest,
                 "document_id": None,
                 "source_episode_index": None,
                 "task_index": None,
             }
         return {
             "catalog_digest": self.catalog_digest,
+            "guide_materialization_cache_digest": self._cache_digest,
             "document_id": self._guidance.document_id,
             "source_episode_index": self._guidance.source_episode_index,
             "task_index": self._guidance.task_index,
@@ -118,40 +141,8 @@ class TaskGuideSession:
             assert self._guide is not None
             return self._guide
 
-        plan = self._plan_builder(self._catalog, document_id=guidance.document_id)
-        expected_plan_identity = {
-            "document_id": guidance.document_id,
-            "source_episode_index": guidance.source_episode_index,
-            "task_index": guidance.task_index,
-            "task_instruction": guidance.task_instruction,
-        }
-        for field, expected in expected_plan_identity.items():
-            if getattr(plan, field, None) != expected:
-                raise ValueError(
-                    f"evaluation GuidePlan {field} mismatch: "
-                    f"expected {expected!r}, got {getattr(plan, field, None)!r}"
-                )
-
-        def boundary_ref(boundary: Any) -> dict[str, Any]:
-            return {
-                "episode_frame_index": boundary.episode_frame_index,
-                "timestamp_s": boundary.timestamp_s,
-            }
-
-        def decode_boundaries(boundaries: Sequence[Any]) -> tuple[np.ndarray, ...]:
-            payloads = self._frame_loader.load_views_rgb_many(
-                guidance.document,
-                tuple(boundary_ref(boundary) for boundary in boundaries),
-            )
-            return tuple(np.stack(views, axis=0) for views in payloads)
-
-        guide = materialize_guide(
-            plan,
-            boundary_decoder=lambda boundary: decode_boundaries((boundary,))[0],
-            boundaries_decoder=decode_boundaries,
-            boundary_tokenizer=self._boundary_tokenizer,
-            transition_tokenizer=self._transition_tokenizer,
-            config=self._materializer_config,
+        guide = self._resolver(
+            self._guide_catalog.by_document_id(guidance.document_id)
         )
         self._guidance = guidance
         self._guide = guide

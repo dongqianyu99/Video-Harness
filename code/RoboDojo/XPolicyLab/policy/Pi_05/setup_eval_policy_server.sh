@@ -75,7 +75,7 @@ fi
 GUIDANCE_OVERRIDES=()
 if [[ "${PI05_GUIDANCE_ENABLED:-0}" == "1" ]]; then
     : "${PI05_GUIDANCE_DOCUMENTS_ROOT:?Set PI05_GUIDANCE_DOCUMENTS_ROOT}"
-    : "${PI05_GUIDANCE_DATASET_ROOT:?Set PI05_GUIDANCE_DATASET_ROOT}"
+    : "${PI05_GUIDANCE_MATERIALIZATION_CACHE_ROOT:?Set PI05_GUIDANCE_MATERIALIZATION_CACHE_ROOT}"
     : "${PI05_GUIDANCE_MAX_BOUNDARIES:?Set PI05_GUIDANCE_MAX_BOUNDARIES from the corpus report}"
     : "${PI05_GUIDANCE_MAX_UNITS:?Set PI05_GUIDANCE_MAX_UNITS from the corpus report}"
     : "${PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS:?Set PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS from the corpus report}"
@@ -83,7 +83,7 @@ if [[ "${PI05_GUIDANCE_ENABLED:-0}" == "1" ]]; then
     GUIDANCE_OVERRIDES+=(
         guidance_enabled=true
         "guidance_documents_root=${PI05_GUIDANCE_DOCUMENTS_ROOT}"
-        "guidance_dataset_root=${PI05_GUIDANCE_DATASET_ROOT}"
+        "guidance_materialization_cache_root=${PI05_GUIDANCE_MATERIALIZATION_CACHE_ROOT}"
         "guidance_max_boundaries=${PI05_GUIDANCE_MAX_BOUNDARIES}"
         "guidance_max_units=${PI05_GUIDANCE_MAX_UNITS}"
         "guidance_max_boundary_text_tokens=${PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS}"

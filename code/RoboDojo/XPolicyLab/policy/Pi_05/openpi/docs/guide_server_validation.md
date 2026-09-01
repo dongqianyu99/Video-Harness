@@ -17,11 +17,12 @@ export OPENPI_DIR=/path/to/Video-Harness/code/RoboDojo/XPolicyLab/policy/Pi_05/o
 export VIDEO_HARNESS_DIR=/path/to/Video-Harness/code/VideoHarness
 export ROBODOJO_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
 export GUIDE_DOCUMENTS_ROOT=/path/to/documents-openai
+export GUIDE_MATERIALIZATION_CACHE_ROOT=/path/to/cache/robodojo-guides
 export PI05_BASE_PARAMS=/path/to/pi05_base/params
 export GUIDED_RUN_ROOT=/path/to/runs/guided-task-pool
 
 export NATIVE_CONFIG=pi05_base_aloha_full_sim_arx-x5_seed_0
-export LEROBOT_REPO_ID=arx_x5_sim
+export LEROBOT_REPO_ID=RoboDojo_sim_arx-x5_v30
 export GUIDE_GROUPS=4
 export QUERIES_PER_GUIDE=64
 export MAX_BOUNDARIES=64
@@ -46,6 +47,27 @@ test -d "$ROBODOJO_DATASET_ROOT"
 test -d "$GUIDE_DOCUMENTS_ROOT"
 ```
 
+Build the persistent exact-float32 GuideInput cache once. The command fully
+validates existing artifacts and invokes FFmpeg only for missing or corrupt
+artifacts:
+
+```bash
+uv run python scripts/build_guide_materialization_cache.py \
+  --dataset-root "$ROBODOJO_DATASET_ROOT" \
+  --documents-root "$GUIDE_DOCUMENTS_ROOT" \
+  --guide-materialization-cache-root "$GUIDE_MATERIALIZATION_CACHE_ROOT" \
+  --max-boundaries "$MAX_BOUNDARIES" \
+  --max-units "$MAX_UNITS" \
+  --max-boundary-text-tokens "$MAX_BOUNDARY_TEXT_TOKENS" \
+  --max-transition-text-tokens "$MAX_TRANSITION_TEXT_TOKENS" \
+  --guide-boundary-num-queries "$BOUNDARY_QUERIES" \
+  --guide-transition-num-queries "$TRANSITION_QUERIES"
+```
+
+The cache is content-addressed by the Document, GuidePlan, tokenizer, and
+materialization contract. Existing cache artifacts are authoritative: source
+video bytes are not revalidated after a successful build.
+
 ## Gate 1: one real task-pool batch
 
 ```bash
@@ -54,6 +76,7 @@ uv run python scripts/smoke_robodojo_guided_batch.py \
   --repo-id "$LEROBOT_REPO_ID" \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --documents-root "$GUIDE_DOCUMENTS_ROOT" \
+  --guide-materialization-cache-root "$GUIDE_MATERIALIZATION_CACHE_ROOT" \
   --guides-per-batch "$GUIDE_GROUPS" \
   --queries-per-guide "$QUERIES_PER_GUIDE" \
   --max-boundaries "$MAX_BOUNDARIES" \
@@ -81,6 +104,7 @@ uv run python scripts/smoke_guided_forward_backward.py \
   --repo-id "$LEROBOT_REPO_ID" \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --documents-root "$GUIDE_DOCUMENTS_ROOT" \
+  --guide-materialization-cache-root "$GUIDE_MATERIALIZATION_CACHE_ROOT" \
   --guides-per-batch "$GUIDE_GROUPS" \
   --queries-per-guide "$QUERIES_PER_GUIDE" \
   --max-boundaries "$MAX_BOUNDARIES" \
@@ -105,6 +129,7 @@ uv run python scripts/benchmark_guided_data_loader.py \
   --repo-id "$LEROBOT_REPO_ID" \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --documents-root "$GUIDE_DOCUMENTS_ROOT" \
+  --guide-materialization-cache-root "$GUIDE_MATERIALIZATION_CACHE_ROOT" \
   --guides-per-batch "$GUIDE_GROUPS" \
   --queries-per-guide "$QUERIES_PER_GUIDE" \
   --max-boundaries "$MAX_BOUNDARIES" \
@@ -119,16 +144,12 @@ uv run python scripts/benchmark_guided_data_loader.py \
   --output /path/to/logs/guided-data-benchmark.json
 ```
 
-Record data wait p50/p95, cache hits, decode latency, Guide padding, and
-valid/padded query counts. Workers receive parent-validated GuidePlans plus
-compact Document identity/media-route snapshots; they do not rescan or rebuild
-the documents-root catalog. Each worker caches fully materialized GuideInput by
-document ID; it does not cache trainable features.
-Before the loader is returned or workers start, the parent process decodes every
-accepted Guide Boundary from all three camera routes. Any missing, corrupt,
-short, or structurally invalid Guide media therefore fails during startup. This
-preflight does not eagerly decode the native query dataset and cannot prevent a
-later disk mutation or transient I/O failure.
+Record data wait p50/p95, batch bytes, persistent-cache build/reuse counts,
+Guide padding, and valid/padded query counts. The parent fully validates every
+compact artifact before workers start. Workers receive only artifact records
+and the fixed materialization shape; they do not receive Documents, GuidePlans,
+tokenizers, media routes, or FFmpeg loaders. Their bounded in-memory LRU caches
+expanded GuideInput values by document ID and never caches trainable features.
 
 ## Gate 4: tracked training
 
@@ -139,6 +160,7 @@ uv run python scripts/train_guided.py \
   --repo-id "$LEROBOT_REPO_ID" \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
   --documents-root "$GUIDE_DOCUMENTS_ROOT" \
+  --guide-materialization-cache-root "$GUIDE_MATERIALIZATION_CACHE_ROOT" \
   --guides-per-batch "$GUIDE_GROUPS" \
   --queries-per-guide "$QUERIES_PER_GUIDE" \
   --max-boundaries "$MAX_BOUNDARIES" \

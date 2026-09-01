@@ -89,6 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-id", required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--documents-root", type=Path, required=True)
+    parser.add_argument("--guide-materialization-cache-root", type=Path, required=True)
     parser.add_argument("--guides-per-batch", type=int, required=True)
     parser.add_argument("--queries-per-guide", type=int, required=True)
     parser.add_argument("--num-workers", type=int, default=8)
@@ -118,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
         documents_root=args.documents_root,
+        guide_materialization_cache_root=args.guide_materialization_cache_root,
         guides_per_batch=args.guides_per_batch,
         queries_per_guide=args.queries_per_guide,
         seed=args.seed,

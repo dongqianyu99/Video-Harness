@@ -66,7 +66,7 @@ the repository-level `eval_result/` tree.
 The catalog validates every final Document, filters quarantined entries, and
 selects the first accepted document in stable `(episode_index, document_id)`
 order for that task. Every RoboDojo layout and repeat then reuses the same
-materialized Guide.
+cached GuideInput and encoded Guide memory.
 
 Install `VideoHarness` in the Pi_05 OpenPI environment and provide absolute
 artifact paths:
@@ -74,7 +74,7 @@ artifact paths:
 ```bash
 export PI05_GUIDANCE_ENABLED=1
 export PI05_GUIDANCE_DOCUMENTS_ROOT=/path/to/documents-openai
-export PI05_GUIDANCE_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
+export PI05_GUIDANCE_MATERIALIZATION_CACHE_ROOT=/path/to/cache/robodojo-guides
 export PI05_GUIDANCE_MAX_BOUNDARIES=64
 export PI05_GUIDANCE_MAX_UNITS=32
 export PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS=128
@@ -109,7 +109,7 @@ Environment variables used by the adapter scripts:
 | `OPENPI_LOCAL_CACHE_ROOT` | Per-host local cache root for the HF datasets / JAX compilation caches; defaults to `/tmp/openpi-cache-$(hostname)`. |
 | `PI05_GUIDANCE_ENABLED` | Set to `1` to enable task-level Behavior Document evaluation. |
 | `PI05_GUIDANCE_DOCUMENTS_ROOT` | Absolute task-grouped per-episode Document directory. |
-| `PI05_GUIDANCE_DATASET_ROOT` | Absolute LeRobot dataset root used to decode support frames. |
+| `PI05_GUIDANCE_MATERIALIZATION_CACHE_ROOT` | Absolute persistent GuideInput cache built before evaluation. |
 | `PI05_GUIDANCE_MAX_BOUNDARIES` / `MAX_UNITS` | Fixed structural Guide capacity limits. |
 | `PI05_GUIDANCE_MAX_BOUNDARY_TEXT_TOKENS` / `MAX_TRANSITION_TEXT_TOKENS` | Independent fail-closed text budgets. |
 | `PI05_GUIDANCE_BOUNDARY_NUM_QUERIES` / `TRANSITION_NUM_QUERIES` | Boundary/Transition resampler capacities; defaults to 8/4. |

@@ -96,6 +96,7 @@ class _Catalog:
             documents.append(
                 SimpleNamespace(
                     document_id=f"doc-{task}",
+                    document_sha256=f"sha-{task}",
                     source_episode_index=episode_index,
                     task_index=task,
                     task_instruction=f"task {task}",
@@ -163,6 +164,10 @@ class _Tokenizer:
         self.size = size
         self.calls = []
 
+    @property
+    def cache_digest(self):
+        return f"test-tokenizer-{self.size}"
+
     def tokenize_text(self, text):
         self.calls.append(text)
         tokens = np.zeros(self.size, dtype=np.int32)
@@ -227,6 +232,7 @@ def _config(tmp_path: Path):
         repo_id="fake",
         dataset_root=dataset_root,
         documents_root=documents_root,
+        guide_materialization_cache_root=tmp_path / "guide-cache",
         guides_per_batch=2,
         queries_per_guide=2,
         seed=5,
@@ -246,6 +252,15 @@ def _native_train_config():
         assets_dirs=(),
         model=SimpleNamespace(action_horizon=50),
     )
+
+
+def test_config_requires_cache_root_disjoint_from_source_roots(tmp_path):
+    config = _config(tmp_path)
+    with pytest.raises(ValueError, match="disjoint"):
+        dataclasses.replace(
+            config,
+            guide_materialization_cache_root=config.dataset_root / "guide-cache",
+        )
 
 
 def test_factory_builds_global_guidance_first_batch_and_three_view_input(tmp_path):
@@ -275,7 +290,8 @@ def test_factory_builds_global_guidance_first_batch_and_three_view_input(tmp_pat
     assert batch.guide.boundary_text_tokens.shape == (2, 2, 3, 8)
     assert batch.guide.transition_text_tokens.shape == (2, 1, 6)
     assert batch.guide.memory_mask.shape == (2, 20)
-    assert len(frame_loader.calls) == 4
+    # Cache build materializes each Guide once; batch collation performs no decode.
+    assert len(frame_loader.calls) == 2
     assert len(boundary_tokenizer.calls) == 12
     assert len(transition_tokenizer.calls) == 2
     assert loader.guide_catalog.catalog_digest == "catalog-digest"
@@ -283,11 +299,9 @@ def test_factory_builds_global_guidance_first_batch_and_three_view_input(tmp_pat
     assert loader.host_metadata["excluded_guides"] == 1
     assert loader.host_metadata["guide_max_units"] == 1
     assert loader.host_metadata["guide_max_boundaries"] == 2
-    assert loader.host_metadata["guide_media_preflight"] == {
-        "documents": 2,
-        "boundaries": 4,
-        "camera_frames": 12,
-    }
+    assert loader.host_metadata["guide_materialization_cache"]["documents"] == 2
+    assert loader.host_metadata["guide_materialization_cache"]["built"] == 2
+    assert loader.host_metadata["source_media_validation"] == "cache_only"
     assert len(loader.host_metadata["task_sample_digest"]) == 64
     assert len(loader.host_metadata["guide_representation_digest"]) == 64
     # Each task has only its source episode in the native pool; successful
@@ -319,7 +333,7 @@ def test_factory_preflights_every_accepted_guide_before_returning(tmp_path):
 
     with pytest.raises(
         ValueError,
-        match=r"media preflight.*doc-1.*source_episode_index=20",
+        match=r"Guide resolution failed.*doc-1.*source_episode_index=20",
     ):
         create_robodojo_guided_data_loader(
             _native_train_config(),
@@ -392,6 +406,11 @@ def test_worker_loader_preflights_in_parent_before_workers_start(
         "_default_frame_loader",
         lambda _root: frame_loader,
     )
+    monkeypatch.setattr(
+        _guide_data,
+        "_make_tokenizer",
+        lambda _tokenizer, size: _Tokenizer(size),
+    )
 
     loader = create_robodojo_guided_data_loader(
         _native_train_config(),
@@ -401,7 +420,7 @@ def test_worker_loader_preflights_in_parent_before_workers_start(
         transforms_module=_TRANSFORMS,
     )
 
-    assert loader.host_metadata["guide_media_preflight"]["documents"] == 2
+    assert loader.host_metadata["guide_materialization_cache"]["documents"] == 2
     assert [call[0] for call in frame_loader.calls] == [
         "doc-0",
         "doc-1",

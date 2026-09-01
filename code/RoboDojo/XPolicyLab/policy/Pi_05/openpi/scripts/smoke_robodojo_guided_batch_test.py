@@ -36,6 +36,7 @@ def test_smoke_cli_builds_task_level_guidance_config(monkeypatch):
         repo_id="RoboDojo_lerobot_v30_video",
         dataset_root=Path("dataset"),
         documents_root=Path("documents"),
+        guide_materialization_cache_root=Path("guide-cache"),
         guides_per_batch=2,
         queries_per_guide=3,
         max_boundaries=8,

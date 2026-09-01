@@ -21,6 +21,7 @@ def _guided_data(tmp_path: Path, *, batch_size: int = 4) -> RoboDojoGuidedDataCo
         repo_id="fake",
         dataset_root=tmp_path / "dataset",
         documents_root=tmp_path / "documents",
+        guide_materialization_cache_root=tmp_path / "guide-cache",
         guides_per_batch=1,
         queries_per_guide=batch_size,
         seed=7,
