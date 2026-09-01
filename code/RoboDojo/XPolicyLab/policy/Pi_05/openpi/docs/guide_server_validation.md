@@ -119,7 +119,7 @@ uv run python scripts/benchmark_guided_data_loader.py \
   --output /path/to/logs/guided-data-benchmark.json
 ```
 
-Record data wait p50/p95, cache hits, decode latency, bucket promotions, and
+Record data wait p50/p95, cache hits, decode latency, Guide padding, and
 valid/padded query counts. Workers receive parent-validated GuidePlans plus
 compact Document identity/media-route snapshots; they do not rescan or rebuild
 the documents-root catalog. Each worker caches fully materialized GuideInput by
@@ -160,8 +160,8 @@ uv run python scripts/train_guided.py \
 ```
 
 The effective batch is `G * Q * gradient_accumulation_steps`. Resume is valid
-only when the catalog, task-sample index, camera order, buckets, token budgets,
-and Boundary/Transition capacities match the recorded run. Resume restores
+only when the catalog, task-sample index, camera order, shared maximum Guide
+shape, token budgets, and Boundary/Transition capacities match the recorded run. Resume restores
 TrainState, optimizer, EMA, and step but starts a fresh sampler shuffle.
 
 ## Gate 5: closed-loop evaluation

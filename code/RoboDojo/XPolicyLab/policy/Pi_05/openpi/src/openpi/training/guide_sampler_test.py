@@ -122,37 +122,10 @@ def test_sampler_is_reproducible_and_changes_order_across_epochs():
     assert list(sampler) != first
 
 
-def test_sampler_keeps_accumulation_blocks_bucket_homogeneous():
-    catalog = _catalog()
-    buckets = {
-        record.guide_index: ("small" if record.guide_index < 4 else "large")
-        for record in catalog.records
-    }
-    sampler = GuidanceFirstBatchSampler(
-        guide_catalog=catalog,
-        task_sample_index=_samples(),
-        guides_per_batch=1,
-        queries_per_guide=2,
-        seed=5,
-        guide_to_bucket=buckets,
-        remainder_strategy="pad_mask",
-        batch_block_size=2,
-    )
-    batches = list(sampler)
-
-    for start in range(0, len(batches), 2):
-        block = batches[start : start + 2]
-        block_buckets = {
-            buckets[batch[0].guide_index]
-            for batch in block
-        }
-        assert len(block_buckets) == 1
-
-
-def test_bucket_count_weighting_gives_each_document_equal_first_batch_marginal():
+def test_sampler_keeps_each_document_equal_first_batch_marginal():
     documents = tuple(
         SimpleNamespace(
-            document_id=f"weighted-{index}",
+            document_id=f"uniform-{index}",
             source_episode_index=index,
             task_index=0,
             task_instruction="shared task",
@@ -160,53 +133,54 @@ def test_bucket_count_weighting_gives_each_document_equal_first_batch_marginal()
         for index in range(12)
     )
     catalog = GuideCatalog.from_document_catalog(
-        SimpleNamespace(catalog_digest="weighted", documents=documents)
+        SimpleNamespace(catalog_digest="uniform", documents=documents)
     )
-    task_samples = TaskSampleIndex.from_episode_records(
-        (
-            SimpleNamespace(
-                episode_index=0,
-                task_index=0,
-                dataset_from_index=0,
-                dataset_to_index=20,
-            ),
-        )
-    )
-    buckets = {
-        record.guide_index: ("small" if record.guide_index < 4 else "large")
-        for record in catalog.records
-    }
     sampler = GuidanceFirstBatchSampler(
         guide_catalog=catalog,
-        task_sample_index=task_samples,
+        task_sample_index=TaskSampleIndex.from_episode_records(
+            (
+                SimpleNamespace(
+                    episode_index=0,
+                    task_index=0,
+                    dataset_from_index=0,
+                    dataset_to_index=20,
+                ),
+            )
+        ),
         guides_per_batch=2,
         queries_per_guide=1,
         seed=17,
-        guide_to_bucket=buckets,
         remainder_strategy="drop",
     )
     exposure = Counter()
-    for epoch in range(1200):
+    for epoch in range(6000):
         sampler.set_epoch(epoch)
         exposure.update(sample.guide_index for sample in next(iter(sampler)))
 
     assert set(exposure) == set(range(12))
-    assert max(exposure.values()) / min(exposure.values()) < 1.25
+    assert max(exposure.values()) / min(exposure.values()) < 1.15
 
 
-def test_drop_sampler_rejects_unpromoted_small_bucket():
-    catalog = _catalog()
-    buckets = {
-        record.guide_index: ("orphan" if record.guide_index == 0 else "large")
-        for record in catalog.records
-    }
-    with pytest.raises(ValueError, match="promote it to a larger bucket"):
+def test_sampler_rejects_catalog_smaller_than_g():
+    catalog = GuideCatalog.from_document_catalog(
+        SimpleNamespace(
+            catalog_digest="small",
+            documents=(
+                SimpleNamespace(
+                    document_id="only-guide",
+                    source_episode_index=10,
+                    task_index=0,
+                    task_instruction="task zero",
+                ),
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="fewer than guides_per_batch"):
         GuidanceFirstBatchSampler(
             guide_catalog=catalog,
             task_sample_index=_samples(),
             guides_per_batch=2,
             queries_per_guide=1,
-            guide_to_bucket=buckets,
             remainder_strategy="drop",
         )
 

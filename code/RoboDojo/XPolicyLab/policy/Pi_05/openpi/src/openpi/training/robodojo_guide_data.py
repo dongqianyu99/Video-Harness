@@ -13,9 +13,6 @@ import jax
 
 from openpi.models.guide_inputs import GUIDE_REPRESENTATION_DIGEST
 from openpi.models.guide_materializer import GuideMaterializerConfig
-from openpi.training.guide_buckets import GuideLengthBucket
-from openpi.training.guide_buckets import assign_guide_length_buckets
-from openpi.training.guide_buckets import normalize_guide_length_buckets
 from openpi.training.guide_cache import ConstantResolverFactory
 from openpi.training.guide_cache import ProcessLocalGuideResolver
 from openpi.training.guide_collator import GuidanceBatchCollator
@@ -63,7 +60,6 @@ class RoboDojoGuidedDataConfig:
     guide_cache_max_bytes: int = 256 * 1024 * 1024
     device_prefetch_size: int = 2
     require_all_tasks: bool = True
-    guide_length_buckets: tuple[GuideLengthBucket, ...] | None = None
     remainder_strategy: str = "drop"
     gradient_accumulation_steps: int = 1
 
@@ -110,17 +106,6 @@ class RoboDojoGuidedDataConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
-        if self.guide_length_buckets is not None:
-            buckets = normalize_guide_length_buckets(self.guide_length_buckets)
-            if (
-                buckets[-1].max_units > self.max_units
-                or buckets[-1].max_boundaries > self.max_boundaries
-            ):
-                raise ValueError(
-                    "largest Guide bucket must fit max_units/max_boundaries"
-                )
-            object.__setattr__(self, "guide_length_buckets", buckets)
-
     @property
     def batch_size(self) -> int:
         return self.guides_per_batch * self.queries_per_guide
@@ -285,6 +270,39 @@ def _guide_length_summary(document_lengths: Any) -> dict[str, float | int]:
     }
 
 
+def _build_guide_plans(
+    document_catalog: Any,
+    guide_catalog: GuideCatalog,
+    *,
+    max_units: int,
+    max_boundaries: int,
+    plan_builder: Any | None,
+) -> tuple[dict[str, Any], dict[str, tuple[int, int]]]:
+    if plan_builder is None:
+        reader = importlib.import_module("video_harness.reader")
+        plan_builder = reader.build_guide_plan
+
+    plans: dict[str, Any] = {}
+    lengths: dict[str, tuple[int, int]] = {}
+    for record in guide_catalog.records:
+        plan = plan_builder(document_catalog, document_id=record.document_id)
+        if getattr(plan, "document_id", None) != record.document_id:
+            raise ValueError(
+                f"GuidePlan document mismatch for guide_index={record.guide_index}"
+            )
+        unit_count = len(plan.units)
+        boundary_count = len(plan.boundaries)
+        if unit_count > max_units or boundary_count > max_boundaries:
+            raise ValueError(
+                f"Guide {record.document_id!r} has {unit_count} units/"
+                f"{boundary_count} boundaries and exceeds the shared maximum "
+                f"shape u{max_units}-b{max_boundaries}"
+            )
+        plans[record.document_id] = plan
+        lengths[record.document_id] = (unit_count, boundary_count)
+    return plans, lengths
+
+
 def _make_tokenizer(tokenizer: Any | None, max_tokens: int) -> Any:
     if tokenizer is not None:
         return tokenizer
@@ -379,23 +397,17 @@ def create_robodojo_guided_data_loader(
         episode_records, dataset_length=len(transformed_dataset)
     )
 
-    assignment = assign_guide_length_buckets(
-        document_catalog=document_catalog,
-        guide_catalog=guide_catalog,
-        buckets=guided_data_config.guide_length_buckets,
+    plans_by_document, document_lengths = _build_guide_plans(
+        document_catalog,
+        guide_catalog,
         max_units=guided_data_config.max_units,
         max_boundaries=guided_data_config.max_boundaries,
-        max_boundary_text_tokens=guided_data_config.max_boundary_text_tokens,
-        max_transition_text_tokens=guided_data_config.max_transition_text_tokens,
-        boundary_num_queries=guided_data_config.guide_boundary_num_queries,
-        transition_num_queries=guided_data_config.guide_transition_num_queries,
-        minimum_bucket_guides=guided_data_config.guides_per_batch,
         plan_builder=plan_builder,
     )
     media_preflight = preflight_guide_media(
         document_catalog=document_catalog,
         guide_records=guide_catalog.records,
-        plans_by_document=assignment.plans_by_document,
+        plans_by_document=plans_by_document,
         dataset_root=guided_data_config.dataset_root,
         frame_loader=frame_loader,
     )
@@ -405,7 +417,6 @@ def create_robodojo_guided_data_loader(
         guides_per_batch=guided_data_config.guides_per_batch,
         queries_per_guide=guided_data_config.queries_per_guide,
         seed=guided_data_config.seed,
-        guide_to_bucket=assignment.guide_to_bucket,
         remainder_strategy=guided_data_config.remainder_strategy,
         batch_block_size=guided_data_config.gradient_accumulation_steps,
     )
@@ -427,7 +438,7 @@ def create_robodojo_guided_data_loader(
             for record in guide_catalog.records
         )
         guide_plans = tuple(
-            assignment.plans_by_document[record.document_id]
+            plans_by_document[record.document_id]
             for record in guide_catalog.records
         )
         resolver_factory = RoboDojoGuideResolverFactory(
@@ -436,9 +447,6 @@ def create_robodojo_guided_data_loader(
             document_snapshots=document_snapshots,
             guide_plans=guide_plans,
             materializer_config=materializer_config,
-            materializer_configs_by_guide=dict(
-                assignment.guide_to_materializer_config
-            ),
         )
     else:
         resolver = VideoHarnessGuideResolver(
@@ -454,8 +462,7 @@ def create_robodojo_guided_data_loader(
                 guided_data_config.max_transition_text_tokens,
             ),
             materializer_config=materializer_config,
-            materializer_configs_by_guide=assignment.guide_to_materializer_config,
-            plans_by_document=assignment.plans_by_document,
+            plans_by_document=plans_by_document,
             frame_loader=frame_loader,
         )
         resolver_factory = ConstantResolverFactory(resolver)
@@ -488,7 +495,6 @@ def create_robodojo_guided_data_loader(
             "catalog_build_id": getattr(document_catalog, "build_id", None),
             "catalog_digest": guide_catalog.catalog_digest,
             "task_sample_digest": task_samples.digest,
-            "guide_bucket_digest": assignment.assignment_digest,
             "guide_representation_digest": GUIDE_REPRESENTATION_DIGEST,
             "accepted_guides": len(guide_catalog.records),
             "excluded_guides": len(exclusions),
@@ -503,12 +509,10 @@ def create_robodojo_guided_data_loader(
             "guide_cache_max_bytes": guided_data_config.guide_cache_max_bytes,
             "guide_media_preflight": media_preflight,
             "sampler_stats": dataclasses.asdict(sampler.stats),
-            "guide_length_buckets": tuple(
-                bucket.bucket_id for bucket in assignment.effective_buckets
-            ),
-            "guide_bucket_counts": assignment.bucket_counts,
+            "guide_max_units": guided_data_config.max_units,
+            "guide_max_boundaries": guided_data_config.max_boundaries,
             "guide_length_summary": _guide_length_summary(
-                assignment.document_lengths
+                document_lengths
             ),
             "guide_boundary_num_queries": (
                 guided_data_config.guide_boundary_num_queries

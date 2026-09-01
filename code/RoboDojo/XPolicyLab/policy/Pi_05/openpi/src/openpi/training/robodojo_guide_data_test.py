@@ -8,10 +8,9 @@ import numpy as np
 import pytest
 
 from openpi.models import model as _model
-from openpi.training import guide_buckets as _guide_buckets
 from openpi.training import robodojo_guide_data as _guide_data
 from openpi.training import robodojo_guide_resolver as _guide_resolver
-from openpi.training.guide_buckets import GuideLengthBucket
+from openpi.training.guide_dataset import GuideCatalog
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
 
@@ -231,10 +230,8 @@ def _config(tmp_path: Path):
         guides_per_batch=2,
         queries_per_guide=2,
         seed=5,
-        # Safety caps are intentionally much larger than the fixture Guides.
-        # Automatic buckets must still materialize the observed 1/2 shape.
-        max_boundaries=64,
-        max_units=32,
+        max_boundaries=2,
+        max_units=1,
         max_boundary_text_tokens=8,
         max_transition_text_tokens=6,
         guide_boundary_num_queries=8,
@@ -284,15 +281,14 @@ def test_factory_builds_global_guidance_first_batch_and_three_view_input(tmp_pat
     assert loader.guide_catalog.catalog_digest == "catalog-digest"
     assert loader.host_metadata["accepted_guides"] == 2
     assert loader.host_metadata["excluded_guides"] == 1
-    assert loader.host_metadata["guide_length_buckets"] == ("u1-b2",)
-    assert loader.host_metadata["guide_bucket_counts"] == (("u1-b2", 2),)
+    assert loader.host_metadata["guide_max_units"] == 1
+    assert loader.host_metadata["guide_max_boundaries"] == 2
     assert loader.host_metadata["guide_media_preflight"] == {
         "documents": 2,
         "boundaries": 4,
         "camera_frames": 12,
     }
     assert len(loader.host_metadata["task_sample_digest"]) == 64
-    assert len(loader.host_metadata["guide_bucket_digest"]) == 64
     assert len(loader.host_metadata["guide_representation_digest"]) == 64
     # Each task has only its source episode in the native pool; successful
     # batching therefore proves source-episode queries are allowed.
@@ -348,6 +344,22 @@ def test_factory_preflights_every_accepted_guide_before_returning(tmp_path):
     ]
 
 
+def test_shared_maximum_shape_rejects_oversized_guide_plan():
+    document_catalog = _Catalog()
+    guide_catalog = GuideCatalog.from_document_catalog(document_catalog)
+    oversized = _plan("doc-0")
+    oversized.units = (*oversized.units, oversized.units[0])
+
+    with pytest.raises(ValueError, match="exceeds the shared maximum shape"):
+        _guide_data._build_guide_plans(  # noqa: SLF001
+            document_catalog,
+            guide_catalog,
+            max_units=1,
+            max_boundaries=2,
+            plan_builder=lambda *_args, **_kwargs: oversized,
+        )
+
+
 def test_worker_loader_preflights_in_parent_before_workers_start(
     tmp_path,
     monkeypatch,
@@ -365,9 +377,15 @@ def test_worker_loader_preflights_in_parent_before_workers_start(
         lambda *_args: _episodes(),
     )
     monkeypatch.setattr(
-        _guide_buckets,
-        "_default_plan_builder",
-        lambda _catalog, *, document_id: _plan(document_id),
+        _guide_data,
+        "_build_guide_plans",
+        lambda _catalog, guide_catalog, **_kwargs: (
+            {
+                record.document_id: _plan(record.document_id)
+                for record in guide_catalog.records
+            },
+            {record.document_id: (1, 2) for record in guide_catalog.records},
+        ),
     )
     monkeypatch.setattr(
         _guide_resolver,
@@ -390,13 +408,12 @@ def test_worker_loader_preflights_in_parent_before_workers_start(
     ]
 
 
-def test_factory_preserves_capacity_fields_in_bucket_materialization(tmp_path):
+def test_factory_preserves_capacity_fields_in_shared_materialization(tmp_path):
     config = dataclasses.replace(
         _config(tmp_path),
         guides_per_batch=1,
         guide_boundary_num_queries=12,
         guide_transition_num_queries=8,
-        guide_length_buckets=(GuideLengthBucket(1, 2),),
     )
     loader = create_robodojo_guided_data_loader(
         _native_train_config(),

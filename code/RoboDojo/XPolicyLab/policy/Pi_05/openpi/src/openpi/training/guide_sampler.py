@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from collections import Counter
-from collections import defaultdict
 from collections import deque
-from collections.abc import Hashable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Integral
 from typing import Any, Literal
@@ -33,8 +31,6 @@ class GuidanceFirstBatchStats:
     valid_query_samples: int
     padded_query_slots: int
     dropped_query_samples: int
-    bucket_batch_counts: tuple[tuple[str, int], ...]
-    bucket_probabilities: tuple[tuple[str, float], ...]
 
 
 class _TaskSampleCycle:
@@ -94,7 +90,6 @@ class GuidanceFirstBatchSampler:
         guides_per_batch: int,
         queries_per_guide: int,
         seed: int = 0,
-        guide_to_bucket: Mapping[int, Hashable] | None = None,
         remainder_strategy: Literal["drop", "pad_mask"] = "drop",
         batch_block_size: int = 1,
     ) -> None:
@@ -120,15 +115,6 @@ class GuidanceFirstBatchSampler:
         self._epoch = 0
         self._remainder_strategy = remainder_strategy
 
-        if guide_to_bucket is None:
-            guide_to_bucket = {
-                record.guide_index: "default" for record in guide_catalog.records
-            }
-        expected_guides = {record.guide_index for record in guide_catalog.records}
-        if set(guide_to_bucket) != expected_guides:
-            raise ValueError("guide_to_bucket keys must exactly match GuideCatalog")
-
-        normalized_buckets: dict[Hashable, list[int]] = defaultdict(list)
         for record in guide_catalog.records:
             task_samples = task_sample_index.samples_for_task(record.task_index)
             if (
@@ -139,26 +125,14 @@ class GuidanceFirstBatchSampler:
                     f"task_index={record.task_index} has {len(task_samples)} samples, "
                     f"fewer than queries_per_guide={self._queries_per_guide}"
                 )
-            bucket = guide_to_bucket[record.guide_index]
-            try:
-                hash(bucket)
-            except TypeError as exc:
-                raise ValueError("Guide bucket identifiers must be hashable") from exc
-            normalized_buckets[bucket].append(record.guide_index)
-
-        self._buckets = tuple(
-            (bucket, tuple(indices))
-            for bucket, indices in sorted(
-                normalized_buckets.items(), key=lambda item: str(item[0])
-            )
+        self._guide_indices = tuple(
+            record.guide_index for record in guide_catalog.records
         )
-        for bucket, guide_indices in self._buckets:
-            if len(guide_indices) < self._guides_per_batch:
-                raise ValueError(
-                    f"bucket {bucket!r} has {len(guide_indices)} Guides; "
-                    "promote it to a larger bucket before sampling with "
-                    f"G={self._guides_per_batch}"
-                )
+        if len(self._guide_indices) < self._guides_per_batch:
+            raise ValueError(
+                f"Guide catalog has {len(self._guide_indices)} documents, fewer "
+                f"than guides_per_batch={self._guides_per_batch}"
+            )
         native_samples = task_sample_index.total_samples
         if self._remainder_strategy == "drop":
             num_batches = native_samples // self.batch_size
@@ -269,45 +243,34 @@ class GuidanceFirstBatchSampler:
         rng = np.random.default_rng(
             np.random.SeedSequence([self._seed, epoch, 0x424C4F43])
         )
-        bucket_weights = np.asarray(
-            [len(guide_indices) for _, guide_indices in self._buckets],
-            dtype=np.float64,
-        )
-        bucket_weights /= np.sum(bucket_weights)
         batches: list[list[GuidedSampleIndex]] = []
-        for block_start in range(0, self._num_batches, self._batch_block_size):
-            bucket_index = int(rng.choice(len(self._buckets), p=bucket_weights))
-            _, guide_indices = self._buckets[bucket_index]
-            for batch_index in range(
-                block_start,
-                block_start + self._batch_block_size,
-            ):
-                selected = rng.choice(
-                    np.asarray(guide_indices, dtype=np.int64),
-                    size=self._guides_per_batch,
-                    replace=False,
-                )
-                batch = self._guide_group(
-                    [int(value) for value in selected],
-                    [True] * self._guides_per_batch,
-                    cycles,
-                )
-                remaining_valid = max(
-                    self._valid_queries_per_epoch
-                    - batch_index * self.batch_size,
-                    0,
-                )
-                valid_slots = min(remaining_valid, self.batch_size)
-                if valid_slots < self.batch_size:
-                    batch = [
-                        GuidedSampleIndex(
-                            sample_index=sample.sample_index,
-                            guide_index=sample.guide_index,
-                            query_valid=sample.query_valid and slot < valid_slots,
-                        )
-                        for slot, sample in enumerate(batch)
-                    ]
-                batches.append(batch)
+        for batch_index in range(self._num_batches):
+            selected = rng.choice(
+                np.asarray(self._guide_indices, dtype=np.int64),
+                size=self._guides_per_batch,
+                replace=False,
+            )
+            batch = self._guide_group(
+                [int(value) for value in selected],
+                [True] * self._guides_per_batch,
+                cycles,
+            )
+            remaining_valid = max(
+                self._valid_queries_per_epoch
+                - batch_index * self.batch_size,
+                0,
+            )
+            valid_slots = min(remaining_valid, self.batch_size)
+            if valid_slots < self.batch_size:
+                batch = [
+                    GuidedSampleIndex(
+                        sample_index=sample.sample_index,
+                        guide_index=sample.guide_index,
+                        query_valid=sample.query_valid and slot < valid_slots,
+                    )
+                    for slot, sample in enumerate(batch)
+                ]
+            batches.append(batch)
         return batches
 
     def _summarize(
@@ -316,20 +279,12 @@ class GuidanceFirstBatchSampler:
         used_guides = 0
         padded_guides = 0
         mixed_task_batches = 0
-        bucket_counts: Counter[str] = Counter()
-        guide_to_bucket = {
-            guide_index: bucket
-            for bucket, guide_indices in self._buckets
-            for guide_index in guide_indices
-        }
         for batch in batches:
             tasks: set[int] = set()
-            first_valid_guide = None
             for start in range(0, len(batch), self._queries_per_guide):
                 group = batch[start : start + self._queries_per_guide]
                 if any(sample.query_valid for sample in group):
                     used_guides += 1
-                    first_valid_guide = group[0].guide_index
                     tasks.add(
                         self._guide_catalog.by_guide_index(
                             group[0].guide_index
@@ -339,16 +294,12 @@ class GuidanceFirstBatchSampler:
                     padded_guides += 1
             if len(tasks) > 1:
                 mixed_task_batches += 1
-            if first_valid_guide is None:
-                first_valid_guide = batch[0].guide_index
-            bucket_counts[str(guide_to_bucket[first_valid_guide])] += 1
 
         valid_queries = sum(
             sample.query_valid for batch in batches for sample in batch
         )
         total_slots = len(batches) * self.batch_size
         total_native_samples = self._task_sample_index.total_samples
-        total_guides = len(self._guide_catalog.records)
         return GuidanceFirstBatchStats(
             guides_per_batch=self._guides_per_batch,
             queries_per_guide=self._queries_per_guide,
@@ -360,12 +311,4 @@ class GuidanceFirstBatchSampler:
             valid_query_samples=valid_queries,
             padded_query_slots=total_slots - valid_queries,
             dropped_query_samples=total_native_samples - valid_queries,
-            bucket_batch_counts=tuple(sorted(bucket_counts.items())),
-            bucket_probabilities=tuple(
-                (
-                    str(bucket),
-                    len(guide_indices) / total_guides,
-                )
-                for bucket, guide_indices in self._buckets
-            ),
         )

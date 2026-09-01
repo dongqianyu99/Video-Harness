@@ -17,7 +17,6 @@ from openpi.models.guide_inputs import GuideConditionedBatch
 from openpi.models.guide_inputs import validate_guide_conditioned_batch
 from openpi.models.guide_pi0 import GuidePi0
 from openpi.models.guide_pi0_config import GuidePi0Config
-from openpi.training.guide_buckets import parse_guide_length_bucket
 from openpi.training.guide_data_loader import prefetch_guided_batches
 from openpi.training.guide_run import GuidedResumeContractError
 from openpi.training.guide_run import GuidedRunLayout
@@ -413,13 +412,6 @@ def _parser() -> argparse.ArgumentParser:
         choices=("drop", "pad_mask"),
         default="drop",
     )
-    parser.add_argument(
-        "--guide-length-bucket",
-        action="append",
-        default=[],
-        metavar="MAX_UNITS:MAX_BOUNDARIES",
-        help="repeat to override the automatic observed-length buckets",
-    )
     parser.add_argument("--max-boundaries", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
     parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
@@ -445,8 +437,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _run_from_args(args: argparse.Namespace) -> Any:
-    bucket_specs = getattr(args, "guide_length_bucket", [])
-    guide_length_buckets = tuple(parse_guide_length_bucket(spec) for spec in bucket_specs) or None
     accumulation_steps = getattr(args, "gradient_accumulation_steps", 1)
     run_dir = getattr(args, "run_dir", None)
     checkpoint_dir = getattr(args, "checkpoint_dir", None)
@@ -480,7 +470,6 @@ def _run_from_args(args: argparse.Namespace) -> Any:
         guide_cache_max_bytes=getattr(args, "guide_cache_max_bytes", 256 * 1024 * 1024),
         device_prefetch_size=getattr(args, "device_prefetch_size", 2),
         require_all_tasks=True,
-        guide_length_buckets=guide_length_buckets,
         remainder_strategy=getattr(args, "remainder_strategy", "drop"),
         gradient_accumulation_steps=accumulation_steps,
     )

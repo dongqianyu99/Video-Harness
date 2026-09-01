@@ -204,7 +204,6 @@ def test_worker_factory_uses_pickled_parent_snapshot_without_catalog_reload(
         ),
         guide_plans=(plan,),
         materializer_config=_config(),
-        materializer_configs_by_guide={},
     )
     assert factory.document_snapshots[0].document == {
         "document_id": "doc",
@@ -219,7 +218,7 @@ def test_worker_factory_uses_pickled_parent_snapshot_without_catalog_reload(
     assert frame_loader.calls[0][0]["document_id"] == "doc"
 
 
-def test_resolver_uses_guide_specific_bucket() -> None:
+def test_resolver_uses_shared_maximum_shape() -> None:
     record, catalog, plan = _setup()
     resolver = VideoHarnessGuideResolver(
         document_catalog=catalog,
@@ -227,8 +226,7 @@ def test_resolver_uses_guide_specific_bucket() -> None:
         dataset_root=Path("/dataset"),
         boundary_tokenizer=_Tokenizer(4),
         transition_tokenizer=_Tokenizer(5),
-        materializer_config=_config(max_boundaries=4, max_units=3),
-        materializer_configs_by_guide={0: _config(max_boundaries=3, max_units=2)},
+        materializer_config=_config(max_boundaries=3, max_units=2),
         frame_loader=_FrameLoader(),
         plan_builder=lambda *_args, **_kwargs: plan,
     )

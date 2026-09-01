@@ -91,10 +91,8 @@ def test_argument_entry_builds_task_level_data_config(monkeypatch, tmp_path: Pat
     data = captured["run_config"].guided_data
     assert (data.guides_per_batch, data.queries_per_guide) == (2, 3)
     assert (data.guide_boundary_num_queries, data.guide_transition_num_queries) == (12, 8)
-    assert data.guide_length_buckets is None
     assert captured["run_config"].base_params_path == tmp_path / "base"
 
-    args.guide_length_bucket = ["1:2"]
     args.remainder_strategy = "pad_mask"
     args.gradient_accumulation_steps = 2
     args.reference_global_batch_size = 4
@@ -102,7 +100,6 @@ def test_argument_entry_builds_task_level_data_config(monkeypatch, tmp_path: Pat
     _train._run_from_args(args)  # noqa: SLF001
     formal_data = captured["run_config"].guided_data
     assert formal_data.require_all_tasks
-    assert formal_data.guide_length_buckets[0].bucket_id == "u1-b2"
     assert formal_data.remainder_strategy == "pad_mask"
     assert formal_data.gradient_accumulation_steps == 2
     assert captured["run_config"].gradient_accumulation_steps == 2

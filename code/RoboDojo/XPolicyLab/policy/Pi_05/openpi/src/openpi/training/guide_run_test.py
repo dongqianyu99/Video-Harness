@@ -77,10 +77,9 @@ def test_resume_rejects_config_and_runtime_data_drift(tmp_path: Path):
         "catalog_build_id": "build",
         "catalog_digest": "catalog",
         "task_sample_digest": "samples",
-        "guide_bucket_digest": "buckets",
         "guide_representation_digest": "representation",
-        "guide_length_buckets": ["u1-b2", "u2-b3"],
-        "guide_bucket_counts": [["u1-b2", 4]],
+        "guide_max_units": 2,
+        "guide_max_boundaries": 3,
         "guide_boundary_num_queries": 8,
         "guide_transition_num_queries": 4,
         "guides_per_batch": 2,
@@ -110,11 +109,11 @@ def test_resume_rejects_config_and_runtime_data_drift(tmp_path: Path):
             run_config=resumed,
             runtime_data={**data, "catalog_digest": "changed"},
         )
-    with pytest.raises(ValueError, match="guide_length_buckets"):
+    with pytest.raises(ValueError, match="guide_max_units"):
         validate_guided_run_resume(
             layout,
             run_config=resumed,
-            runtime_data={**data, "guide_length_buckets": ["u1-b2"]},
+            runtime_data={**data, "guide_max_units": 1},
         )
 
 

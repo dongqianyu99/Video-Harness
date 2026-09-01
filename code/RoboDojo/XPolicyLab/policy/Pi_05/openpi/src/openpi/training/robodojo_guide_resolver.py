@@ -79,7 +79,6 @@ class RoboDojoGuideResolverFactory:
     document_snapshots: tuple[GuideDocumentSnapshot, ...]
     guide_plans: tuple[Any, ...]
     materializer_config: GuideMaterializerConfig
-    materializer_configs_by_guide: Mapping[int, GuideMaterializerConfig]
 
     def __post_init__(self) -> None:
         record_ids = tuple(record.document_id for record in self.guide_records)
@@ -104,7 +103,6 @@ class RoboDojoGuideResolverFactory:
             boundary_tokenizer=boundary_tokenizer,
             transition_tokenizer=transition_tokenizer,
             materializer_config=self.materializer_config,
-            materializer_configs_by_guide=self.materializer_configs_by_guide,
             plans_by_document={
                 plan.document_id: plan for plan in self.guide_plans
             },
@@ -275,7 +273,6 @@ class VideoHarnessGuideResolver:
         boundary_tokenizer: Any,
         transition_tokenizer: Any,
         materializer_config: GuideMaterializerConfig,
-        materializer_configs_by_guide: Mapping[int, GuideMaterializerConfig] | None = None,
         plans_by_document: Mapping[str, Any] | None = None,
         frame_loader: Any | None = None,
         plan_builder: Callable[..., Any] | None = None,
@@ -299,9 +296,6 @@ class VideoHarnessGuideResolver:
         self._boundary_tokenizer = boundary_tokenizer
         self._transition_tokenizer = transition_tokenizer
         self._materializer_config = materializer_config
-        self._materializer_configs_by_guide = (
-            {} if materializer_configs_by_guide is None else dict(materializer_configs_by_guide)
-        )
         if plans_by_document is not None and plan_builder is not None:
             raise ValueError("provide plans_by_document or plan_builder, not both")
         self._plans_by_document = (
@@ -354,10 +348,7 @@ class VideoHarnessGuideResolver:
                 boundaries_decoder=decode_boundaries,
                 boundary_tokenizer=self._boundary_tokenizer,
                 transition_tokenizer=self._transition_tokenizer,
-                config=self._materializer_configs_by_guide.get(
-                    record.guide_index,
-                    self._materializer_config,
-                ),
+                config=self._materializer_config,
             )
             if not isinstance(guide, GuideInput):
                 raise ValueError(f"materialize_guide returned {type(guide).__name__}, expected GuideInput")

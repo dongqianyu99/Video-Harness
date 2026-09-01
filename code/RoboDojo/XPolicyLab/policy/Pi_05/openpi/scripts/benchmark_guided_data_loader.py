@@ -14,7 +14,6 @@ import numpy as np
 
 from openpi.models.guide_inputs import query_mask_or_ones
 from openpi.models.guide_inputs import validate_guide_conditioned_batch
-from openpi.training.guide_buckets import parse_guide_length_bucket
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
 
@@ -99,13 +98,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-cache-max-bytes", type=int, default=256 * 1024 * 1024)
     parser.add_argument("--remainder-strategy", choices=("drop", "pad_mask"), default="drop")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument(
-        "--guide-length-bucket",
-        action="append",
-        default=[],
-        metavar="MAX_UNITS:MAX_BOUNDARIES",
-        help="repeat to override the automatic observed-length buckets",
-    )
     parser.add_argument("--max-boundaries", type=int, required=True)
     parser.add_argument("--max-units", type=int, required=True)
     parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
@@ -141,7 +133,6 @@ def main(argv: list[str] | None = None) -> int:
         guide_cache_entries=args.guide_cache_entries,
         guide_cache_max_bytes=args.guide_cache_max_bytes,
         require_all_tasks=True,
-        guide_length_buckets=(tuple(parse_guide_length_bucket(spec) for spec in args.guide_length_bucket) or None),
         remainder_strategy=args.remainder_strategy,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
     )
