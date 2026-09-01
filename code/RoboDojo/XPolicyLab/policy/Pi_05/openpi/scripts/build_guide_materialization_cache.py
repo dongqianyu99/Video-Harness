@@ -7,6 +7,7 @@ from pathlib import Path
 
 from openpi.models.guide_materializer import GuideMaterializerConfig
 from openpi.models.tokenizer import PaligemmaTokenizer
+from openpi.training import robodojo_defaults as _defaults
 from openpi.training.guide_dataset import GuideCatalog
 from openpi.training.guide_materialization_cache import ensure_guide_materialization_cache
 from openpi.training.robodojo_guide_data import _build_guide_plans
@@ -18,13 +19,25 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build or fully validate the persistent RoboDojo GuideInput cache."
     )
-    parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--documents-root", type=Path, required=True)
-    parser.add_argument("--guide-materialization-cache-root", type=Path, required=True)
-    parser.add_argument("--max-boundaries", type=int, required=True)
-    parser.add_argument("--max-units", type=int, required=True)
-    parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
-    parser.add_argument("--max-transition-text-tokens", type=int, required=True)
+    parser.add_argument("--dataset-root", type=Path, default=_defaults.ROBODOJO_DATASET_ROOT)
+    parser.add_argument("--documents-root", type=Path, default=_defaults.GUIDE_DOCUMENTS_ROOT)
+    parser.add_argument(
+        "--guide-materialization-cache-root",
+        type=Path,
+        default=_defaults.GUIDE_MATERIALIZATION_CACHE_ROOT,
+    )
+    parser.add_argument("--max-boundaries", type=int, default=_defaults.MAX_BOUNDARIES)
+    parser.add_argument("--max-units", type=int, default=_defaults.MAX_UNITS)
+    parser.add_argument(
+        "--max-boundary-text-tokens",
+        type=int,
+        default=_defaults.MAX_BOUNDARY_TEXT_TOKENS,
+    )
+    parser.add_argument(
+        "--max-transition-text-tokens",
+        type=int,
+        default=_defaults.MAX_TRANSITION_TEXT_TOKENS,
+    )
     parser.add_argument("--guide-boundary-num-queries", type=int, default=8)
     parser.add_argument("--guide-transition-num-queries", type=int, default=4)
     return parser

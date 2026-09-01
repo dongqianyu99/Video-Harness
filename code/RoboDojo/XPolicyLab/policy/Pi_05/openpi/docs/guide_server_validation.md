@@ -13,20 +13,17 @@ and simulator evaluation remain separate gates.
 ## Environment
 
 ```bash
-export OPENPI_DIR=/path/to/Video-Harness/code/RoboDojo/XPolicyLab/policy/Pi_05/openpi
-export VIDEO_HARNESS_DIR=/path/to/Video-Harness/code/VideoHarness
-export ROBODOJO_DATASET_ROOT=/path/to/RoboDojo_lerobot_v30_video
-export GUIDE_DOCUMENTS_ROOT=/path/to/documents-openai
+source /path/to/Video-Harness/scripts/env.sh
+export OPENPI_DIR="$VIDEO_HARNESS_ROOT/code/RoboDojo/XPolicyLab/policy/Pi_05/openpi"
+export VIDEO_HARNESS_DIR="$VIDEO_HARNESS_ROOT/code/VideoHarness"
 export GUIDE_MATERIALIZATION_CACHE_ROOT=/path/to/cache/robodojo-guides
 export PI05_BASE_PARAMS=/path/to/pi05_base/params
-export GUIDED_RUN_ROOT=/path/to/runs/guided-task-pool
-
 export NATIVE_CONFIG=pi05_base_aloha_full_sim_arx-x5_seed_0
-export LEROBOT_REPO_ID=RoboDojo_sim_arx-x5_v30
-export GUIDE_GROUPS=4
+export LEROBOT_REPO_ID=RoboDojo_lerobot_v30_video
+export GUIDE_GROUPS=1
 export QUERIES_PER_GUIDE=64
-export MAX_BOUNDARIES=64
-export MAX_UNITS=32
+export MAX_BOUNDARIES=63
+export MAX_UNITS=62
 export MAX_BOUNDARY_TEXT_TOKENS=128
 export MAX_TRANSITION_TEXT_TOKENS=128
 export BOUNDARY_QUERIES=8
@@ -169,7 +166,7 @@ uv run python scripts/train_guided.py \
   --max-transition-text-tokens "$MAX_TRANSITION_TEXT_TOKENS" \
   --guide-boundary-num-queries "$BOUNDARY_QUERIES" \
   --guide-transition-num-queries "$TRANSITION_QUERIES" \
-  --gradient-accumulation-steps 1 \
+  --gradient-accumulation-steps 4 \
   --reference-global-batch-size 256 \
   --num-workers 8 \
   --num-train-steps 60000 \
@@ -181,7 +178,7 @@ uv run python scripts/train_guided.py \
   --wandb-enabled
 ```
 
-The effective batch is `G * Q * gradient_accumulation_steps`. Resume is valid
+The default effective batch is `1 * 64 * 4 = 256`. Resume is valid
 only when the catalog, task-sample index, camera order, shared maximum Guide
 shape, token budgets, and Boundary/Transition capacities match the recorded run. Resume restores
 TrainState, optimizer, EMA, and step but starts a fresh sampler shuffle.

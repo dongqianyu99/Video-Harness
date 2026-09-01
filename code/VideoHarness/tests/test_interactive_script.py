@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = PROJECT_ROOT.parents[1]
 
 
 def test_interactive_runner_has_side_effect_free_help() -> None:
@@ -68,8 +69,9 @@ def test_all_guidance_build_entrypoints_exclude_dlc() -> None:
 
 
 def test_download_script_uses_locked_hf_cli_without_mirror() -> None:
-    script = (PROJECT_ROOT / "scripts" / "download_robodojo.sh").read_text()
-    assert "uv run hf download RoboDojo-Benchmark/RoboDojo" in script
+    script = (WORKSPACE_ROOT / "scripts" / "download_robodojo.sh").read_text()
+    assert "hf download RoboDojo-Benchmark/RoboDojo" in script
     assert "--type dataset" in script
+    assert "e2f40904e7b039b46e512e1443ad5055984d3344" in script
     assert "hfd" not in script
     assert "HF_ENDPOINT" not in script

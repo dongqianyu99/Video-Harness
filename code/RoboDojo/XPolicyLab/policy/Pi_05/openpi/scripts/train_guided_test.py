@@ -23,6 +23,28 @@ import openpi.training.sharding as stock_sharding
 from scripts import train_guided as _train
 
 
+def test_cli_uses_standard_robodojo_paths_and_capacity_defaults(tmp_path):
+    args = _train._parser().parse_args(  # noqa: SLF001
+        [
+            "--native-config-name",
+            "pi05_base_aloha_full_sim_arx-x5_seed_0",
+            "--base-params-path",
+            str(tmp_path / "base" / "params"),
+            "--experiment-name",
+            "guided",
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--num-train-steps",
+            "1",
+        ]
+    )
+
+    assert args.repo_id == "RoboDojo_lerobot_v30_video"
+    assert (args.max_boundaries, args.max_units) == (63, 62)
+    assert (args.guides_per_batch, args.queries_per_guide) == (1, 64)
+    assert args.gradient_accumulation_steps == 4
+
+
 def _guided_data(tmp_path: Path) -> RoboDojoGuidedDataConfig:
     return RoboDojoGuidedDataConfig(
         repo_id="fake",

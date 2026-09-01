@@ -133,12 +133,10 @@ ffmpeg -version | head -n 1
 echo
 echo "== Video Harness: RoboDojo download =="
 echo "The joint-space LeRobot v3 release requires approximately 120 GB."
-default_repo_root="${repository_root}/data/robodojo-hf"
-robodojo_repo_root=$(prompt_default "RoboDojo download directory" "${default_repo_root}")
-mkdir -p "${robodojo_repo_root}"
-df -h "${robodojo_repo_root}" | tail -n 1
+mkdir -p "${repository_root}/data"
+df -h "${repository_root}/data" | tail -n 1
 
-dataset_root="${robodojo_repo_root}/data/RoboDojo_lerobot_v30_video"
+dataset_root="${repository_root}/data/RoboDojo_lerobot_v30_video"
 if [[ -f "${dataset_root}/meta/info.json" ]]; then
   echo "An existing dataset was found. The hf downloader can verify and resume it."
 fi
@@ -148,9 +146,9 @@ if ! confirm_yes "Download or resume the official RoboDojo files now?"; then
     exit 1
   fi
 else
-  scripts/download_robodojo.sh "${robodojo_repo_root}"
+  "${repository_root}/scripts/download_robodojo.sh"
 fi
-scripts/verify_robodojo.sh "${dataset_root}"
+"${repository_root}/scripts/verify_robodojo.sh" "${dataset_root}"
 
 echo
 echo "== Video Harness: annotation provider =="
@@ -267,7 +265,7 @@ if confirm "Enable debug mode and retain Unit videos, frames, sheets, crops, and
 fi
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-default_output="${repository_root}/run/video-harness-${provider}-${timestamp}"
+default_output="${repository_root}/data/video-harness/${provider}-${timestamp}"
 output_root=$(prompt_default "New output directory" "${default_output}")
 if [[ -e "${output_root}" ]]; then
   if [[ ! -d "${output_root}" || -n "$(find "${output_root}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then

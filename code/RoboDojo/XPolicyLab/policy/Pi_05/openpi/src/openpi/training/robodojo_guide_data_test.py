@@ -263,6 +263,19 @@ def test_config_requires_cache_root_disjoint_from_source_roots(tmp_path):
         )
 
 
+def test_real_repo_id_must_resolve_to_dataset_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path / "data"))
+    _guide_data._validate_repo_id_root(  # noqa: SLF001
+        "RoboDojo_lerobot_v30_video",
+        tmp_path / "data" / "RoboDojo_lerobot_v30_video",
+    )
+    with pytest.raises(ValueError, match="different datasets"):
+        _guide_data._validate_repo_id_root(  # noqa: SLF001
+            "another-repo",
+            tmp_path / "data" / "RoboDojo_lerobot_v30_video",
+        )
+
+
 def test_factory_builds_global_guidance_first_batch_and_three_view_input(tmp_path):
     config = _config(tmp_path)
     catalog = _Catalog()

@@ -14,6 +14,7 @@ import numpy as np
 
 from openpi.models.guide_inputs import query_mask_or_ones
 from openpi.models.guide_inputs import validate_guide_conditioned_batch
+from openpi.training import robodojo_defaults as _defaults
 from openpi.training.robodojo_guide_data import RoboDojoGuidedDataConfig
 from openpi.training.robodojo_guide_data import create_robodojo_guided_data_loader
 
@@ -86,23 +87,39 @@ def benchmark_loader(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Benchmark the real grouped Guide data path without loading Pi0.5.")
     parser.add_argument("--native-config-name", required=True)
-    parser.add_argument("--repo-id", required=True)
-    parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--documents-root", type=Path, required=True)
-    parser.add_argument("--guide-materialization-cache-root", type=Path, required=True)
-    parser.add_argument("--guides-per-batch", type=int, required=True)
-    parser.add_argument("--queries-per-guide", type=int, required=True)
+    parser.add_argument("--repo-id", default=_defaults.ROBODOJO_REPO_ID)
+    parser.add_argument("--dataset-root", type=Path, default=_defaults.ROBODOJO_DATASET_ROOT)
+    parser.add_argument("--documents-root", type=Path, default=_defaults.GUIDE_DOCUMENTS_ROOT)
+    parser.add_argument(
+        "--guide-materialization-cache-root",
+        type=Path,
+        default=_defaults.GUIDE_MATERIALIZATION_CACHE_ROOT,
+    )
+    parser.add_argument("--guides-per-batch", type=int, default=_defaults.GUIDES_PER_BATCH)
+    parser.add_argument("--queries-per-guide", type=int, default=_defaults.QUERIES_PER_GUIDE)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--worker-torch-threads", type=int, default=1)
     parser.add_argument("--guide-cache-entries", type=int, default=2)
     parser.add_argument("--guide-cache-max-bytes", type=int, default=256 * 1024 * 1024)
     parser.add_argument("--remainder-strategy", choices=("drop", "pad_mask"), default="drop")
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--max-boundaries", type=int, required=True)
-    parser.add_argument("--max-units", type=int, required=True)
-    parser.add_argument("--max-boundary-text-tokens", type=int, required=True)
-    parser.add_argument("--max-transition-text-tokens", type=int, required=True)
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=_defaults.GRADIENT_ACCUMULATION_STEPS,
+    )
+    parser.add_argument("--max-boundaries", type=int, default=_defaults.MAX_BOUNDARIES)
+    parser.add_argument("--max-units", type=int, default=_defaults.MAX_UNITS)
+    parser.add_argument(
+        "--max-boundary-text-tokens",
+        type=int,
+        default=_defaults.MAX_BOUNDARY_TEXT_TOKENS,
+    )
+    parser.add_argument(
+        "--max-transition-text-tokens",
+        type=int,
+        default=_defaults.MAX_TRANSITION_TEXT_TOKENS,
+    )
     parser.add_argument("--guide-boundary-num-queries", type=int, default=8)
     parser.add_argument("--guide-transition-num-queries", type=int, default=4)
     parser.add_argument("--warmup-batches", type=int, default=8)

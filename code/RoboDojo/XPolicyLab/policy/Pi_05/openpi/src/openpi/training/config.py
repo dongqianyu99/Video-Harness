@@ -636,7 +636,7 @@ _CONFIGS = [
         name="pi05_base_aloha_full_sim_arx-x5_seed_0",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
-            repo_id="RoboDojo_sim_arx-x5_v30",
+            repo_id="RoboDojo_lerobot_v30_video",
             assets=AssetsConfig(
                 assets_dir=str(_ROBODOJO_ASSETS_DIR),
                 asset_id="arx_x5_sim",
@@ -671,7 +671,7 @@ _CONFIGS = [
         name="pi05_base_aloha_full_sim_arx-x5_seed_1",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
-            repo_id="RoboDojo_sim_arx-x5_v30",
+            repo_id="RoboDojo_lerobot_v30_video",
             assets=AssetsConfig(
                 assets_dir=str(_ROBODOJO_ASSETS_DIR),
                 asset_id="arx_x5_sim",
@@ -706,7 +706,7 @@ _CONFIGS = [
         name="pi05_base_aloha_full_sim_arx-x5_seed_2",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
-            repo_id="RoboDojo_sim_arx-x5_v30",
+            repo_id="RoboDojo_lerobot_v30_video",
             assets=AssetsConfig(
                 assets_dir=str(_ROBODOJO_ASSETS_DIR),
                 asset_id="arx_x5_sim",

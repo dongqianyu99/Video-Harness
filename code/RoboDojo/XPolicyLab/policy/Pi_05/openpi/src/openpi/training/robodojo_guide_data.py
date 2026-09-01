@@ -5,6 +5,7 @@ import copy
 import dataclasses
 from dataclasses import dataclass
 import importlib
+import os
 from pathlib import Path
 import statistics
 from typing import Any
@@ -129,6 +130,22 @@ class RoboDojoGuidedDataConfig:
 def _require_path(path: Path, *, name: str) -> None:
     if not path.is_dir():
         raise ValueError(f"{name} must be an existing directory: {path}")
+
+
+def _validate_repo_id_root(repo_id: str, dataset_root: Path) -> None:
+    if repo_id == "fake":
+        return
+    lerobot_home = os.getenv("HF_LEROBOT_HOME")
+    if not lerobot_home:
+        raise ValueError(
+            "HF_LEROBOT_HOME must be set so repo_id and dataset_root share one source"
+        )
+    expected = (Path(lerobot_home).expanduser() / repo_id).resolve()
+    if expected != dataset_root.resolve():
+        raise ValueError(
+            "repo_id and dataset_root resolve to different datasets: "
+            f"expected {expected}, got {dataset_root.resolve()}"
+        )
 
 
 def _replace_repo_id(data_config: Any, repo_id: str) -> Any:
@@ -352,6 +369,10 @@ def create_robodojo_guided_data_loader(
         raise ValueError("skip_norm_stats=True is allowed only for repo_id='fake'")
     _require_path(guided_data_config.dataset_root, name="dataset_root")
     _require_path(guided_data_config.documents_root, name="documents_root")
+    _validate_repo_id_root(
+        guided_data_config.repo_id,
+        guided_data_config.dataset_root,
+    )
     custom_dependencies = any(
         dependency is not None
         for dependency in (

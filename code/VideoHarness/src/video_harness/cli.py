@@ -30,6 +30,7 @@ from .hdf5_source import (
     load_hdf5_jpeg,
 )
 from .media import FFmpegFrameLoader
+from .paths import ROBODOJO_DATASET_ROOT, VIDEO_HARNESS_RUN_ROOT
 from .pipeline import EvidenceUnitPipeline
 from .reconciliation import reconcile_document
 from .robodojo import EpisodeRecord, load_info, read_episodes, summarize, validate_info
@@ -626,6 +627,8 @@ def _annotate_document(
 
 
 def _annotate(args: argparse.Namespace) -> int:
+    if args.output is None:
+        args.output = VIDEO_HARNESS_RUN_ROOT / f"documents.{args.provider}.jsonl"
     resume = bool(getattr(args, "resume", False))
     workers = int(getattr(args, "workers", 1))
     num_shards = int(getattr(args, "num_shards", 1))
@@ -1163,14 +1166,14 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = subparsers.add_parser(
         "inspect", help="validate the public RoboDojo Pi_05 source"
     )
-    inspect.add_argument("--dataset-root", type=Path, required=True)
+    inspect.add_argument("--dataset-root", type=Path, default=ROBODOJO_DATASET_ROOT)
     inspect.set_defaults(handler=_inspect)
 
     build = subparsers.add_parser(
         "build", help="build source inventory and draft Documents"
     )
-    build.add_argument("--dataset-root", type=Path, required=True)
-    build.add_argument("--output-root", type=Path, required=True)
+    build.add_argument("--dataset-root", type=Path, default=ROBODOJO_DATASET_ROOT)
+    build.add_argument("--output-root", type=Path, default=VIDEO_HARNESS_RUN_ROOT)
     build.add_argument("--sample-hz", type=float, default=1.0)
     build.add_argument("--max-tasks", type=int)
     build.add_argument("--episodes-per-task", type=int)
@@ -1188,9 +1191,13 @@ def build_parser() -> argparse.ArgumentParser:
         "annotate",
         help="compile structured transition evidence with a mock or VLM provider",
     )
-    annotate.add_argument("--documents", type=Path, required=True)
-    annotate.add_argument("--output", type=Path, required=True)
-    annotate.add_argument("--dataset-root", type=Path, required=True)
+    annotate.add_argument(
+        "--documents",
+        type=Path,
+        default=VIDEO_HARNESS_RUN_ROOT / "documents.jsonl",
+    )
+    annotate.add_argument("--output", type=Path)
+    annotate.add_argument("--dataset-root", type=Path, default=ROBODOJO_DATASET_ROOT)
     annotate.add_argument(
         "--provider", choices=("mock", "openai", "anthropic"), required=True
     )

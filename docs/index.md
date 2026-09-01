@@ -13,14 +13,15 @@ documents-openai/
 
 Start here:
 
+- [Standard Data and Training Workflow](data-and-training.md): canonical `data/`
+  layout, pinned RoboDojo download, real length statistics, Guide cache, and
+  guided Pi0.5 defaults.
 - [User Guide](getting-started.md): environment setup, RoboDojo download, one-episode
   debug run, complete multi-worker processing, resume, and run summaries.
 - [Architecture](architecture.md): temporal representation, quality gates, batch
   execution, failure recovery, and output contracts.
 - [Evidence Protocol](evidence-prompt.md): the two-call VLM evidence contract, camera
   authority, and automatic repair behavior.
-- [Architecture Decision](adr/0001-unify-document-audit-and-repair.md): why semantic
-  review and mutation are centralized at the Document level.
 
 The canonical Pi0.5 interface is the task-grouped per-episode Document directory. The
 aggregate JSONL produced by annotation is retained only for merge and reporting

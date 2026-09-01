@@ -1,7 +1,8 @@
 # Video Harness User Guide
 
-This guide covers the supported release workflow for the public RoboDojo LeRobot v3
-dataset. Run commands from `code/VideoHarness`.
+This guide covers the VideoHarness compiler workflow for the public RoboDojo LeRobot
+v3 dataset. The repository-wide data and Pi0.5 conventions are defined in
+[Standard Data and Guided Training](data-and-training.md).
 
 ## Requirements
 
@@ -18,7 +19,9 @@ With debug disabled, the full 3,400-episode output is expected to occupy well be
 ## 1. Configure the environment
 
 ```bash
-cd Video-Harness/code/VideoHarness
+cd Video-Harness
+source scripts/env.sh
+cd code/VideoHarness
 ```
 
 Install `uv` if needed:
@@ -48,14 +51,13 @@ machine.
 
 ## 2. Download RoboDojo
 
-Choose a persistent location outside the source tree:
+Use the repository's ignored `data/` directory:
 
 ```bash
-export ROBODOJO_REPO_ROOT=/path/to/robodojo-hf
-scripts/download_robodojo.sh "$ROBODOJO_REPO_ROOT"
-
-export ROBODOJO_DATASET_ROOT="$ROBODOJO_REPO_ROOT/data/RoboDojo_lerobot_v30_video"
-scripts/verify_robodojo.sh "$ROBODOJO_DATASET_ROOT"
+cd ../..
+scripts/download_robodojo.sh
+scripts/verify_robodojo.sh
+cd code/VideoHarness
 ```
 
 The downloader resumes existing files from the public
@@ -114,7 +116,7 @@ The annotation limit below processes exactly one complete episode. The build is
 document-only and may select a single episode for a bounded smoke run.
 
 ```bash
-export VH_DEBUG_RUN=/path/to/runs/video-harness-debug
+export VH_DEBUG_RUN="$VIDEO_HARNESS_DATA_ROOT/video-harness/debug"
 
 uv run video-harness build \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \
@@ -161,7 +163,7 @@ Units. Expect at least approximately 150,000 logical VLM calls before repair or 
 Run a bounded debug episode first and confirm provider limits before starting.
 
 ```bash
-export VH_RUN=/path/to/runs/video-harness-full
+export VH_RUN="$VIDEO_HARNESS_RUN_ROOT"
 
 uv run video-harness build \
   --dataset-root "$ROBODOJO_DATASET_ROOT" \

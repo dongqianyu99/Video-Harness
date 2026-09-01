@@ -1,3 +1,3 @@
 # Video Harness
 
-[Read the documentation](docs/index.md).
+[Read the repository documentation](../../docs/index.md).
